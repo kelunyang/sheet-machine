@@ -115,8 +115,8 @@
           </template>
         </el-table-column>
       </el-table>
+      <div class="footerText">Developer: Kelunyang@LKSH 2022 <a style="color:#CCC" target="_blank" href="https://github.com/kelunyang/sheet-machine" >GITHUB</a></div>
     </el-space>
-    <el-footer class="footerText">Kelunyang@LKSH 2022<el-link type="info" href="https://github.com/kelunyang/GAS-Sheet" >GITHUB</el-link></el-footer>
   </el-dialog>
   <el-dialog
     :show-close="false"
@@ -138,7 +138,7 @@
     <el-alert :title="saveSuccessed ? '儲存成功' : '儲存失敗'" :type="saveSuccessed ? 'success' : 'error'" show-icon v-if="saveSuccessed !== undefined">
       <template #default>
         <span style="font-size: 1.5em">
-          {{ saveSuccessed ? "已寫入" : errorLog.join(',') }}
+          {{ saveSuccessed ? "已寫入，你可以關閉視窗或是選別的問卷囉" : "發生錯誤：" + errorLog.join(',') }}
         </span>
       </template>
     </el-alert>
@@ -180,8 +180,8 @@
       <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="loadSheet()">回到問卷列表</el-button>
       <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="viewLatest()">查看最後一位填寫者以及你是否曾填寫過</el-button>
       <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="viewStat()">查看各班完成量</el-button>
+      <div class="footerText">Developer: Kelunyang@LKSH 2022 <a style="color:#CCC" target="_blank" href="https://github.com/kelunyang/sheet-machine" >GITHUB</a></div>
     </el-space>
-    <el-footer class="footerText">Kelunyang@LKSH 2022<el-link type="info" href="https://github.com/kelunyang/GAS-Sheet" >GITHUB</el-link></el-footer>
   </el-dialog>
   <el-dialog
     :show-close="false"
@@ -300,6 +300,7 @@
             list[i].id = uuidv4();
           }
           oriobj.sheets = list;
+          oriobj.saveSuccessed = undefined;
           oriobj.sheetsDialog.show = true;
           oriobj.loading = false;
         })
@@ -370,15 +371,17 @@
                 let pConfig = column.content.split("|");
                 num = parseInt(pConfig[0]);
               } else if(/N/.test(column.format)) {
+                console.dir(column.content);
                 if(column.content !== "") {
                   num = parseInt(column.content);
                 }
               }
+              let zeroIndicator = num === 0 ? "0" : "";
               let numLength = num > 0 ? "{" + num + "}" : "*";
-              if(new RegExp("^\\d" + numLength + "$").test(column.value)) {
+              if(new RegExp("^" + zeroIndicator + "\\d" + numLength + "$").test(column.value)) {
                 column.status = "";
               } else {
-                column.status = "這裡應該輸入長度為" +  num + "的數字";
+                column.status = zeroIndicator ? "這裡應該要輸入0開頭的數字" : "這裡應該輸入長度為" +  num + "的數字";
               }
             } else if(/I/.test(column.format)) {
               if(/^[A-Z][12]\d{8}$/.test(column.value)) {
@@ -609,7 +612,7 @@
               oriobj.scriptError.message = "";
               oriobj.loading = false;
               if(!columns) {
-                oriobj.scriptError.message = "登入失敗，請再次確認你的個人資訊，請注意，如果多次失敗，這代表你存在校務行政系統裡的基本資訊應該是錯的，請速洽教務處註冊組";
+                oriobj.scriptError.message = "登入失敗，請再次確認你的個人資訊，請注意，如果多次失敗，這代表你存在校務行政系統裡的基本資訊應該是錯的（請洽教務處註冊組）或者是你不在這份問卷許可的填寫者名單中";
               } else {
                 oriobj.columnDB = _.filter(columns, (column) => {
                   return /F|C|G/.test(column.type);

@@ -246,8 +246,9 @@ function writeRecord(referSSID, recordSSID, auth, record, accept) {
                       numLength = parseInt(column.content);
                     }
                   }
+                  let zeroIndicator = numLength === 0 ? "0" : "";
                   numLength = numLength > 0 ? "{" + numLength + "}" : "*";
-                  if(new RegExp("^\\d" + numLength + "$").test(data.value)) {
+                  if(new RegExp("^" + zeroIndicator + "\\d" + numLength + "$").test(data.value)) {
                     column.value = "📝"+data.value;
                   } else {
                     proceedWrite = false;
