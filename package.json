@@ -1,0 +1,32 @@
+{
+  "name": "sheet-machine",
+  "version": "1.0.0",
+  "description": "",
+  "scripts": {
+    "build": "parcel build ./src/index.html --dist-dir ./appscript",
+    "glogin": "clasp login",
+    "glogout": "clasp logout",
+    "gpull": "clasp pull",
+    "gpush": "clasp push",
+    "gcreate": "clasp create --title \"sheet-machine\" --rootDir ./appscript",
+    "gstart": "clasp push --watch"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@types/google-apps-script": "^1.0.54",
+    "clasp": "^1.0.0",
+    "dayjs": "^1.11.5",
+    "element": "^0.1.4",
+    "element-plus": "^2.2.14",
+    "lodash": "^4.17.21",
+    "parcel": "^2.7.0",
+    "plus": "^0.1.0",
+    "uuid": "^8.3.2",
+    "vue": "^3.2.37",
+    "wave-ui": "^2.40.3"
+  },
+  "devDependencies": {
+    "@parcel/transformer-vue": "^2.7.0"
+  }
+}

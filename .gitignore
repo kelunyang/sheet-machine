@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.vscode/
+.parcel-cache/
+node_modules/*
+dist/*
+.vscode/*
+.parcel-cache/*
+appscript/*.css
+appscript/*.map
