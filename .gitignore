@@ -8,3 +8,4 @@ dist/*
 .parcel-cache/*
 appscript/*.css
 appscript/*.map
+.clasp.json

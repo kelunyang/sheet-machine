@@ -273,8 +273,12 @@ function writeRecord(referSSID, recordSSID, auth, record, accept) {
                   } else {
                     proceedWrite = false;
                   }
-                } else if(/T|D/.test(column.format)) {
-                  column.value = data.value.replace(/台北/,"臺北");
+                } else if(/T/.test(column.format)) {
+                  if(new RegExp(column.content).test(data.value)) {
+                    column.value = data.value.replace(/台北/,"臺北");
+                  } else {
+                    proceedWrite = false;
+                  }
                 } else if(/S/.test(column.format)) {
                   if(new RegExp(data.value).test(column.content)) {
                     column.value = data.value;

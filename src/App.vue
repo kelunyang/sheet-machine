@@ -371,7 +371,6 @@
                 let pConfig = column.content.split("|");
                 num = parseInt(pConfig[0]);
               } else if(/N/.test(column.format)) {
-                console.dir(column.content);
                 if(column.content !== "") {
                   num = parseInt(column.content);
                 }
@@ -401,8 +400,13 @@
               } else {
                 column.status = "這裡應該輸入電話號碼，如0912345678";
               }
-            } else if(/T|D/.test(column.format)) {
-              column.value = column.value.replace(/台北/,"臺北");
+            } else if(/T/.test(column.format)) {
+              if(new RegExp(column.content).test(column.value)) {
+                column.value = column.value.replace(/台北/,"臺北");
+                column.status = "";
+              } else {
+                column.status = "必須要包含以下關鍵字「" + column.content + "」";
+              }
             } else if(/S/.test(column.format)) {
               if(new RegExp(column.value).test(column.content)) {
                 column.status = "";
