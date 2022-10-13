@@ -22,8 +22,11 @@
     "lodash": "^4.17.21",
     "parcel": "^2.7.0",
     "plus": "^0.1.0",
+    "randomcolor": "^0.6.2",
+    "smooth-signature": "^1.0.12",
     "uuid": "^8.3.2",
     "vue": "^3.2.37",
+    "vue-esign": "^1.1.4",
     "wave-ui": "^2.40.3"
   },
   "devDependencies": {

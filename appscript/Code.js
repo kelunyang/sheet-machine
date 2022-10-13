@@ -1,9 +1,10 @@
 const _ = LodashGS.load();
+const appProperties = PropertiesService.getScriptProperties();
 
 function doGet(e) {
   var template = HtmlService.createTemplateFromFile('index')
   var html = template.evaluate()
-    .setTitle('林口高中註冊組線上問卷系統');
+    .setTitle(appProperties.getProperty('systemTitle'));
   
   var htmlOutput = HtmlService.createHtmlOutput(html);
   htmlOutput.addMetaTag('viewport', 'width=device-width, initial-scale=1');
@@ -11,9 +12,9 @@ function doGet(e) {
 }
 
 function getQList() {
-  let listSS = SpreadsheetApp.openById("1X_eia84M-lcIm8YS-hhOIiXGuYoHTGICLgL06UU3C1Q");
-  let listSheet = listSS.getSheetByName("本表勿刪");
-  let listRange = listSheet.getRange("A:F");
+  let listSS = SpreadsheetApp.openById(appProperties.getProperty('listSheetID'));
+  let listSheet = listSS.getSheets()[0];
+  let listRange = listSheet.getRange("A:K");
   let listArr = listRange.getValues();
   let lists = [];
   if(listArr.length > 1) {
@@ -26,53 +27,138 @@ function getQList() {
             name: row[0].toString().trim(),
             refer: row[1].toString().trim(),
             dueDate: parseInt(row[3].toString().trim()),
-            comment: row[4].toString().trim(),
-            loginTip: row[5].toString().trim(),
+            viewDate: parseInt(row[4].toString().trim()),
+            enableModify: row[5].toString().trim() === "否" ? false : true,
+            signatures: row[6].toString() === "" ? [] : row[6].toString().trim().split(";"),
+            comment: row[7].toString().trim(),
+            loginTip: row[8].toString().trim(),
+            submitTip: row[9].toString().trim(),
+            loginfailTip: row[10].toString().trim()
           })
         }
       }
     }
   }
-  return lists;
+  let outofDate = _.filter(lists, (item) => {
+    return item.dueDate < (new Date()).getTime();
+  });
+  for(let i=0; i<outofDate.length; i++) {
+    outofDate[i].signatures = [];
+    outofDate[i].enableModify = false;
+  }
+  return _.filter(lists, (item) => {
+    return item.viewDate > (new Date()).getTime();
+  });
 }
 
-function readRecord(referSSID, auth) {
+function readRecord(referSSID, recordSSID, auth) {
   if(authRecord(referSSID, auth)) {
-    let headers = getHeaders(referSSID);
-    let pkeys = _.filter(headers, (header) => {
-      return /P/.test(header.type);
+    let listSS = SpreadsheetApp.openById(appProperties.getProperty('listSheetID'));
+    let listSheet = listSS.getSheets()[0];
+    let listRange = listSheet.getRange("A:K");
+    let listArr = listRange.getValues();
+    let currentSheet = _.filter(listArr, (sheet) => {
+      if(sheet[1].toString().trim() === referSSID) {
+        if(sheet[2].toString().trim() === recordSSID) {
+          return true;
+        }
+      }
+      return false;
     });
-    if(pkeys.length > 0) {
-      let uKeys = _.filter(auth, (aObj) => {
-        return aObj.id === pkeys[0].id;
+    let signatures = [];
+    if(currentSheet.length > 0) {
+      let headers = getHeaders(referSSID);
+      let pkeys = _.filter(headers, (header) => {
+        return /P/.test(header.type);
       });
-      if(uKeys.length > 0) {
-        let referSS = SpreadsheetApp.openById(referSSID);
-        let referSheet = referSS.getSheetByName("參照表");
-        let referRange = referSheet.getDataRange();
-        let referArr = referRange.getValues();
-        let userRows = _.filter(referArr, (rObj) => {
-          return rObj[pkeys[0].pos].toString() === uKeys[0].value;
+      if(pkeys.length > 0) {
+        let uKeys = _.filter(auth, (aObj) => {
+          return aObj.id === pkeys[0].id;
         });
-        if(userRows.length > 0) {
-          for(let i=0; i<headers.length; i++) {
-            let column = headers[i];
-            if(/C/.test(column.type)) {
-              if(/I/.test(column.format)) {
-                let imgContent = userRows[0][column.pos].toString();
-                let files = DriveApp.searchFiles('parents in "16o9TvQOTHtSL6tI-GzbeSh8hCYFaEuiG" and title contains \'"' + imgContent + '"\'');
-                while (files.hasNext()) {
-                  var file = files.next();
-                  column.savedContent = file.getUrl();
+        if(uKeys.length > 0) {
+          let userRows = getUserRow(referSSID, auth);
+          if(userRows.length > 0) {
+            let recordSS = SpreadsheetApp.openById(recordSSID);
+            let recordSheet = recordSS.getSheets()[0];
+            let recordRange = recordSheet.getDataRange();
+            let recordArr = recordRange.getValues();
+            let userRecords = _.filter(recordArr, (arr) => {
+              return arr[2].toString() === uKeys[0].value;
+            });
+            let userRecord = userRecords.length > 0 ? userRecords[userRecords.length - 1] : undefined;
+            if(userRecord !== undefined) {
+              if(userRecord[3].toString() !== "") {
+                let signs = userRecord[3].toString().trim().split(";");
+                for(let i=0; i<signs.length; i++) {
+                  let file = DriveApp.getFileById(signs[i]);
+                  signatures.push(file.getUrl());
                 }
               }
-            } else if(/F|G/.test(column.type)) {
-              column.savedContent = userRows[0][column.pos].toString();
-              column.value = column.savedContent;
             }
-            column.pos = undefined;
+            for(let i=0; i<headers.length; i++) {
+              let column = headers[i];
+              column.lastInput = undefined;
+              if(/C/.test(column.type)) {
+                if(/F/.test(column.format)) {
+                  let imgContent = userRows[0][column.pos].toString();
+                  let storageID = column.content === "" ? appProperties.getProperty('universalStorageID') : column.content;
+                  let files = DriveApp.searchFiles('parents in "'+ storageID +'" and title contains "' + imgContent + '"');
+                  while(files.hasNext()) {
+                    var file = files.next();
+                    column.savedContent = file.getUrl();
+                  }
+                } else if(/T/.test(column.format)) {
+                  column.savedContent = userRows[0][column.pos].toString();
+                }
+              } else if(/F|G/.test(column.type)) {
+                column.savedContent = userRows[0][column.pos].toString();
+                column.value = column.savedContent;
+                if(/F/.test(column.type)) {
+                  if(/F/.test(column.format)) {
+                    let fileContent = userRows[0][column.pos].toString();
+                    let storageID = appProperties.getProperty('universalStorageID');
+                    let files = DriveApp.searchFiles('parents in "'+ storageID +'" and title contains "' + fileContent + '"');
+                    while (files.hasNext()) {
+                      var file = files.next();
+                      column.savedContent = file.getUrl();
+                    }
+                    if(userRecord !== undefined) {
+                      if(userRecord[column.pos + 5] != null) {
+                        fileContent = userRecord[column.pos + 5].toString().trim();
+                        if(fileContent !== "") {
+                          let file = DriveApp.getFileById(fileContent);
+                          column.lastInput = file.getUrl();
+                        }
+                      } else {
+                        column.lastInput = "";
+                      }
+                    }
+                    column.value = "";
+                  } else {
+                    if(userRecord !== undefined) {
+                      if(userRecord[column.pos + 5] != null) {
+                        column.lastInput = userRecord[column.pos + 5].toString();
+                        column.value = column.lastInput;
+                      } else {
+                        column.lastInput = "";
+                      }
+                    }
+                  }
+                }
+              }
+              column.pos = undefined;
+            }
+            return {
+              status: {
+                length: userRecords.length,
+                modified: userRecord !== undefined ? userRecord[1] : "",
+                lastTick: userRecord !== undefined ? userRecord[0] : "",
+                pkey: maskString(pkeys[0].id)
+              },
+              signatures: signatures,
+              headers: headers
+            };
           }
-          return headers;
         }
       }
     }
@@ -80,8 +166,30 @@ function readRecord(referSSID, auth) {
   return false;
 }
 
+function getUserRow(referSSID, auth) {
+  let referSS = SpreadsheetApp.openById(referSSID);
+  let referSheet = referSS.getSheets()[0];
+  let referRange = referSheet.getDataRange();
+  let referArr = referRange.getValues();
+  let headers = getHeaders(referSSID);
+  let pKey = _.filter(headers, (header) => {
+    return /P/.test(header.type);
+  });
+  if(pKey.length > 0) {
+    let uKey = _.filter(auth, (aObj) => {
+      return aObj.id === pKey[0].id;
+    });
+    if(uKey.length > 0) {
+      return _.filter(referArr, (row) => {
+        return row[pKey[0].pos].toString() === uKey[0].value;
+      })
+    }
+  }
+  return [];
+}
+
 function queryPC(address) {
-  let postCodeAPI = UrlFetchApp.fetch("https://kelunyang.duckdns.org/addr.php?address=" + address);
+  let postCodeAPI = UrlFetchApp.fetch(appProperties.getProperty('postCodeAPI') + address);
   return postCodeAPI.getContentText();
 }
 
@@ -96,7 +204,7 @@ function publicHeader(referSSID) {
 
 function getHeaders(referSSID) {
   let referSS = SpreadsheetApp.openById(referSSID);
-  let referSheet = referSS.getSheetByName("參照表");
+  let referSheet = referSS.getSheets()[0];
   let referRange = referSheet.getDataRange();
   let referArr = referRange.getValues();
   let headers = [];
@@ -128,26 +236,20 @@ function getHeaders(referSSID) {
 }
 
 function authRecord(referSSID, auth) {
-  let referSS = SpreadsheetApp.openById(referSSID);
-  let referSheet = referSS.getSheetByName("參照表");
-  let referRange = referSheet.getDataRange();
-  let referArr = referRange.getValues();
-  let headers = getHeaders(referSSID);
-  for(let i=0; i<auth.length; i++) {
-    auth[i].accept = false;
-  }
-  let pKey = _.filter(headers, (header) => {
-    return /P/.test(header.type);
-  });
-  if(pKey.length > 0) {
-    let uKey = _.filter(auth, (aObj) => {
-      return aObj.id === pKey[0].id;
+  let userRow = getUserRow(referSSID, auth);
+  if(userRow.length > 0) {
+    let headers = getHeaders(referSSID);
+    for(let i=0; i<auth.length; i++) {
+      auth[i].accept = false;
+    }
+    let pKey = _.filter(headers, (header) => {
+      return /P/.test(header.type);
     });
-    if(uKey.length > 0) {
-      let userRow = _.filter(referArr, (row) => {
-        return row[pKey[0].pos].toString() === uKey[0].value;
-      })
-      if(userRow.length > 0) {
+    if(pKey.length > 0) {
+      let uKey = _.filter(auth, (aObj) => {
+        return aObj.id === pKey[0].id;
+      });
+      if(uKey.length > 0) {
         uKey[0].accept = true;
         for(let i=0; i<auth.length; i++) {
           let aColumn = _.filter(headers, (header) => {
@@ -174,17 +276,20 @@ function authRecord(referSSID, auth) {
   return false;
 }
 
-function writeRecord(referSSID, recordSSID, auth, record, accept) {
-  let listSS = SpreadsheetApp.openById("1X_eia84M-lcIm8YS-hhOIiXGuYoHTGICLgL06UU3C1Q");
-  let listSheet = listSS.getSheetByName("本表勿刪");
-  let listRange = listSheet.getRange("A:E");
+function writeRecord(referSSID, recordSSID, auth, record, accept, signatures) {
+  let listSS = SpreadsheetApp.openById(appProperties.getProperty('listSheetID'));
+  let listSheet = listSS.getSheets()[0];
+  let listRange = listSheet.getRange("A:K");
   let listArr = listRange.getValues();
-  let pureData = [(new Date()).getTime(), accept];
+  let writeTick = (new Date()).getTime();
+  let pureData = [writeTick, accept];
   let proceedWrite = true;
   let errorLog = [];
   let primaryData = "";
   let groupData = "";
   let hasGroup = false;
+  let result = false;
+  let recieved = [];
   let currentSheet = _.filter(listArr, (sheet) => {
     if(sheet[1].toString().trim() === referSSID) {
       if(sheet[2].toString().trim() === recordSSID) {
@@ -194,9 +299,16 @@ function writeRecord(referSSID, recordSSID, auth, record, accept) {
     return false;
   });
   if(currentSheet.length > 0) {
-    if((new Date()).getTime() > parseInt(currentSheet[0][3].toString())) {
+    let now = (new Date()).getTime();
+    if(now > parseInt(currentSheet[0][3].toString())) {
+      /*if(now < parseInt(currentSheet[0][4].toString())) {
+        for(let i=0; i<record.length; i++) {
+          record[i].value = record[i].lastInput !== undefined ? record[i].lastInput : record[i].savedContent;
+        }
+      } else {*/
       proceedWrite = false;
       errorLog.push("表單已過時");
+      //}
     }
   }
   if(proceedWrite) {
@@ -212,159 +324,293 @@ function writeRecord(referSSID, recordSSID, auth, record, accept) {
       }
     }
     record = _.orderBy(record, ['pos'], ['asc']);
-    for(let i=0; i<record.length; i++) {
-      if(proceedWrite) {
-        let data = record[i];
-        let columns = _.filter(headers, (header) => {
-          return header.id === data.id;
-        });
-        if(columns.length > 0) {
-          let column = columns[0];
-          if(column.nullable) {
-            if(data.value === "") {
-              data.value = "不提供資料";
+    let userRows = getUserRow(referSSID, auth);
+    if(userRows.length > 0) {
+      let userRow = userRows[0];
+      for(let i=0; i<record.length; i++) {
+        if(proceedWrite) {
+          let data = record[i];
+          let columns = _.filter(headers, (header) => {
+            return header.id === data.id;
+          });
+          if(columns.length > 0) {
+            let column = columns[0];
+            if(column.nullable) {
+              let emptyFound = false;
+              if(/F/.test(column.type)) {
+                if(data.value === "") {
+                  emptyFound = true;
+                }
+              }
+              if(emptyFound) {
+                if(userRow[column.pos].toString() !== "") {
+                  proceedWrite = false;
+                  errorLog.push(column.name + "原本有資料，你不可以清除！");
+                } else {
+                  data.value = "不提供資料";
+                  proceedWrite = true;
+                }
+              }
             }
-          }
-          if(column.must) {
-            if(data.value === "") {
-              proceedWrite = false;
-              errorLog.push(column.name + "必填！");
-            } else {
-              proceedWrite = true;
+            if(column.must) {
+              if(data.value === "") {
+                proceedWrite = false;
+                errorLog.push(column.name + "必填！");
+              } else {
+                proceedWrite = true;
+              }
             }
-          }
-          if(/F|C/.test(column.type)) {
-            if(proceedWrite) {
-              if(data.value !== "不提供資料") {
-                if(/N|P/.test(column.format)) {
-                  let numLength = 0;
-                  if(/P/.test(column.format)) {
-                    let pConfig = column.content.split("|");
-                    numLength = parseInt(pConfig[0]);
-                  } else if(/N/.test(column.format)) {
-                    if(column.content !== "") {
-                      numLength = parseInt(column.content);
+            if(/F|C/.test(column.type)) {
+              if(proceedWrite) {
+                if(data.value !== "不提供資料") {
+                  let errorReason = "";
+                  if(/F/.test(column.format)) {
+                    if(/F/.test(column.type)) {
+                      column.value = data.value;
                     }
-                  }
-                  let zeroIndicator = numLength === 0 ? "0" : "";
-                  numLength = numLength > 0 ? "{" + numLength + "}" : "*";
-                  if(new RegExp("^" + zeroIndicator + "\\d" + numLength + "$").test(data.value)) {
-                    column.value = "📝"+data.value;
-                  } else {
-                    proceedWrite = false;
-                  }
-                } else if(/I/.test(column.format)) {
-                  if(/F/.test(column.type)) {
-                    if(/^[A-Z][12]\d{8}$/.test(data.value)) {
+                  } else if(/N|P/.test(column.format)) {
+                    let numLength = 0;
+                    if(/P/.test(column.format)) {
+                      let pConfig = column.content.split(";");
+                      numLength = parseInt(pConfig[0]);
+                    } else if(/N/.test(column.format)) {
+                      if(column.content !== "") {
+                        numLength = parseInt(column.content);
+                      }
+                    }
+                    let zeroIndicator = numLength === 0 ? "0" : "";
+                    numLength = numLength > 0 ? "{" + numLength + "}" : "*";
+                    if(new RegExp("^" + zeroIndicator + "\\d" + numLength + "$").test(data.value)) {
+                      column.value = "📝"+data.value;
+                    } else {
+                      proceedWrite = false;
+                    }
+                  } else if(/I/.test(column.format)) {
+                    if(/F/.test(column.type)) {
+                      if(/^[A-Z][0-9|A-Z]\d{8}$/.test(data.value)) {
+                        column.value = data.value;
+                      } else {
+                        proceedWrite = false;
+                      }
+                    }
+                  } else if(/E/.test(column.format)) {
+                    if(/^\w+((-\w+)|(\.\w+))*\@[A-Za-z0-9]+((\.|-)[A-Za-z0-9]+)*\.[A-Za-z]+$/.test(data.value)) {
+                      column.value = data.value;
+                    } else {
+                      proceedWrite = false;
+                    }
+                  } else if(/M/.test(column.format)) {
+                    if(/^09\d{8}$/.test(data.value)) {
+                      column.value = "📝"+data.value;
+                    } else {
+                      proceedWrite = false;
+                    }
+                  } else if(/T/.test(column.format)) {
+                    if(new RegExp(column.content).test(data.value)) {
+                      column.value = data.value.replace(/台北/,"臺北");
+                    } else {
+                      proceedWrite = false;
+                    }
+                  } else if(/S/.test(column.format)) {
+                    if(new RegExp(data.value).test(column.content)) {
                       column.value = data.value;
                     } else {
                       proceedWrite = false;
                     }
                   }
-                } else if(/E/.test(column.format)) {
-                  if(/^\w+((-\w+)|(\.\w+))*\@[A-Za-z0-9]+((\.|-)[A-Za-z0-9]+)*\.[A-Za-z]+$/.test(data.value)) {
-                    column.value = data.value;
-                  } else {
-                    proceedWrite = false;
-                  }
-                } else if(/M/.test(column.format)) {
-                  if(/^09\d{8}$/.test(data.value)) {
-                    column.value = "📝"+data.value;
-                  } else {
-                    proceedWrite = false;
-                  }
-                } else if(/T/.test(column.format)) {
-                  if(new RegExp(column.content).test(data.value)) {
-                    column.value = data.value.replace(/台北/,"臺北");
-                  } else {
-                    proceedWrite = false;
-                  }
-                } else if(/S/.test(column.format)) {
-                  if(new RegExp(data.value).test(column.content)) {
-                    column.value = data.value;
-                  } else {
-                    proceedWrite = false;
+                  if(!proceedWrite) {
+                    errorLog.push(errorReason === "" ? column.name + "格式錯誤！" : column.name + errorReason);
                   }
                 }
-                if(!proceedWrite) {
-                  errorLog.push(column.name + "格式錯誤！");
+              }
+            } else if(/G/.test(column.type)) {
+              if(/G/.test(column.format)) {
+                groupData = data.value;
+                hasGroup = true;
+              }
+            } else {
+              proceedWrite = false;
+              errorLog.push("你竄改數據？" + column.name + "不允許寫入！");
+            }
+          } else {
+            proceedWrite = false;
+            errorLog.push("你竄改數據？根本沒有這個欄位啊！");
+          }
+        } else {
+          break;
+        }
+      }
+      if(proceedWrite) {
+        for(let i=0; i<columnGroups.length; i++) {
+          if(columnGroups[i] !== "") {
+            let groupTest = _.filter(headers, (header) => {
+              return header.group === columnGroups[i];
+            });
+            if(_.every(groupTest, { group: columnGroups[i], value: "" })) {
+              proceedWrite = false;
+              errorLog.push("第" + columnGroups[i] + "群組欄位不得均為空");
+              break;
+            }
+            let uniqed = _.uniqBy(groupTest, (item) => {
+              return item.value.toString().trim();
+            });
+            if(groupTest.length !== uniqed.length) {
+              proceedWrite = false;
+              errorLog.push("第" + columnGroups[i] + "群組欄位，不得重複");
+              break;
+            }
+          }
+        }
+      }
+      if(proceedWrite) {
+        if(authRecord(referSSID, auth)) {
+          for(let i=0; i<auth.length; i++) {
+            let authObjs = _.filter(headers, (header) => {
+              return header.id === auth[i].id;
+            });
+            if(authObjs.length > 0) {
+              if(/P/.test(authObjs[0].type)) {
+                primaryData = auth[i].value;
+              }
+            }
+          }
+          pureData.push(primaryData);
+          let signatureIDs = [];
+          if(currentSheet.length > 0) {
+            let savedSignatures = currentSheet[0][6].toString().trim().split(';');
+            if(savedSignatures.length > 0) {
+              let storageID = appProperties.getProperty('universalStorageID');
+              let folder = DriveApp.getFolderById(storageID);
+              for(let i=0;i<savedSignatures.length; i++) {
+                let signature = _.filter(signatures, (sign) => {
+                  return sign.name === savedSignatures[i];
+                });
+                if(signature.length > 0) {
+                  var type = (signature[0].blob.split(";")[0]).replace('data:','');
+                  var imageUpload = Utilities.base64Decode(signature[0].blob.split(",")[1]);
+                  let blob = Utilities.newBlob(imageUpload,type,savedSignatures[i]);
+                  let writtenFile = folder.createFile(blob);
+                  writtenFile.setName("[" + writtenFile.getId() + "]" + currentSheet[0][0].toString().trim() + primaryData + "的" + savedSignatures[i] + "簽名");
+                  signatureIDs.push(writtenFile.getId());
                 }
               }
             }
-          } else if(/G/.test(column.type)) {
-            groupData = data.value;
-            hasGroup = true;
-          } else {
-            proceedWrite = false;
-            errorLog.push("你竄改數據？" + column.name + "不允許寫入！");
           }
-        } else {
-          proceedWrite = false;
-          errorLog.push("你竄改數據？根本沒有這個欄位啊！");
-        }
-      } else {
-        break;
-      }
-    }
-    if(proceedWrite) {
-      for(let i=0; i<columnGroups.length; i++) {
-        if(columnGroups[i] !== "") {
-          if(_.every(headers, { group: columnGroups[i], value: "" })) {
-            proceedWrite = false;
-            errorLog.push("第" + columnGroups[i] + "群組欄位不得均為空");
-            break;
+          pureData.push(_.join(signatureIDs, ";"));
+          if(!hasGroup) { groupData = "" }
+          pureData.push(groupData);
+          for(let i=0; i<headers.length; i++) {
+            pureData.push(headers[i].value.toString());
           }
-          let groupTest = _.filter(headers, (header) => {
-            return header.group === columnGroups[i];
-          });
-          let uniqed = _.uniqBy(groupTest, (item) => {
-            return item.value.toString().trim();
-          });
-          if(groupTest.length !== uniqed.length) {
-            proceedWrite = false;
-            errorLog.push("第" + columnGroups[i] + "群組欄位，不得重複");
-            break;
-          }
+          let recordSS = SpreadsheetApp.openById(recordSSID);
+          let recordSheet = recordSS.getSheets()[0];
+          recordSheet.appendRow(pureData);
+          result = true;
         }
       }
-    }
-    if(proceedWrite) {
-      if(authRecord(referSSID, auth)) {
-        for(let i=0; i<auth.length; i++) {
-          let authObjs = _.filter(headers, (header) => {
-            return header.id === auth[i].id;
-          });
-          if(authObjs.length > 0) {
-            if(/P/.test(authObjs[0].type)) {
-              primaryData = auth[i].value;
-            }
-          }
-        }
-        pureData.push(primaryData);
-        if(!hasGroup) { groupData = "" }
-        pureData.push(groupData);
-        for(let i=0; i<headers.length; i++) {
-          pureData.push(headers[i].value.toString());
-        }
-        let recordSS = SpreadsheetApp.openById(recordSSID);
-        let recordSheet = recordSS.getSheetByName("寫入表");
-        recordSheet.appendRow(pureData);
-        return {
-          status: true,
-          errorLog: errorLog
-        };
+      for(let i=0; i<headers.length; i++) {
+        headers[i].pos = undefined;
       }
+      recieved = headers
+    } else {
+      errorLog.push("你原本可以填這張表嗎？");
     }
   }
   return {
-    status: false,
-    errorLog: errorLog
+    status: result,
+    errorLog: errorLog,
+    data: recieved,
+    tick: writeTick
+  };
+}
+
+function saveFile(referSSID, recordSSID, auth, columnID, fileObj) {
+  let listSS = SpreadsheetApp.openById(appProperties.getProperty('listSheetID'));
+  let listSheet = listSS.getSheets()[0];
+  let listRange = listSheet.getRange("A:K");
+  let listArr = listRange.getValues();
+  let proceedWrite = true;
+  let errorLog = [];
+  let fileID = "";
+  let fileURL = "";
+  let currentSheet = _.filter(listArr, (sheet) => {
+    if(sheet[1].toString().trim() === referSSID) {
+      if(sheet[2].toString().trim() === recordSSID) {
+        return true;
+      }
+    }
+    return false;
+  });
+  if(currentSheet.length > 0) {
+    let now = (new Date()).getTime();
+    if(now > parseInt(currentSheet[0][3].toString())) {
+      /*if(now < parseInt(currentSheet[0][4].toString())) {
+        for(let i=0; i<record.length; i++) {
+          record[i].value = record[i].lastInput !== undefined ? record[i].lastInput : record[i].savedContent;
+        }
+      } else {*/
+      proceedWrite = false;
+      errorLog.push("表單已過時");
+      //}
+    }
+  }
+  if(proceedWrite) {
+    let headers = getHeaders(referSSID);
+    let columns = _.filter(headers, (header) => {
+      return header.id === columnID;
+    });
+    if(columns.length > 0) {
+      let column = columns[0];
+      if(/F/.test(column.type)) {
+        if(/F/.test(column.format)) {
+          let storageID = appProperties.getProperty('universalStorageID');
+          let maxSize = 1;
+          let mimeLimit = "";
+          if(column.content !== "") {
+            let contentConfig = column.content.split(";");
+            if(contentConfig[1] !== "") { maxSize = parseInt(contentConfig[1]); }
+            if(contentConfig[0] !== "") { mimeLimit = contentConfig[0]; }
+            if(contentConfig[2] !== "") { storageID = contentConfig[2]; }
+          }
+          if((new RegExp(mimeLimit, "i")).test(fileObj.mimeType)) {
+            let blob = Utilities.newBlob(fileObj.bytes, fileObj.mimeType, fileObj.filename);
+            if(fileObj.bytes.length <= maxSize * 1000000) {
+              let folder = DriveApp.getFolderById(storageID);
+              let writtenFile = folder.createFile(blob); 
+              writtenFile.setName("[" + writtenFile.getId() + "]" + currentSheet[0][0].toString().trim() + fileObj.filename);
+              fileID = writtenFile.getId();
+              fileURL = writtenFile.getUrl();
+            } else {
+              proceedWrite = false;
+              errorLog.push("檔案大小超過" + maxSize + "MB限制");
+            }
+          } else {
+            proceedWrite = false;
+            errorLog.push("檔案格式限定為" + mimeLimit + "類型");
+          }
+        } else {
+          proceedWrite = false;
+          errorLog.push("你確定這個欄位可以寫入？");
+        }
+      } else {
+        proceedWrite = false;
+        errorLog.push("你確定這個欄位可以寫入？");
+      }
+    }
+  } else {
+    errorLog.push("你原本可以填這張表嗎？");
+  }
+  return {
+    status: proceedWrite,
+    errorLog: errorLog,
+    fileID: fileID,
+    fileURL: fileURL
   };
 }
 
 function duplicateSubmits(recordSSID, qPkey) {
   let recordSS = SpreadsheetApp.openById(recordSSID);
-  let recordSheet = recordSS.getSheetByName("寫入表");
+  let recordSheet = recordSS.getSheets()[0];
   let recordRange = recordSheet.getDataRange();
   let recordArr = recordRange.getValues();
   let userRecords = _.filter(recordArr, (arr) => {
@@ -381,7 +627,7 @@ function duplicateSubmits(recordSSID, qPkey) {
 
 function latestSubmits(recordSSID) {
   let recordSS = SpreadsheetApp.openById(recordSSID);
-  let recordSheet = recordSS.getSheetByName("寫入表");
+  let recordSheet = recordSS.getSheets()[0];
   let totalRange = recordSheet.getDataRange();
   let totalArr = totalRange.getValues();
   let latestArr = _.last(totalArr);
@@ -397,71 +643,100 @@ function maskString(str) {
 }
 
 function compareSheets(referSSID, recordSSID) {
-    let recordSS = SpreadsheetApp.openById(recordSSID);
-    let recordSheet = recordSS.getSheetByName("寫入表");
-    let recordRange = recordSheet.getDataRange();
-    let recordArr = recordRange.getValues();
-    let referSS = SpreadsheetApp.openById(referSSID);
-    let referSheet = referSS.getSheetByName("參照表");
-    let referRange = referSheet.getDataRange();
-    let referArr = referRange.getValues();
-    let headers = getHeaders(referSSID);
-    let groupColumns = _.filter(headers, (header) => {
-      return /G/.test(header.type);
-    });
-    let pkeyColumns = _.filter(headers, (header) => {
-      return /P/.test(header.type);
-    })
-    let result = [];
-    if(pkeyColumns.length > 0) {
-      if(groupColumns.length > 0) {
-        referArr.splice(0,7);
-        let groupsTemp = _.uniqBy(referArr, (row) => {
-          return row[groupColumns[0].pos].toString().trim();
-        });
-        let groups = [];
-        for(let i=0; i<groupsTemp.length;i++) {
-          groups.push(groupsTemp[i][groupColumns[0].pos].toString().trim());
-        }
-        for(let i=0; i<groups.length; i++) {
-          if(groups[i] !== "") {
-            let referTemp = _.filter(referArr, (refer) => {
-              return refer[groupColumns[0].pos].toString().trim() === groups[i];
-            });
-            let referCount = [];
-            for(let k=0; k<referTemp.length; k++) {
-              referCount.push(referTemp[k][pkeyColumns[0].pos].toString().trim());
-            }
-            let recordTemp = _.filter(recordArr, (record) => {
-              return record[3].toString().trim() === groups[i].toString();
-            });
-            let recordCount = [];
-            for(let k=0; k<recordTemp.length; k++) {
-              recordCount.push(recordTemp[k][2].toString().trim());
-            }
-            recordCount = _.uniq(recordCount);
-            referCount = _.uniq(referCount);
-            let rate = ((recordCount.length / referCount.length) * 100).toFixed(0);
-            let unfinished = _.differenceWith(referCount, recordCount, (existed, written) => {
-              return existed === written;
-            });
-            if(unfinished.length <= 3) {
-              let temp = [];
-              for(let i=0; i<unfinished.length; i++) {
-                temp.push(maskString(unfinished[i].toString()));
-              }
-              returnList = temp.join(",");
-            } else if(unfinished.length > 3) {
-              returnList = unfinished.length + "人，共" + referCount.length + "人（超過3人不顯示名單）";
-            }
-            result.push({
-              classno: groups[i],
-              rate: rate,
-              unfinished: returnList
-            });
+  let recordSS = SpreadsheetApp.openById(recordSSID);
+  let recordSheet = recordSS.getSheets()[0];
+  let recordRange = recordSheet.getDataRange();
+  let recordArr = recordRange.getValues();
+  let referSS = SpreadsheetApp.openById(referSSID);
+  let referSheet = referSS.getSheets()[0];
+  let referRange = referSheet.getDataRange();
+  let referArr = referRange.getValues();
+  let headers = getHeaders(referSSID);
+  let groupColumns = _.filter(headers, (header) => {
+    return /G/.test(header.type);
+  });
+  let pkeyColumns = _.filter(headers, (header) => {
+    return /P/.test(header.type);
+  })
+  let result = [];
+  if(pkeyColumns.length > 0) {
+    if(groupColumns.length > 0) {
+      let groupNos = _.filter(groupColumns, (header) => {
+        return /N/.test(header.format);
+      });
+      referArr.splice(0,7);
+      let groupsTemp = _.uniqBy(referArr, (row) => {
+        return row[groupColumns[0].pos].toString().trim();
+      });
+      let groups = [];
+      for(let i=0; i<groupsTemp.length;i++) {
+        groups.push(groupsTemp[i][groupColumns[0].pos].toString().trim());
+      }
+      for(let i=0; i<groups.length; i++) {
+        if(groups[i] !== "") {
+          let referTemp = _.filter(referArr, (refer) => {
+            return refer[groupColumns[0].pos].toString().trim() === groups[i];
+          });
+          let referCount = [];
+          for(let k=0; k<referTemp.length; k++) {
+            referCount.push(referTemp[k][pkeyColumns[0].pos].toString().trim());
           }
+          let recordTemp = _.filter(recordArr, (record) => {
+            return record[3].toString().trim() === groups[i].toString();
+          });
+          let recordCount = [];
+          for(let k=0; k<recordTemp.length; k++) {
+            recordCount.push(recordTemp[k][2].toString().trim());
+          }
+          recordCount = _.uniq(recordCount);
+          referCount = _.uniq(referCount);
+          let rate = ((recordCount.length / referCount.length) * 100).toFixed(0);
+          let unfinished = _.differenceWith(referCount, recordCount, (existed, written) => {
+            return existed === written;
+          });
+          let returnList = "";
+          if(unfinished.length === referCount.length) {
+            returnList = "全體均未填寫";
+          }
+          if(unfinished.length === 0) {
+            returnList = "已完成";
+          }
+          if(returnList === "") {
+            if(groupNos.length > 0) {
+              let temp = [];
+              for(let k=0; k<unfinished.length; k++) {
+                let nos = _.filter(referTemp, (row) => {
+                  return row[pkeyColumns[0].pos].toString() === unfinished[k];
+                });
+                if(nos.length > 0) {
+                  temp.push(nos[0][groupNos[0].pos].toString());
+                }
+              }
+              returnList = temp.join(",") + " (" + unfinished.length + "/" + referCount.length + ")";
+            } else {
+              if(unfinished.length <= 3) {
+                let temp = [];
+                for(let k=0; k<unfinished.length; k++) {
+                  temp.push(maskString(unfinished[k].toString()));
+                }
+                returnList = temp.join(",");
+              } else if(unfinished.length > 3) {
+                returnList = unfinished.length + "/" + referCount.length + "（超過3人不顯示名單）";
+              }
+            }
+          }
+          result.push({
+            classno: groups[i],
+            rate: rate,
+            unfinished: returnList
+          });
         }
       }
     }
-    return result;
+  }
+  return result;
+}
+
+function getScriptURL() {
+  return ScriptApp.getService().getUrl();
 }
