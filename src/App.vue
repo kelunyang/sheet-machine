@@ -17,9 +17,7 @@
         </el-alert>
         <el-alert title="問卷提示" type="warning" show-icon v-if="alertWords !== ''" v-show="scriptError.message === ''">
           <template #default>
-            <span style="font-size: 1.5em">
-              {{ alertWords }}
-            </span>
+            <span style="font-size: 1.5em" v-html="HTMLConverter(alertWords)"></span>
           </template>
         </el-alert>
         <el-alert title="發生錯誤" type="error" show-icon v-if="scriptError.message !== ''">
@@ -39,15 +37,16 @@
             </span>
           </template>
         </el-alert>
-        <el-switch v-if="!viewOnly" class="ma1" size="large" active-text="我對這份存檔結果有意見，我要修改" v-model="enableModify"></el-switch>
+        <el-switch v-if="!viewOnly" class="ma1" size="large" active-text="我要修改問卷" v-model="enableModify"></el-switch>
         <el-space direction="vertical" fill wrap class="ma1 pa2 xs12 breakword" v-for="dataColumn in columnDB" :key="dataColumn.tid">
           <div v-if="!/G/.test(dataColumn.type)" class="qTitle xs12">{{ dataColumn.name }}</div>
           <div v-if="!/G/.test(dataColumn.type)" class="xs12 breakword">
             <span class="oriTip">
-              {{ formatDetector('F', 'C|F', dataColumn) ? "[系統原本儲存的檔案（點擊開啟新連結）🔎]" : "[系統原本儲存的答案]" }}
+              {{ formatDetector('F', 'C|F', dataColumn) ? "[系統原本儲存的檔案（點擊開啟新連結）🔎]" : formatDetector('S', 'C', dataColumn) ? "" : "[系統原本儲存的答案]" }}
             </span>
-            <span v-if="formatDetector('F', 'C|F', dataColumn)">
-              <el-link :href="dataColumn.savedContent" target="_blank">{{ dataColumn.savedContent }}</el-link>
+            <span v-if="formatDetector('F', 'F|C', dataColumn) || formatDetector('S', 'C', dataColumn)">
+              <el-link v-if="formatDetector('F', 'C|F', dataColumn)" :href="dataColumn.savedContent" target="_blank">{{ dataColumn.savedContent }}</el-link>
+              <span v-if="formatDetector('S', 'C', dataColumn)">{{ sumUp(dataColumn) }}</span>
             </span>
             <span v-else>
               {{ dataColumn.savedContent }}
@@ -138,9 +137,9 @@
         </el-table-column>
         <el-table-column label="">
           <template #default="scope">
-            <span>
-              <el-button class="ma1 pa2" size="large" type="primary" v-on:click="openSheet(scope.row.id)">{{ viewCheck(scope.row) ? "檢視" : "填寫&檢視" }}表單</el-button>
-            </span>
+            <div class="buttonBlock">
+            <el-button class="ma1 pa2" size="large" type="primary" v-on:click="openSheet(scope.row.id)">{{ viewCheck(scope.row) ? "檢視" : "填寫&檢視" }}表單</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -196,6 +195,13 @@
     <el-steps :active="stepIndicator" finish-status="finish" align-center>
       <el-step :title="step.title" v-for="(step, index) in availableSteps" :key="index" :status="step.status" />
     </el-steps>
+    <el-alert title="確認身分中" type="info" show-icon v-if="loginStatus">
+      <template #default>
+        <span style="font-size: 1.5em">
+          正在確認你的身分以及查詢你是否有填過，請稍候
+        </span>
+      </template>
+    </el-alert>
     <el-alert title="請注意" type="warning" show-icon v-if="expired <= (10*60)">
       <template #default>
         <span style="font-size: 1.5em">
@@ -219,11 +225,11 @@
     </el-alert>
     <el-alert title="問卷提示" type="warning" show-icon v-show="scriptError.message === '' && saveSuccessed === undefined">
       <template #default>
-        <span style="font-size: 1.5em">{{ loginTip }}</span>
+        <span style="font-size: 1.5em" v-html='HTMLConverter(loginTip)'></span>
       </template>
     </el-alert>
     <el-space direction="vertical" fill wrap style="width: 100%">
-      <div class="qTitle xs12" v-if="saveSuccessed">{{ submitTip }}</div>
+      <div class="qTitle xs12" v-if="saveSuccessed" v-html='HTMLConverter(submitTip)'></div>
       <el-space direction="vertical" fill wrap class="ma1 pa2 xs12" v-for="authColumn in authDB" :key="authColumn.tid">
         <div class="qTitle xs12" v-if="!/G/.test(authColumn.type)">{{ authColumn.name }}</div>
         <el-input
@@ -282,7 +288,7 @@
     </el-alert>
     <el-alert title="檔案限制" type="warning" show-icon v-if="scriptError.message === ''">
       <template #default>
-        <span style="font-size: 1.5em">檔案類型：{{ currentFile.mimeType === "" ? "無限制" : currentFile.mimeType }}／檔案大小：{{ currentFile.maxSize }}MB／只能選擇1個檔案</span>
+        <span style="font-size: 1.5em">檔案類型：{{ currentFile.mimeAlt === "" ? "無限制" : currentFile.mimeAlt }}／檔案大小：{{ currentFile.maxSize }}MB／只能選擇1個檔案</span>
       </template>
     </el-alert>
     <el-alert title="上傳中" type="info" show-icon v-if="uploadStatus">
@@ -424,6 +430,41 @@
   import SmoothSignature from "smooth-signature";
   export default {
     methods: {
+      HTMLConverter: function (msg) {
+        msg = msg === null || msg == undefined ? '**test**' : msg;
+        let converter = new showdown.Converter({
+          openLinksInNewWindow: true,
+          simplifiedAutoLink: true
+        });
+        return converter.makeHtml(msg);
+        //return marked(msg);
+        //return msg;
+      },
+      sumUp: function(column) {
+        if(/C/.test(column.type)) {
+          if(/S/.test(column.format)) {
+            if(column.content !== "") {
+              let columns = column.content.split(';');
+              let sumValue = 0;
+              for(let i=0; i<columns.length; i++) {
+                if(columns[i] !== "") {
+                  let columnConfig = columns[i].split(":");
+                  let target = _.filter(this.columnDB, (col) => {
+                    return col.id === columnConfig[0];
+                  });
+                  if(target.length > 0) {
+                    if(/N/.test(target[0].format)) {
+                      sumValue += parseInt(target[0].value) * parseInt(columnConfig[1]);
+                    }
+                  }
+                }
+              }
+              return columns.length + "個欄位總和為：" + sumValue;
+            }
+          }
+        }
+        return "";
+      },
       formatHelper: function(column) {
         if(/F|A|P/.test(column.type)) {
           let tip = "";
@@ -457,7 +498,7 @@
                 filetip.push(contentConfig[0] + "類型檔案");
               }
               if(contentConfig[1] !== "") {
-                filetip.push("大小需小於" + contentConfig[1] + "MB");
+                filetip.push("大小需小於" + contentConfig[2] + "MB");
               }
               filetip.push("你只能選擇一個檔案");
               tip = _.join(filetip, "，");
@@ -506,7 +547,7 @@
             for(let k=0; k<tags.length; k++) {
               list[i].tags.push({
                 name: tags[k].replace(/\[|\]/g,""),
-                color: oriobj.colors[ k % oriobj.colors.length ],
+                color: oriobj.colors[ (i*10 + k) % oriobj.colors.length ],
                 id: uuidv4()
               });
             }
@@ -571,7 +612,7 @@
           if(column.must) {
             if(column.value === "") {
               passMust = false;
-              column.status = "這個欄位必填！";
+              column.status = "這個欄位必需有值！";
             }
           }
         }
@@ -931,7 +972,7 @@
           let sheet = _.filter(this.sheets, (sheet) => {
             return sheet.id === oriobj.currentSID;
           });
-          ElMessage('確認身分中，請稍後');
+          this.loginStatus = true;
           if(sheet.length > 0) {
             google.script.run
             .withSuccessHandler((sheetConfig) => {
@@ -974,10 +1015,22 @@
                   return /F|C|G/.test(column.type);
                 });
                 for(let i=0;i<oriobj.columnDB.length; i++) {
+                  let fileDetect = false;
                   oriobj.columnDB[i].tid = uuidv4();
-                  oriobj.columnDB[i].status = "";
+                  if(/F/.test(oriobj.columnDB[i].type)) {
+                    if(/F/.test(oriobj.columnDB[i].format)) {
+                      if(oriobj.columnDB[i].must) {
+                        oriobj.columnDB[i].status = "請至少選擇一個檔案";
+                        fileDetect = true;
+                      }
+                    }
+                  }
+                  if(!fileDetect) {
+                    oriobj.columnDB[i].status = "";
+                  }
                 }
                 oriobj.loginDialog.show = false;
+                oriobj.loginStatus = false;
                 oriobj.columnDialog.show = true;
                 nextTick(() => {
                   if(oriobj.viewOnly) {
@@ -989,6 +1042,7 @@
               }
             })
             .withFailureHandler((data) => {
+              oriobj.loginStatus = false;
               oriobj.scriptError = data;
               nextTick(() => {
                 oriobj.changeStep("身分確認", "error", "wait", "wait");
@@ -1073,13 +1127,17 @@
         this.currentFile.name = column.name;
         this.currentFile.maxSize = 1;
         this.currentFile.mimeType = "";
+        this.currentFile.mimeAlt = "";
         if(column.content !== "") {
           let contentConfig = column.content.split(";");
           if(contentConfig[0] !== "") {
-            this.currentFile.mimeType = contentConfig[0];
+            this.currentFile.mimeAlt = contentConfig[0];
           }
           if(contentConfig[1] !== "") {
-            this.currentFile.maxSize = parseInt(contentConfig[1]);
+            this.currentFile.mimeType = contentConfig[1];
+          }
+          if(contentConfig[2] !== "") {
+            this.currentFile.maxSize = parseInt(contentConfig[2]);
           }
         }
         this.currentFile.fileList = [];
@@ -1116,6 +1174,7 @@
                       if(column.length > 0) {
                         column[0].value = report.fileID;
                         column[0].lastInput = report.fileURL;
+                        column[0].status = "";
                         oriobj.uploadStatus = false;
                         oriobj.fileDialog.show = false;
                         ElMessage("上傳成功！");
@@ -1206,9 +1265,11 @@
     },
     data() {
       return {
+        loginStatus: false,
         pageWidth: 0,
         currentFile: {
           name: "",
+          mimeAlt: "",
           mimeType: "",
           maxSize: 1,
           id: "",

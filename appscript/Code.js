@@ -100,12 +100,16 @@ function readRecord(referSSID, recordSSID, auth) {
               column.lastInput = undefined;
               if(/C/.test(column.type)) {
                 if(/F/.test(column.format)) {
-                  let imgContent = userRows[0][column.pos].toString();
-                  let storageID = column.content === "" ? appProperties.getProperty('universalStorageID') : column.content;
-                  let files = DriveApp.searchFiles('parents in "'+ storageID +'" and title contains "' + imgContent + '"');
-                  while(files.hasNext()) {
-                    var file = files.next();
-                    column.savedContent = file.getUrl();
+                  let imgContent = userRows[0][column.pos].toString().trim()
+                  if(imgContent !== "") {
+                    let storageID = column.content === "" ? appProperties.getProperty('universalStorageID') : column.content;
+                    let files = DriveApp.searchFiles('parents in "'+ storageID +'" and title contains "' + imgContent + '"');
+                    while(files.hasNext()) {
+                      var file = files.next();
+                      column.savedContent = file.getUrl();
+                    }
+                  } else {
+                    column.savedContent = "";
                   }
                 } else if(/T/.test(column.format)) {
                   column.savedContent = userRows[0][column.pos].toString();
@@ -115,12 +119,20 @@ function readRecord(referSSID, recordSSID, auth) {
                 column.value = column.savedContent;
                 if(/F/.test(column.type)) {
                   if(/F/.test(column.format)) {
-                    let fileContent = userRows[0][column.pos].toString();
-                    let storageID = appProperties.getProperty('universalStorageID');
-                    let files = DriveApp.searchFiles('parents in "'+ storageID +'" and title contains "' + fileContent + '"');
-                    while (files.hasNext()) {
-                      var file = files.next();
-                      column.savedContent = file.getUrl();
+                    let fileContent = userRows[0][column.pos].toString().trim();
+                    if(fileContent !== "") {
+                      let storageID = appProperties.getProperty('universalStorageID');
+                      if(column.content !== "") {
+                        let contentConfig = column.content.split(";");
+                        if(contentConfig[3] !== "") { storageID = contentConfig[3]; }
+                      }
+                      let files = DriveApp.searchFiles('parents in "'+ storageID +'" and title contains "' + fileContent + '"');
+                      while (files.hasNext()) {
+                        var file = files.next();
+                        column.savedContent = file.getUrl();
+                      }
+                    } else {
+                      column.savedContent = "";
                     }
                     if(userRecord !== undefined) {
                       if(userRecord[column.pos + 5] != null) {
@@ -128,16 +140,20 @@ function readRecord(referSSID, recordSSID, auth) {
                         if(fileContent !== "") {
                           let file = DriveApp.getFileById(fileContent);
                           column.lastInput = file.getUrl();
+                        } else {
+                          column.lastInput = "";
                         }
                       } else {
                         column.lastInput = "";
                       }
+                    } else {
+                      column.lastInput = "";
                     }
                     column.value = "";
                   } else {
                     if(userRecord !== undefined) {
                       if(userRecord[column.pos + 5] != null) {
-                        column.lastInput = userRecord[column.pos + 5].toString();
+                        column.lastInput = userRecord[column.pos + 5].toString().replace(/📝/, "");
                         column.value = column.lastInput;
                       } else {
                         column.lastInput = "";
@@ -202,6 +218,27 @@ function publicHeader(referSSID) {
   return headers;
 }
 
+function buildSelections(column, referSSID) {
+  if(!/C/.test(column.type)) {
+    if(/S/.test(column.format)) {
+      if(column.content === "") {
+        let referSS = SpreadsheetApp.openById(referSSID);
+        let referSheet = referSS.getSheets()[0];
+        let referRange = referSheet.getDataRange();
+        let referArr = referRange.getValues();
+        let values = [];
+        if(referArr.length > 8) {
+          for(let i=8; i<referArr.length; i++) {
+            values.push(referArr[i][column.pos].toString());
+          }
+        }
+        return _.join(_.uniq(values), ";");
+      }
+    }
+  }
+  return column.content;
+}
+
 function getHeaders(referSSID) {
   let referSS = SpreadsheetApp.openById(referSSID);
   let referSheet = referSS.getSheets()[0];
@@ -224,6 +261,11 @@ function getHeaders(referSSID) {
             pos: i,
             value: ""
           };
+          if(!/C/.test(obj.type)) {
+            if(/S/.test(obj.format)) {
+              obj.content = buildSelections(obj, referSSID);
+            }
+          }
           if(obj.group !== "") {
             obj.group = parseInt(obj.group)
           }
@@ -355,7 +397,7 @@ function writeRecord(referSSID, recordSSID, auth, record, accept, signatures) {
             if(column.must) {
               if(data.value === "") {
                 proceedWrite = false;
-                errorLog.push(column.name + "必填！");
+                errorLog.push(column.name + "必需要有值！");
               } else {
                 proceedWrite = true;
               }
@@ -568,9 +610,9 @@ function saveFile(referSSID, recordSSID, auth, columnID, fileObj) {
           let mimeLimit = "";
           if(column.content !== "") {
             let contentConfig = column.content.split(";");
-            if(contentConfig[1] !== "") { maxSize = parseInt(contentConfig[1]); }
-            if(contentConfig[0] !== "") { mimeLimit = contentConfig[0]; }
-            if(contentConfig[2] !== "") { storageID = contentConfig[2]; }
+            if(contentConfig[2] !== "") { maxSize = parseInt(contentConfig[1]); }
+            if(contentConfig[1] !== "") { mimeLimit = contentConfig[1]; }
+            if(contentConfig[3] !== "") { storageID = contentConfig[3]; }
           }
           if((new RegExp(mimeLimit, "i")).test(fileObj.mimeType)) {
             let blob = Utilities.newBlob(fileObj.bytes, fileObj.mimeType, fileObj.filename);
