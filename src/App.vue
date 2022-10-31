@@ -89,14 +89,15 @@
           <el-button v-show="enableModify" v-if="formatDetector('P', 'F', dataColumn)" class="ma1 pa2 xs12" size="large" type="success" v-on:click="queryPC(dataColumn)">
             按此自動填入郵遞區號（但你得自己確認對不對）
           </el-button>
-          <el-button v-if="formatDetector('F', 'F', dataColumn)" class="ma1 pa2 xs12" size="large" type="success" v-on:click="uploadFile(dataColumn)">點此上傳檔案{{ dataColumn.value !== "" ? "(已上傳)" : "(無上傳)" }}</el-button>
+          <el-button v-show="enableModify" v-if="formatDetector('F', 'F', dataColumn)" class="ma1 pa2 xs12" size="large" type="success" v-on:click="uploadFile(dataColumn)">點此上傳檔案{{ dataColumn.value !== "" ? "(已上傳)" : "(無上傳)" }}</el-button>
+          <el-button v-show="enableModify" v-if="formatDetector('U', 'F', dataColumn)" class="ma1 pa2 xs12" size="large" type="success" v-on:click="multiSelect(dataColumn)">點此挑選你要的選項[{{ dataColumn.value !== "" ? "已選"+(dataColumn.value.split(';')).length : "無選擇" }}]</el-button>
           <div v-show="enableModify" class="captionWord" v-if="dataColumn.nullable">這個欄位可以留空</div>
           <div v-show="enableModify" class="captionWord" v-if="dataColumn.group !== ''">這個欄位和另外一個欄位編為第{{ dataColumn.group }}組，請至少選一個填入，否則最後會不能存檔</div>
-          <div v-show="enableModify" class="captionWord" v-if="dataColumn.status !== ''">{{ dataColumn.status }}</div>
+          <div v-show="enableModify" class="alertWord" v-if="dataColumn.status !== ''">{{ dataColumn.status }}</div>
           <div v-show="enableModify" class="captionWord" v-if="dataColumn.status === ''">{{ formatHelper(dataColumn) }}</div>
         </el-space>
         <el-button v-if="!viewOnly" class="ma1 pa2 xs12" size="large" type="danger" v-on:click="authMod()" :disabled="checkData()">
-          {{ !checkData() ? "送出修改（會再次要求身分驗證）" : "你的格式有誤，請檢查" }}
+          {{ !checkData() ? "送出修改" : "你的格式有誤，請檢查" }}
         </el-button>
         <el-button v-else class="ma1 pa2 xs12" size="large" type="danger" v-on:click="endView()">
           檢視完畢
@@ -119,7 +120,7 @@
     <el-space direction="vertical" fill wrap style="width: 100%">
       <div class="xs12" style="font-size: 1em; color: #666; text-align: center;" v-if="sheets.length === 0">無資料</div>
       <el-table :data="sheets" stripe style="width: 100%" v-else>
-        <el-table-column prop="name" label="表單名稱">
+        <el-table-column prop="dueDate" label="表單名稱" sortable>
           <template #default="scope">
             <el-tag
               v-for="tag in scope.row.tags"
@@ -150,7 +151,7 @@
     :show-close="false"
     v-model="signatureDialog.show"
     :fullscreen="signatureDialog.fullscreen"
-    :title="'請提交'+signatures.length+'個簽名'">
+    :title="'請提交'+signatures.length+'組簽名'">
     <el-steps :active="stepIndicator" finish-status="finish" align-center>
       <el-step :title="step.title" v-for="(step, index) in availableSteps" :key="index" :status="step.status" />
     </el-steps>
@@ -169,11 +170,10 @@
         </span>
       </template>
     </el-alert>
-    <el-alert title="簽名說明" type="warning" show-icon>
+    <el-alert :title="'你正在簽第' + (currentSignature + 1) + '組簽名，共' + signatures.length + '組'" type="warning" show-icon>
       <template #default>
         <span style="font-size: 1.5em">
-          請在灰框內簽下 {{ signatureTip }} 的簽名，請注意，簽名需親簽（或得到授權），否則違反刑法217條偽造署押罪或210條、211條偽造公私文書罪
-        </span>
+          <span style="font-weight: bold;">請在灰框內簽下「 {{ signatureTip }}」的簽名（完成本表單共需要{{ signatures.length }}組簽名，這是第{{ currentSignature + 1 }}組）</span>，請注意，簽名需親簽（或得到授權），否則可能違反刑法217條偽造署押罪</span>
       </template>
     </el-alert>
     <el-space direction="vertical" :fill="true" wrap style="width: 100%">
@@ -182,9 +182,10 @@
           <canvas class="signaturePad" :width="signatureWidth" :height="signatureHeight" />
         </el-carousel-item>
       </el-carousel>
-      <el-button v-if="signatures.length > 1" class="ma1 pa1 xs12" size="large" type="primary" v-on:click="nextSignatrue()">簽下一個 ( {{ currentSignature + 1 }} / {{ signatures.length }} )，到最後一個時會回到第一個</el-button>
-      <el-button class="ma1 pa1 xs12" size="large" type="primary" v-on:click="clearSignature()">清除{{ signatureTip }}的簽名</el-button>
+      <el-button v-if="signatures.length > 1" class="ma1 pa1 xs12" size="large" type="primary" v-on:click="nextSignatrue()">簽下一組（共{{ signatures.length }}組），到最後一個時會回到第一個</el-button>
+      <el-button class="ma1 pa1 xs12" size="large" type="success" v-on:click="clearSignature()">清除{{ signatureTip }}的簽名</el-button>
       <el-button class="ma1 pa2 xs12" size="large" type="danger" v-on:click="endSignature()">提交簽名，下一步！</el-button>
+      <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="reverseBody()">剛剛輸入的有誤，回去修改</el-button>
     </el-space>
   </el-dialog>
   <el-dialog
@@ -256,7 +257,7 @@
             :value="item"
           />
         </el-select>
-        <div class="captionWord" v-if="authColumn.status !== ''">{{ authColumn.status }}</div>
+        <div class="alertWord" v-if="authColumn.status !== ''">{{ authColumn.status }}</div>
         <div class="captionWord" v-if="authColumn.status === ''">{{ formatHelper(authColumn) }}</div>
       </el-space>
       <el-button v-if="authDB.length > 0" class="ma1 pa1 xs12" size="large" type="danger" :disabled="checkAuth()" v-on:click="loginView()">{{ checkAuth() ? "格式錯誤或有空值，修正後才可以送出" : "送出認證以" + viewTip + "表單" }}</el-button>
@@ -269,7 +270,7 @@
   </el-dialog>
   <el-drawer
     v-model="fileDialog.show"
-    :title="'你正在處理欄位「' + currentFile.name +'」的檔案上傳'"
+    title="你正在處理檔案欄位"
     direction="btt"
     show-close="false"
     size="90%"
@@ -298,6 +299,7 @@
         </span>
       </template>
     </el-alert>
+    <div>欄位名稱：{{ currentFile.name }}</div>
     <el-space direction="vertical" fill wrap style="width: 100%">
       <el-upload
         :limit="1"
@@ -314,17 +316,62 @@
       <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="fileDialog.show = false">關閉對話框</el-button>
     </el-space>
   </el-drawer>
+  <el-drawer
+    v-model="multisDialog.show"
+    title="你正在處理多選欄位"
+    direction="btt"
+    show-close="false"
+    size="90%"
+  >
+    <el-space direction="vertical" fill wrap style="width: 100%">
+      <el-alert title="勾選數量限制" type="info" show-icon>
+        <template #default>
+          <span style="font-size: 1.5em">
+            請從 {{ currentMulti.selections.length }} 項中挑出至多 {{ currentMulti.maxNum }} 項，如果要調整已選區的選項順序，勾選之後會出現調整功能
+          </span>
+        </template>
+      </el-alert>
+      <el-alert title="發生錯誤" type="error" show-icon v-if="currentMulti.error !== ''">
+        <template #default>
+          <span style="font-size: 1.5em">{{ currentMulti.error }}</span>
+        </template>
+      </el-alert>
+      <div>欄位名稱：{{ currentMulti.name }}</div>
+      <el-transfer
+        class="ma1 pa2 xs12"
+        v-model="currentMulti.selected"
+        filterable
+        :filter-method="filterMethod"
+        filter-placeholder="在此可以打字搜尋"
+        :data="currentMulti.selections"
+        v-on:change="selectionChanged"
+        v-on:right-check-change="chooseSelection"
+        target-order="push"
+        :titles="['候選名單', '已選名單']"
+        :button-texts="['移出已選', '移入已選']"
+      >
+      </el-transfer>
+      <el-space direction="horizonal" fill wrap class="ma1 pa2 xs12" v-if="currentMulti.modified.length > 0">
+        <el-button class="ma1 pa2 xs12" size="large" type="success" @click="selectionMove(0)">將已選的{{ currentMulti.modified.length }}個選項置頂</el-button>
+        <el-button class="ma1 pa2 xs12" size="large" type="success" @click="selectionMove(2)">將已選的{{ currentMulti.modified.length }}個選項向上一格</el-button>
+        <el-button class="ma1 pa2 xs12" size="large" type="success" @click="selectionMove(3)">將已選的{{ currentMulti.modified.length }}個選項向下一格</el-button>
+        <el-button class="ma1 pa2 xs12" size="large" type="success" @click="selectionMove(1)">將已選的{{ currentMulti.modified.length }}個選項置底</el-button>
+      </el-space>
+      <el-button class="ma1 pa2 xs12" size="large" type="danger" v-on:click="endSelection()">選擇完畢！</el-button>
+      <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="multisDialog.show = false">放棄選擇，回到上一頁</el-button>
+    </el-space>
+  </el-drawer>
   <!-- <el-dialog
     :show-close="false"
     v-model="confirmDialog.show"
     :fullscreen="confirmDialog.fullscreen"
-    title="送出資料前再次確認身分"> -->
+    title="確定要送出了嗎？"> -->
   <el-drawer
     v-model="confirmDialog.show"
-    title="送出資料前再次確認身分"
+    title="確定要送出了嗎？"
     direction="ttb"
     show-close="false"
-    size="90%"
+    size="60%"
   >
     <el-steps :active="stepIndicator" finish-status="finish" align-center>
       <el-step :title="step.title" v-for="(step, index) in availableSteps" :key="index" :status="step.status" />
@@ -344,7 +391,20 @@
       </template>
     </el-alert>
     <el-space direction="vertical" fill wrap style="width: 100%">
-      <el-space direction="vertical" fill wrap class="ma1 pa2 xs12" v-for="authColumn in authDB" :key="authColumn.tid">
+      <div class="qTitle">你確定資料無誤，可以送出了嗎？</div>
+      <el-switch class="ma1" size="large" :active-text="'請寄一個確認信給我（本日剩餘Email通知信配額' + remainEmail  + '封）'" v-model="emailObj.enable" v-if="remainEmail > 0"></el-switch>
+      <el-input
+        v-if="emailObj.enable"
+        v-show="remainEmail > 0"
+        size="large"
+        class="xs12"
+        label="請在此輸入你的Email，系統會把你這次填寫的結果Email給你"
+        v-model="emailObj.value"
+        v-on:change="valField(emailObj)"
+        outline>
+      </el-input>
+      <div class="alertWord" v-if="emailObj.status !== ''" v-show="emailObj.enable">{{ emailObj.status }}</div>
+      <!-- <el-space direction="vertical" fill wrap class="ma1 pa2 xs12" v-for="authColumn in authDB" :key="authColumn.tid">
         <div style="color: maroon" class="qTitle xs12" v-if="!/G/.test(authColumn.type)">{{ authColumn.name }}</div>
         <el-input
           v-if="formatDetector('I|N|T' ,'A|P', authColumn)"
@@ -372,7 +432,8 @@
         </el-select>
         <div class="captionWord" v-if="authColumn.status !== ''">{{ authColumn.status }}</div>
       </el-space>
-      <el-button class="ma1 pa2 xs12" size="large" type="danger" :disabled="checkAuth()" v-on:click="sendMod()">{{ checkAuth() ? "格式錯誤或有空值，修正後才可以送出" : "是的，我確定送出本次填寫的結果！" }}</el-button>
+      <el-button class="ma1 pa2 xs12" size="large" type="danger" :disabled="checkAuth()" v-on:click="sendMod()">{{ checkAuth() ? "格式錯誤或有空值，修正後才可以送出" : "是的，我確定送出本次填寫的結果！" }}</el-button> -->
+      <el-button class="ma1 pa2 xs12" size="large" type="danger" v-on:click="sendMod()" :disabled="checkSend()">{{ checkSend() ? "請修正你提供的Email格式，才能送出" : "是的，我確定送出本次填寫的結果！" }}</el-button>
       <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="reverseBody()">剛剛輸入的有誤，回去修改</el-button>
     </el-space>
   <!-- </el-dialog> -->
@@ -407,9 +468,9 @@
     <el-space direction="vertical" fill wrap style="width: 100%">
       <el-table :data="stats" stripe style="width: 100%">
         <el-table-column prop="classno" label="班級"/>
-        <el-table-column label="填答率">
+        <el-table-column  prop="rate" label="填答率" sortable>
           <template #default="scope">
-            <span>{{ scope.row.rate }}%</span>
+            <el-progress :percentage="scope.row.rate" :color="progressColor" />
           </template>
         </el-table-column>
         <el-table-column prop="unfinished" label="未完成者" />
@@ -430,6 +491,127 @@
   import SmoothSignature from "smooth-signature";
   export default {
     methods: {
+      checkSend: function() {
+        if(this.emailObj.enable) {
+          if(this.emailObj.status === "") {
+            return false;
+          }
+          return true;
+        } else {
+          return false;
+        }
+      },
+      selectionChanged: function(currentItem, direction, key) {
+        if(direction === "right") {
+          if(this.currentMulti.selected.length > this.currentMulti.maxNum) {
+            this.currentMulti.selected.splice(this.currentMulti.maxNum);
+            ElMessage('最多只能選' + this.currentMulti.maxNum + '項，系統自動清除你多選的');
+          }
+        }
+      },
+      multiSelect: function(dataColumn) {
+        if(/F/.test(dataColumn.type)) {
+          if(/U/.test(dataColumn.format)) {
+            let selections = [];
+            let selectionConfig = dataColumn.content.split('::');
+            let oriSelect = selectionConfig[1].split(';');
+            for(let i=0; i<oriSelect.length; i++) {
+              selections.push({
+                key: oriSelect[i],
+                label: oriSelect[i],
+                disabled: false
+              });
+            }
+            this.currentMulti.maxNum = parseInt(selectionConfig[0]);
+            this.currentMulti.name = dataColumn.name;
+            this.currentMulti.id = dataColumn.id;
+            this.currentMulti.selections = selections;
+            this.currentMulti.selected = [];
+            this.currentMulti.modified = [];
+            this.currentMulti.error = "";
+            let selected = _.uniq(dataColumn.value.split(';'));
+            for(let i=0; i<selected.length; i++) {
+              let findObj = _.filter(selections, (item) => {
+                return item.key === selected[i];
+              });
+              if(findObj.length > 0) {
+                this.currentMulti.selected.push(selected[i]);
+              }
+            }
+            this.multisDialog.show = true;
+          }
+        }
+      },
+      chooseSelection: function(selected) {
+        this.currentMulti.modified = selected;
+        let validArr = [];
+        for(let i=0; i<this.currentMulti.selected.length; i++) {
+          let checkSelect = _.filter(this.currentMulti.selections, (selection) => {
+            return selection.key === this.currentMulti.selected[i];
+          })
+          if(checkSelect.length > 0) {
+            validArr.push(true);
+          }
+        }
+        let confirmedArr = _.filter(validArr, (item) => {
+          return item === false;
+        });
+        if(confirmedArr.length > 0) {
+          this.currentMulti.error = "你為什麼可以選到選項裡沒有的值？"
+        }
+      },
+      selectionMove: function(direction) {
+        let currentIndex = -1;
+        let foundIndexs = [];
+        let oriobj = this;
+        let newIndex = 0;
+        if(direction === 0) {
+          newIndex = 0;
+        }
+        for(let i=0; i<this.currentMulti.modified.length; i++) {
+          let nowIndex = _.findIndex(this.currentMulti.selected, (item) => {
+            return item === oriobj.currentMulti.modified[i];
+          });
+          if(nowIndex > -1) {
+            foundIndexs.push(nowIndex);
+          }
+        }
+        foundIndexs = foundIndexs.sort();
+        if(direction === 2) {
+          currentIndex = foundIndexs[0];
+        } else {
+          currentIndex = foundIndexs[foundIndexs.length - 1];
+        }
+        if(currentIndex !== -1) {
+          let tempSelected = [...this.currentMulti.selected];
+          this.currentMulti.selected.splice(0);
+          console.dir(foundIndexs);
+          for(let i=0; i<tempSelected.length; i++) {
+            let selected = _.filter(foundIndexs, (item) => {
+              return item === i;
+            });
+            console.dir(selected.length);
+            if(selected.length === 0) {
+              this.currentMulti.selected.push(tempSelected[i]);
+              console.dir([...this.currentMulti.selected]);
+            }
+          }
+          console.dir("aaaa");
+          console.dir([...this.currentMulti.selected]);
+          if(direction === 2) {
+            newIndex = currentIndex - 1 > 0 ? currentIndex - 1 : 0;
+          } else if(direction === 3) {
+            newIndex = currentIndex + 1 > this.currentMulti.selected.length ? this.currentMulti.selected.length : currentIndex + 1;
+          } else if(direction === 1) {
+            newIndex = this.currentMulti.selected.length > 0 ? this.currentMulti.selected.length : 0;
+          }
+          for(let i=0; i<foundIndexs.length; i++) {
+            this.currentMulti.selected.splice(newIndex, 0, tempSelected[foundIndexs[i]]);
+            console.dir(this.currentMulti.selected);
+            newIndex++;
+          }
+        }
+      },
       HTMLConverter: function (msg) {
         msg = msg === null || msg == undefined ? '**test**' : msg;
         let converter = new showdown.Converter({
@@ -453,9 +635,8 @@
                     return col.id === columnConfig[0];
                   });
                   if(target.length > 0) {
-                    if(/N/.test(target[0].format)) {
-                      sumValue += parseInt(target[0].value) * parseInt(columnConfig[1]);
-                    }
+                    let value = isNaN(parseInt(target[0].value)) ? 0 : parseInt(target[0].value);
+                    sumValue += value * parseInt(columnConfig[1]);
                   }
                 }
               }
@@ -485,7 +666,12 @@
           } else if(/E/.test(column.format)) {
             tip = "Email格式，如test@test.com";
           } else if(/T/.test(column.format)) {
-            tip = column.content === "" ? "文字" : "有格式限制的文字，請看題目說明";
+            if(column.content === "") {
+              tip = "文字";
+            } else {
+              let regexConfig = column.content.split("::");
+              tip = regexConfig[0];
+            }
           } else if(/S/.test(column.format)) {
             tip = "請從選單中選一個正確的值";
           } else if(/F/.test(column.format)) {
@@ -503,6 +689,10 @@
               filetip.push("你只能選擇一個檔案");
               tip = _.join(filetip, "，");
             }
+          } else if(/U/.test(column.format)) {
+            let selectionConfig = column.content.split("::");
+            let selections = _.uniq(selectionConfig[1].split(';'));
+            tip = "從" + selections.length +"個選項中挑出"+selectionConfig[0]+"個（按上方按鍵去選）";
           }
           return "格式：" + tip;
         }
@@ -561,6 +751,22 @@
           oriobj.signatures = [];
           oriobj.currentSignature = 0;
           oriobj.sheetsDialog.show = true;
+          nextTick(() => {
+            google.script.url.getLocation(function(location) {
+              if(location.hash !== "") {
+                ElMessage("捕捉到你想直接打開ID為" + location.hash + "問卷，請勿點擊其他連結");
+                let sheets = _.filter(oriobj.sheets, (item) => {
+                  return item.externalID === location.hash;
+                });
+                if(sheets.length > 0) {
+                  oriobj.openSheet(sheets[0].id);
+                  ElMessage("問卷開啟中...");
+                } else {
+                  ElMessage("找不到你要開啟的問卷，你確定這張問卷還可以填寫嗎？");
+                }
+              }
+            });
+          });
         })
         .withFailureHandler((data) => {
           oriobj.scriptError = data;
@@ -570,6 +776,7 @@
       reverseBody: function() {
         let oriobj = this;
         this.confirmDialog.show = false;
+        this.signatureDialog.show = false;
         this.columnDialog.show = true;
         nextTick(() => {
           oriobj.changeStep("輸入資料", "process", "success", "wait");
@@ -654,11 +861,14 @@
                 column.status = "這裡應該輸入電話號碼，如0912345678";
               }
             } else if(/T/.test(column.format)) {
-              if(new RegExp(column.content).test(column.value)) {
-                column.value = column.value.replace(/台北/,"臺北");
-                column.status = "";
-              } else {
-                column.status = "必須要包含以下關鍵字「" + column.content + "」";
+              if(column.content !== "") {
+                let regexConfig = column.content.split("::");
+                if(new RegExp(regexConfig[1]).test(column.value)) {
+                  column.value = column.value.replace(/台(北|中|南|灣)/,'臺$1');
+                  column.status = "";
+                } else {
+                  column.status = "必須要包含以下關鍵字「" + regexConfig[0] + "」";
+                }
               }
             } else if(/S/.test(column.format)) {
               if(new RegExp(column.value).test(column.content)) {
@@ -711,12 +921,12 @@
                 oriobj.viewOnly = true;
                 oriobj.enableModify = false;
                 oriobj.viewStep("檢視資料", true);
-                oriobj.viewStep("再次確認", false);
+                oriobj.viewStep("最後確認", false);
               }
             } else {
               oriobj.viewStep("輸入資料", true);
               oriobj.viewStep("檢視資料", false);
-              oriobj.viewStep("再次確認", true);
+              oriobj.viewStep("最後確認", true);
             }
             if(oriobj.signatures.length > 0) {
               oriobj.viewStep("簽名確認", true);
@@ -799,6 +1009,7 @@
           .withSuccessHandler((statsObj) => {
             oriobj.scriptError.message = "";
             oriobj.stats = statsObj;
+            oriobj.writeTick = dayjs().valueOf();
             oriobj.statDialog.show = true;
           })
           .withFailureHandler((data) => {
@@ -808,6 +1019,7 @@
       },
       sendMod: function() {
         let oriobj = this;
+        this.emailObj.value = this.emailObj.enable ? this.emailObj.value : "";
         let currentSheet = _.filter(this.sheets, (sheet) => {
           return sheet.id === oriobj.currentSID;
         });
@@ -840,16 +1052,16 @@
               nextTick(() => {
                 oriobj.uploadStatus = false;
                 if(oriobj.saveSuccessed) {
-                  oriobj.changeStep("再次確認", "success", "success", "success");
+                  oriobj.changeStep("最後確認", "success", "success", "success");
                 } else {
-                  oriobj.changeStep("再次確認", "error", "success", "success");
+                  oriobj.changeStep("最後確認", "error", "success", "success");
                 }
               });
             })
             .withFailureHandler((data) => {
               oriobj.scriptError = data;
               oriobj.uploadStatus = true;
-            }).writeRecord(currentSheet[0].refer, currentSheet[0].record, this.authDB, this.columnDB, this.enableModify, signatures);
+            }).writeRecord(currentSheet[0].refer, currentSheet[0].record, this.authDB, this.columnDB, this.enableModify, signatures, this.emailObj.value);
         }
       },
       closeLatest: function() {
@@ -862,24 +1074,24 @@
       },
       authMod: function() {
         let oriobj = this;
-        for(let i=0; i<this.authDB.length; i++) {
+        /*for(let i=0; i<this.authDB.length; i++) {
           if(/P/.test(this.authDB[i].type)) {
             this.authDB[i].value = "";
           }
           this.authDB[i].status = "";
-        }
+        }*/
         this.columnDialog.show = false;
         if(this.signatures.length === 0) {
           this.confirmDialog.show = true;
           nextTick(() => {
-            oriobj.changeStep("再次確認", "process", "success", "success");
+            oriobj.changeStep("最後確認", "process", "success", "success");
           });
         } else {
           this.enableSignature = true;
           this.emptySignatures = [];
           this.signatureDialog.show = true;
           nextTick(() => {
-            ElMessage('簽名模組準備中，請稍後');
+            ElMessage('簽名模組準備中，請等待準備完成後再簽名！');
             if(oriobj.resizeTimer !== undefined) {
               clearTimeout(oriobj.resizeTimer);
               oriobj.resizeTimer = undefined;
@@ -999,6 +1211,7 @@
                     oriobj.loading = false;
                   }).duplicateSubmits(sheet[0].record, pkeyColumns[0].value);
                 }*/
+                oriobj.remainEmail = sheetConfig.emailQuota;
                 oriobj.savedSignatures = sheetConfig.signatures;
                 oriobj.requestCount = sheetConfig.status;
                 if(sheetConfig.status.lastTick !== "") {
@@ -1023,6 +1236,20 @@
                         oriobj.columnDB[i].status = "請至少選擇一個檔案";
                         fileDetect = true;
                       }
+                    } else if(/U/.test(oriobj.columnDB[i].format)) {
+                      let selectionConfig = oriobj.columnDB[i].content.split("::");
+                      let selections = _.uniq(selectionConfig[1].split(';'));
+                      let selected = _.uniq(oriobj.columnDB[i].value.split(';'));
+                      let newSelected = [];
+                      for(let k=0; k<selected.length; k++) {
+                        let checkSelect = _.filter(selections, (selection) => {
+                          return selection === selected[k];
+                        });
+                        if(checkSelect.length > 0) {
+                          newSelected.push(checkSelect[0]);
+                        }
+                      }
+                      oriobj.columnDB[i].value = _.join(newSelected, ";");
                     }
                   }
                   if(!fileDetect) {
@@ -1103,7 +1330,7 @@
         if(this.emptySignatures.length === 0) {
           this.confirmDialog.show = true;
           nextTick(() => {
-            oriobj.changeStep("再次確認", "process", "success", "wait");
+            oriobj.changeStep("最後確認", "process", "success", "wait");
           });
         } else {
           nextTick(() => {
@@ -1143,6 +1370,16 @@
         this.currentFile.fileList = [];
         this.uploadErrors = "";
         this.fileDialog.show = true;
+      },
+      endSelection: function() {
+        let oriobj = this;
+        let column = _.filter(this.columnDB, (column) => {
+          return column.id === oriobj.currentMulti.id;
+        });
+        if(column.length > 0) {
+          column[0].value = _.join(this.currentMulti.selected, ";");
+        }
+        this.multisDialog.show = false;
       },
       startUpload: function() {
         let oriobj = this;
@@ -1201,7 +1438,7 @@
           };
           fr.readAsArrayBuffer(file);
         }
-      }
+      },
     },
     computed: {
       availableSteps: function() {
@@ -1265,6 +1502,14 @@
     },
     data() {
       return {
+        remainEmail: 0,
+        progressColor: [
+          { color: '#F56C6C', percentage: 20 },
+          { color: '#FF9900', percentage: 40 },
+          { color: '#E6A23C', percentage: 60 },
+          { color: '#CCCC00', percentage: 80 },
+          { color: '#67C23A', percentage: 100 },
+        ],
         loginStatus: false,
         pageWidth: 0,
         currentFile: {
@@ -1310,7 +1555,7 @@
             show: false
           },
           {
-            title: "再次確認",
+            title: "最後確認",
             status: "wait",
             show: true
           }
@@ -1341,6 +1586,20 @@
         loginDialog: {
           show: false,
           transition: "slide-up",
+          fullscreen: true
+        },
+        currentMulti: {
+          id: "",
+          name: "",
+          selections: [],
+          selected: [],
+          maxNum: 0,
+          modified: [],
+          error: ""
+        },
+        multisDialog: {
+          show: false,
+          transition: "slide-down",
           fullscreen: true
         },
         fileDialog: {
@@ -1386,7 +1645,15 @@
           length: 0,
           lastTick: 0
         },
-        stats: []
+        stats: [],
+        emailObj: {
+          value: "",
+          nullable: false,
+          type: "F",
+          status: "請輸入一個Email",
+          format: "E",
+          enable: false
+        }
       };
     },
   };

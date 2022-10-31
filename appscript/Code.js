@@ -14,7 +14,7 @@ function doGet(e) {
 function getQList() {
   let listSS = SpreadsheetApp.openById(appProperties.getProperty('listSheetID'));
   let listSheet = listSS.getSheets()[0];
-  let listRange = listSheet.getRange("A:K");
+  let listRange = listSheet.getRange("A:N");
   let listArr = listRange.getValues();
   let lists = [];
   if(listArr.length > 1) {
@@ -22,19 +22,23 @@ function getQList() {
       let row = listArr[i];
       if(row.length > 0) {
         if(row[0].toString() !== "") {
-          lists.push({
-            record: row[2].toString().trim(),
-            name: row[0].toString().trim(),
-            refer: row[1].toString().trim(),
-            dueDate: parseInt(row[3].toString().trim()),
-            viewDate: parseInt(row[4].toString().trim()),
-            enableModify: row[5].toString().trim() === "否" ? false : true,
-            signatures: row[6].toString() === "" ? [] : row[6].toString().trim().split(";"),
-            comment: row[7].toString().trim(),
-            loginTip: row[8].toString().trim(),
-            submitTip: row[9].toString().trim(),
-            loginfailTip: row[10].toString().trim()
-          })
+          if(row[11].toString() === "是") {
+            lists.push({
+              record: row[2].toString().trim(),
+              name: row[0].toString().trim(),
+              refer: row[1].toString().trim(),
+              dueDate: parseInt(row[3].toString().trim()),
+              viewDate: parseInt(row[4].toString().trim()),
+              enableModify: row[5].toString().trim() === "否" ? false : true,
+              signatures: row[6].toString() === "" ? [] : row[6].toString().trim().split(";"),
+              comment: row[7].toString().trim(),
+              loginTip: row[8].toString().trim(),
+              submitTip: row[9].toString().trim(),
+              loginfailTip: row[10].toString().trim(),
+              email: row[12].toString().trim(),
+              externalID: row[13].toString().trim()
+            });
+          }
         }
       }
     }
@@ -55,7 +59,7 @@ function readRecord(referSSID, recordSSID, auth) {
   if(authRecord(referSSID, auth)) {
     let listSS = SpreadsheetApp.openById(appProperties.getProperty('listSheetID'));
     let listSheet = listSS.getSheets()[0];
-    let listRange = listSheet.getRange("A:K");
+    let listRange = listSheet.getRange("A:N");
     let listArr = listRange.getValues();
     let currentSheet = _.filter(listArr, (sheet) => {
       if(sheet[1].toString().trim() === referSSID) {
@@ -141,13 +145,13 @@ function readRecord(referSSID, recordSSID, auth) {
                           let file = DriveApp.getFileById(fileContent);
                           column.lastInput = file.getUrl();
                         } else {
-                          column.lastInput = "";
+                          column.lastInput = undefined;
                         }
                       } else {
-                        column.lastInput = "";
+                        column.lastInput = undefined;
                       }
                     } else {
-                      column.lastInput = "";
+                      column.lastInput = undefined;
                     }
                     column.value = "";
                   } else {
@@ -171,6 +175,7 @@ function readRecord(referSSID, recordSSID, auth) {
                 lastTick: userRecord !== undefined ? userRecord[0] : "",
                 pkey: maskString(pkeys[0].id)
               },
+              emailQuota: MailApp.getRemainingDailyQuota(),
               signatures: signatures,
               headers: headers
             };
@@ -318,10 +323,10 @@ function authRecord(referSSID, auth) {
   return false;
 }
 
-function writeRecord(referSSID, recordSSID, auth, record, accept, signatures) {
+function writeRecord(referSSID, recordSSID, auth, record, accept, signatures, email) {
   let listSS = SpreadsheetApp.openById(appProperties.getProperty('listSheetID'));
   let listSheet = listSS.getSheets()[0];
-  let listRange = listSheet.getRange("A:K");
+  let listRange = listSheet.getRange("A:N");
   let listArr = listRange.getValues();
   let writeTick = (new Date()).getTime();
   let pureData = [writeTick, accept];
@@ -448,13 +453,37 @@ function writeRecord(referSSID, recordSSID, auth, record, accept, signatures) {
                       proceedWrite = false;
                     }
                   } else if(/T/.test(column.format)) {
-                    if(new RegExp(column.content).test(data.value)) {
-                      column.value = data.value.replace(/台北/,"臺北");
+                    if(column.content === "") {
+                      column.value = data.value.replace(/台(北|中|南|灣)/,'臺$1');
                     } else {
-                      proceedWrite = false;
+                      let regexConfig = column.content.split("::");
+                      if(new RegExp(regexConfig[1]).test(data.value)) {
+                        column.value = data.value.replace(/台(北|中|南|灣)/,'臺$1');
+                      } else {
+                        proceedWrite = false;
+                      }
                     }
                   } else if(/S/.test(column.format)) {
                     if(new RegExp(data.value).test(column.content)) {
+                      column.value = data.value;
+                    } else {
+                      proceedWrite = false;
+                    }
+                  } else if(/U/.test(column.format)) {
+                    let selectionConfig = column.content.split("::");
+                    let selections = _.uniq(selectionConfig[1].split(';'));
+                    let selected = _.uniq(data.value.split(';'));
+                    let newSelected = [];
+                    for(let k=0; k<selected.length; k++) {
+                      let checkSelect = _.filter(selections, (selection) => {
+                        return selection === selected[k];
+                      });
+                      if(checkSelect.length > 0) {
+                        newSelected.push(checkSelect[0]);
+                      }
+                    }
+                    newSelected = _.uniq(newSelected);
+                    if(newSelected.length === selected.length) {
                       column.value = data.value;
                     } else {
                       proceedWrite = false;
@@ -518,6 +547,7 @@ function writeRecord(referSSID, recordSSID, auth, record, accept, signatures) {
           }
           pureData.push(primaryData);
           let signatureIDs = [];
+          let csvOutput = "";
           if(currentSheet.length > 0) {
             let savedSignatures = currentSheet[0][6].toString().trim().split(';');
             if(savedSignatures.length > 0) {
@@ -532,6 +562,7 @@ function writeRecord(referSSID, recordSSID, auth, record, accept, signatures) {
                   var imageUpload = Utilities.base64Decode(signature[0].blob.split(",")[1]);
                   let blob = Utilities.newBlob(imageUpload,type,savedSignatures[i]);
                   let writtenFile = folder.createFile(blob);
+                  csvOutput += "你的簽名("+(i+1)+"/"+signature.length+")： "+ writtenFile.getUrl() + "\n";
                   writtenFile.setName("[" + writtenFile.getId() + "]" + currentSheet[0][0].toString().trim() + primaryData + "的" + savedSignatures[i] + "簽名");
                   signatureIDs.push(writtenFile.getId());
                 }
@@ -543,11 +574,34 @@ function writeRecord(referSSID, recordSSID, auth, record, accept, signatures) {
           pureData.push(groupData);
           for(let i=0; i<headers.length; i++) {
             pureData.push(headers[i].value.toString());
+            if(/^\w+((-\w+)|(\.\w+))*\@[A-Za-z0-9]+((\.|-)[A-Za-z0-9]+)*\.[A-Za-z]+$/.test(email)) {
+              if(/F/.test(headers[i].type)) {
+                if(/F/.test(headers[i].format)) {
+                  let file = DriveApp.getFileById(headers[i].value.toString());
+                  csvOutput += headers[i].name + " ： " + file.getUrl() + "\n";
+                } else {
+                  csvOutput += headers[i].name + " ： " + headers[i].value.toString().replace("📝", "") + "\n";
+                }
+              }
+            }
           }
           let recordSS = SpreadsheetApp.openById(recordSSID);
           let recordSheet = recordSS.getSheets()[0];
           recordSheet.appendRow(pureData);
           result = true;
+          if(/^\w+((-\w+)|(\.\w+))*\@[A-Za-z0-9]+((\.|-)[A-Za-z0-9]+)*\.[A-Za-z]+$/.test(email)) {
+            if(MailApp.getRemainingDailyQuota() > 0) {
+              let now = new Date();
+              let replyEmail = currentSheet[0][12].toString().trim();
+              let systemTitle = appProperties.getProperty('systemTitle');
+              let emailSSID = appProperties.getProperty('emailLog');
+              let formTitle = currentSheet[0][0].toString().trim();
+              MailApp.sendEmail(email, replyEmail, systemTitle + "填寫結果回條","您好：感謝您填寫表單「" + formTitle + "」，你的填寫時間是" + now.toLocaleString() + "\n以下是你的填寫結果\n" + csvOutput + "\n任何問題，請回信至：" + replyEmail);
+              let emailSS = SpreadsheetApp.openById(emailSSID);
+              let emailSheet = emailSS.getSheets()[0];
+              emailSheet.appendRow([now.getTime(), formTitle, primaryData,email]);
+            }
+          }
         }
       }
       for(let i=0; i<headers.length; i++) {
@@ -569,7 +623,7 @@ function writeRecord(referSSID, recordSSID, auth, record, accept, signatures) {
 function saveFile(referSSID, recordSSID, auth, columnID, fileObj) {
   let listSS = SpreadsheetApp.openById(appProperties.getProperty('listSheetID'));
   let listSheet = listSS.getSheets()[0];
-  let listRange = listSheet.getRange("A:K");
+  let listRange = listSheet.getRange("A:N");
   let listArr = listRange.getValues();
   let proceedWrite = true;
   let errorLog = [];
@@ -610,7 +664,7 @@ function saveFile(referSSID, recordSSID, auth, columnID, fileObj) {
           let mimeLimit = "";
           if(column.content !== "") {
             let contentConfig = column.content.split(";");
-            if(contentConfig[2] !== "") { maxSize = parseInt(contentConfig[1]); }
+            if(contentConfig[2] !== "") { maxSize = parseInt(contentConfig[2]); }
             if(contentConfig[1] !== "") { mimeLimit = contentConfig[1]; }
             if(contentConfig[3] !== "") { storageID = contentConfig[3]; }
           }
@@ -724,7 +778,7 @@ function compareSheets(referSSID, recordSSID) {
             referCount.push(referTemp[k][pkeyColumns[0].pos].toString().trim());
           }
           let recordTemp = _.filter(recordArr, (record) => {
-            return record[3].toString().trim() === groups[i].toString();
+            return record[4].toString().trim() === groups[i].toString();
           });
           let recordCount = [];
           for(let k=0; k<recordTemp.length; k++) {
