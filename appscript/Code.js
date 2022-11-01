@@ -14,7 +14,7 @@ function doGet(e) {
 function getQList() {
   let listSS = SpreadsheetApp.openById(appProperties.getProperty('listSheetID'));
   let listSheet = listSS.getSheets()[0];
-  let listRange = listSheet.getRange("A:N");
+  let listRange = listSheet.getRange("A:O");
   let listArr = listRange.getValues();
   let lists = [];
   if(listArr.length > 1) {
@@ -36,7 +36,8 @@ function getQList() {
               submitTip: row[9].toString().trim(),
               loginfailTip: row[10].toString().trim(),
               email: row[12].toString().trim(),
-              externalID: row[13].toString().trim()
+              externalID: row[13].toString().trim(),
+              writeAllowed: row[14].toString().trim() === "是" ? true : false
             });
           }
         }
@@ -59,7 +60,7 @@ function readRecord(referSSID, recordSSID, auth) {
   if(authRecord(referSSID, auth)) {
     let listSS = SpreadsheetApp.openById(appProperties.getProperty('listSheetID'));
     let listSheet = listSS.getSheets()[0];
-    let listRange = listSheet.getRange("A:N");
+    let listRange = listSheet.getRange("A:O");
     let listArr = listRange.getValues();
     let currentSheet = _.filter(listArr, (sheet) => {
       if(sheet[1].toString().trim() === referSSID) {
@@ -71,114 +72,116 @@ function readRecord(referSSID, recordSSID, auth) {
     });
     let signatures = [];
     if(currentSheet.length > 0) {
-      let headers = getHeaders(referSSID);
-      let pkeys = _.filter(headers, (header) => {
-        return /P/.test(header.type);
-      });
-      if(pkeys.length > 0) {
-        let uKeys = _.filter(auth, (aObj) => {
-          return aObj.id === pkeys[0].id;
+      if(currentSheet[0][14].toString().trim() === "是") {
+        let headers = getHeaders(referSSID);
+        let pkeys = _.filter(headers, (header) => {
+          return /P/.test(header.type);
         });
-        if(uKeys.length > 0) {
-          let userRows = getUserRow(referSSID, auth);
-          if(userRows.length > 0) {
-            let recordSS = SpreadsheetApp.openById(recordSSID);
-            let recordSheet = recordSS.getSheets()[0];
-            let recordRange = recordSheet.getDataRange();
-            let recordArr = recordRange.getValues();
-            let userRecords = _.filter(recordArr, (arr) => {
-              return arr[2].toString() === uKeys[0].value;
-            });
-            let userRecord = userRecords.length > 0 ? userRecords[userRecords.length - 1] : undefined;
-            if(userRecord !== undefined) {
-              if(userRecord[3].toString() !== "") {
-                let signs = userRecord[3].toString().trim().split(";");
-                for(let i=0; i<signs.length; i++) {
-                  let file = DriveApp.getFileById(signs[i]);
-                  signatures.push(file.getUrl());
+        if(pkeys.length > 0) {
+          let uKeys = _.filter(auth, (aObj) => {
+            return aObj.id === pkeys[0].id;
+          });
+          if(uKeys.length > 0) {
+            let userRows = getUserRow(referSSID, auth);
+            if(userRows.length > 0) {
+              let recordSS = SpreadsheetApp.openById(recordSSID);
+              let recordSheet = recordSS.getSheets()[0];
+              let recordRange = recordSheet.getDataRange();
+              let recordArr = recordRange.getValues();
+              let userRecords = _.filter(recordArr, (arr) => {
+                return arr[2].toString() === uKeys[0].value;
+              });
+              let userRecord = userRecords.length > 0 ? userRecords[userRecords.length - 1] : undefined;
+              if(userRecord !== undefined) {
+                if(userRecord[3].toString() !== "") {
+                  let signs = userRecord[3].toString().trim().split(";");
+                  for(let i=0; i<signs.length; i++) {
+                    let file = DriveApp.getFileById(signs[i]);
+                    signatures.push(file.getUrl());
+                  }
                 }
               }
-            }
-            for(let i=0; i<headers.length; i++) {
-              let column = headers[i];
-              column.lastInput = undefined;
-              if(/C/.test(column.type)) {
-                if(/F/.test(column.format)) {
-                  let imgContent = userRows[0][column.pos].toString().trim()
-                  if(imgContent !== "") {
-                    let storageID = column.content === "" ? appProperties.getProperty('universalStorageID') : column.content;
-                    let files = DriveApp.searchFiles('parents in "'+ storageID +'" and title contains "' + imgContent + '"');
-                    while(files.hasNext()) {
-                      var file = files.next();
-                      column.savedContent = file.getUrl();
-                    }
-                  } else {
-                    column.savedContent = "";
-                  }
-                } else if(/T/.test(column.format)) {
-                  column.savedContent = userRows[0][column.pos].toString();
-                }
-              } else if(/F|G/.test(column.type)) {
-                column.savedContent = userRows[0][column.pos].toString();
-                column.value = column.savedContent;
-                if(/F/.test(column.type)) {
+              for(let i=0; i<headers.length; i++) {
+                let column = headers[i];
+                column.lastInput = undefined;
+                if(/C/.test(column.type)) {
                   if(/F/.test(column.format)) {
-                    let fileContent = userRows[0][column.pos].toString().trim();
-                    if(fileContent !== "") {
-                      let storageID = appProperties.getProperty('universalStorageID');
-                      if(column.content !== "") {
-                        let contentConfig = column.content.split(";");
-                        if(contentConfig[3] !== "") { storageID = contentConfig[3]; }
-                      }
-                      let files = DriveApp.searchFiles('parents in "'+ storageID +'" and title contains "' + fileContent + '"');
-                      while (files.hasNext()) {
+                    let imgContent = userRows[0][column.pos].toString().trim()
+                    if(imgContent !== "") {
+                      let storageID = column.content === "" ? appProperties.getProperty('universalStorageID') : column.content;
+                      let files = DriveApp.searchFiles('parents in "'+ storageID +'" and title contains "' + imgContent + '"');
+                      while(files.hasNext()) {
                         var file = files.next();
                         column.savedContent = file.getUrl();
                       }
                     } else {
                       column.savedContent = "";
                     }
-                    if(userRecord !== undefined) {
-                      if(userRecord[column.pos + 5] != null) {
-                        fileContent = userRecord[column.pos + 5].toString().trim();
-                        if(fileContent !== "") {
-                          let file = DriveApp.getFileById(fileContent);
-                          column.lastInput = file.getUrl();
+                  } else if(/T/.test(column.format)) {
+                    column.savedContent = userRows[0][column.pos].toString();
+                  }
+                } else if(/F|G/.test(column.type)) {
+                  column.savedContent = userRows[0][column.pos].toString();
+                  column.value = column.savedContent;
+                  if(/F/.test(column.type)) {
+                    if(/F/.test(column.format)) {
+                      let fileContent = userRows[0][column.pos].toString().trim();
+                      if(fileContent !== "") {
+                        let storageID = appProperties.getProperty('universalStorageID');
+                        if(column.content !== "") {
+                          let contentConfig = column.content.split(";");
+                          if(contentConfig[3] !== "") { storageID = contentConfig[3]; }
+                        }
+                        let files = DriveApp.searchFiles('parents in "'+ storageID +'" and title contains "' + fileContent + '"');
+                        while (files.hasNext()) {
+                          var file = files.next();
+                          column.savedContent = file.getUrl();
+                        }
+                      } else {
+                        column.savedContent = "";
+                      }
+                      if(userRecord !== undefined) {
+                        if(userRecord[column.pos + 5] != null) {
+                          fileContent = userRecord[column.pos + 5].toString().trim();
+                          if(fileContent !== "") {
+                            let file = DriveApp.getFileById(fileContent);
+                            column.lastInput = file.getUrl();
+                          } else {
+                            column.lastInput = undefined;
+                          }
                         } else {
                           column.lastInput = undefined;
                         }
                       } else {
                         column.lastInput = undefined;
                       }
+                      column.value = "";
                     } else {
-                      column.lastInput = undefined;
-                    }
-                    column.value = "";
-                  } else {
-                    if(userRecord !== undefined) {
-                      if(userRecord[column.pos + 5] != null) {
-                        column.lastInput = userRecord[column.pos + 5].toString().replace(/📝/, "");
-                        column.value = column.lastInput;
-                      } else {
-                        column.lastInput = "";
+                      if(userRecord !== undefined) {
+                        if(userRecord[column.pos + 5] != null) {
+                          column.lastInput = userRecord[column.pos + 5].toString().replace(/📝/, "");
+                          column.value = column.lastInput;
+                        } else {
+                          column.lastInput = "";
+                        }
                       }
                     }
                   }
                 }
+                column.pos = undefined;
               }
-              column.pos = undefined;
+              return {
+                status: {
+                  length: userRecords.length,
+                  modified: userRecord !== undefined ? userRecord[1] : "",
+                  lastTick: userRecord !== undefined ? userRecord[0] : "",
+                  pkey: maskString(pkeys[0].id)
+                },
+                emailQuota: MailApp.getRemainingDailyQuota(),
+                signatures: signatures,
+                headers: headers
+              };
             }
-            return {
-              status: {
-                length: userRecords.length,
-                modified: userRecord !== undefined ? userRecord[1] : "",
-                lastTick: userRecord !== undefined ? userRecord[0] : "",
-                pkey: maskString(pkeys[0].id)
-              },
-              emailQuota: MailApp.getRemainingDailyQuota(),
-              signatures: signatures,
-              headers: headers
-            };
           }
         }
       }
@@ -326,7 +329,7 @@ function authRecord(referSSID, auth) {
 function writeRecord(referSSID, recordSSID, auth, record, accept, signatures, email) {
   let listSS = SpreadsheetApp.openById(appProperties.getProperty('listSheetID'));
   let listSheet = listSS.getSheets()[0];
-  let listRange = listSheet.getRange("A:N");
+  let listRange = listSheet.getRange("A:O");
   let listArr = listRange.getValues();
   let writeTick = (new Date()).getTime();
   let pureData = [writeTick, accept];
@@ -356,6 +359,10 @@ function writeRecord(referSSID, recordSSID, auth, record, accept, signatures, em
       proceedWrite = false;
       errorLog.push("表單已過時");
       //}
+    }
+    if(currentSheet[0][14].toString().trim() === "否") {
+      proceedWrite = false;
+      errorLog.push("表單關閉，不允許寫入");
     }
   }
   if(proceedWrite) {
@@ -577,8 +584,12 @@ function writeRecord(referSSID, recordSSID, auth, record, accept, signatures, em
             if(/^\w+((-\w+)|(\.\w+))*\@[A-Za-z0-9]+((\.|-)[A-Za-z0-9]+)*\.[A-Za-z]+$/.test(email)) {
               if(/F/.test(headers[i].type)) {
                 if(/F/.test(headers[i].format)) {
-                  let file = DriveApp.getFileById(headers[i].value.toString());
-                  csvOutput += headers[i].name + " ： " + file.getUrl() + "\n";
+                  if(headers[i].value !== "") {
+                    let file = DriveApp.getFileById(headers[i].value.toString());
+                    csvOutput += headers[i].name + " ： " + file.getUrl() + "\n";
+                  } else {
+                    csvOutput += headers[i].name + " ： 無檔案\n";
+                  }
                 } else {
                   csvOutput += headers[i].name + " ： " + headers[i].value.toString().replace("📝", "") + "\n";
                 }
@@ -623,7 +634,7 @@ function writeRecord(referSSID, recordSSID, auth, record, accept, signatures, em
 function saveFile(referSSID, recordSSID, auth, columnID, fileObj) {
   let listSS = SpreadsheetApp.openById(appProperties.getProperty('listSheetID'));
   let listSheet = listSS.getSheets()[0];
-  let listRange = listSheet.getRange("A:N");
+  let listRange = listSheet.getRange("A:O");
   let listArr = listRange.getValues();
   let proceedWrite = true;
   let errorLog = [];

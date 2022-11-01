@@ -132,14 +132,15 @@
               {{ tag.name }}
             </el-tag>
             <span style='font-weight: bold'>{{ scope.row.name }}</span><br/>
-            <span>填寫至：{{scope.row.dueDate === 0 ? "不開放" : dateConverter(scope.row.dueDate) }}</span><br/>
-            <span>檢視至：{{ dateConverter(scope.row.viewDate) }}</span>
+            <span v-if="scope.row.writeAllowed">填寫至：{{scope.row.dueDate === 0 ? "不開放" : dateConverter(scope.row.dueDate) }}</span><br/>
+            <span v-if="scope.row.writeAllowed">檢視至：{{ dateConverter(scope.row.viewDate) }}</span>
+            <span v-if="!scope.row.writeAllowed">本問卷暫時關閉</span>
           </template>
         </el-table-column>
         <el-table-column label="">
           <template #default="scope">
             <div class="buttonBlock">
-            <el-button class="ma1 pa2" size="large" type="primary" v-on:click="openSheet(scope.row.id)">{{ viewCheck(scope.row) ? "檢視" : "填寫&檢視" }}表單</el-button>
+            <el-button class="ma1 pa2" size="large" type="primary" v-on:click="openSheet(scope.row.id)" :disabled="!scope.row.writeAllowed">{{ viewCheck(scope.row) ? "檢視" : "填寫&檢視" }}表單</el-button>
             </div>
           </template>
         </el-table-column>
@@ -207,6 +208,13 @@
       <template #default>
         <span style="font-size: 1.5em">
           問卷{{ expired > 0 ? "即將在" + expired + "秒後過期，屆時將無法送出！" : "已經無法填寫了" }}
+        </span>
+      </template>
+    </el-alert>
+    <el-alert title="表單關閉" type="warning" show-icon v-if="!writeAllowed">
+      <template #default>
+        <span style="font-size: 1.5em">
+          本表單暫時關閉，有任何問題請洽管理員
         </span>
       </template>
     </el-alert>
@@ -327,7 +335,7 @@
       <el-alert title="勾選數量限制" type="info" show-icon>
         <template #default>
           <span style="font-size: 1.5em">
-            請從 {{ currentMulti.selections.length }} 項中挑出至多 {{ currentMulti.maxNum }} 項，如果要調整已選區的選項順序，勾選之後會出現調整功能
+            請從 {{ currentMulti.selections.length }} 項中挑出至多 {{ currentMulti.maxNum }} 項，按下方藍色按鈕調整已選區的選項，如果要調整已選區的選項順序，勾選之後會出現調整功能（下方綠色按鈕）
           </span>
         </template>
       </el-alert>
@@ -907,6 +915,7 @@
             oriobj.loginTip = sheet[0].loginTip;
             oriobj.alertWords = sheet[0].comment;
             oriobj.submitTip = sheet[0].submitTip;
+            oriobj.writeAllowed = sheet[0].writeAllowed;
             for(let i=0; i<sheet[0].signatures.length; i++) {
               oriobj.signatures.push({
                 id: uuidv4(),
@@ -937,9 +946,11 @@
               headers[i].tid = uuidv4();
               headers[i].status = "";
             }
-            oriobj.authDB = _.filter(headers, (header) => {
-              return /A|P/.test(header.type);
-            });
+            if(sheet[0].writeAllowed) {
+              oriobj.authDB = _.filter(headers, (header) => {
+                return /A|P/.test(header.type);
+              });
+            }
             let pkey = _.filter(headers, (header) => {
               return /P/.test(header.type);
             });
@@ -1502,6 +1513,7 @@
     },
     data() {
       return {
+        writeAllowed: false,
         remainEmail: 0,
         progressColor: [
           { color: '#F56C6C', percentage: 20 },
