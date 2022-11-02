@@ -742,12 +742,14 @@
           for(let i=0; i<list.length; i++) {
             let tags = list[i].name.match(/\[[^\]]+\]/g);
             list[i].tags = [];
-            for(let k=0; k<tags.length; k++) {
-              list[i].tags.push({
-                name: tags[k].replace(/\[|\]/g,""),
-                color: oriobj.colors[ (i*10 + k) % oriobj.colors.length ],
-                id: uuidv4()
-              });
+            if(tags !== null) {
+              for(let k=0; k<tags.length; k++) {
+                list[i].tags.push({
+                  name: tags[k].replace(/\[|\]/g,""),
+                  color: oriobj.colors[ (i*10 + k) % oriobj.colors.length ],
+                  id: uuidv4()
+                });
+              }
             }
             list[i].name = (list[i].name.match(/(?:.(?!\S*\]))+/))[0].replace(/\]/,"")
             list[i].id = uuidv4();
