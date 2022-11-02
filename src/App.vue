@@ -145,7 +145,7 @@
           </template>
         </el-table-column>
       </el-table>
-      <div class="footerText">Developer: Kelunyang@LKSH 2022 <a style="color:#CCC" target="_blank" href="https://github.com/kelunyang/sheet-machine" >GITHUB</a></div>
+      <div class="footerText">Developer: <a class="footerText" href="mailto:kelunyang@outlook.com">Kelunyang</a>@LKSH 2022 <a style="color:#CCC" target="_blank" href="https://github.com/kelunyang/sheet-machine" >GITHUB</a></div>
     </el-space>
   </el-dialog>
   <el-dialog
@@ -273,7 +273,7 @@
       <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="reloadPage()">回到問卷列表</el-button>
       <!-- <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="viewLatest()">查看最後一位填寫者以及你是否曾填寫過</el-button> -->
       <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="viewStat()">查看填答率統計</el-button>
-      <div class="footerText">Developer: Kelunyang@LKSH 2022 <a style="color:#CCC" target="_blank" href="https://github.com/kelunyang/sheet-machine" >GITHUB</a></div>
+      <div class="footerText">Developer: <a class="footerText" href="mailto:kelunyang@outlook.com">Kelunyang</a>@LKSH 2022 <a style="color:#CCC" target="_blank" href="https://github.com/kelunyang/sheet-machine" >GITHUB</a></div>
     </el-space>
   </el-dialog>
   <el-drawer
@@ -691,7 +691,7 @@
               if(contentConfig[0] !== "") {
                 filetip.push(contentConfig[0] + "類型檔案");
               }
-              if(contentConfig[1] !== "") {
+              if(contentConfig[2] !== "") {
                 filetip.push("大小需小於" + contentConfig[2] + "MB");
               }
               filetip.push("你只能選擇一個檔案");
