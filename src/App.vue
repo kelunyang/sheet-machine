@@ -1321,6 +1321,7 @@
                 }
                 oriobj.loginDialog.show = false;
                 oriobj.loginStatus = false;
+                oriobj.googleStatus = undefined;
                 oriobj.columnDialog.show = true;
                 nextTick(() => {
                   if(oriobj.viewOnly) {
