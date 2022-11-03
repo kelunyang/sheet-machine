@@ -203,12 +203,10 @@ function getUserRow(referSSID, auth) {
   let pKey = _.filter(headers, (header) => {
     return /P/.test(header.type);
   });
-  Logger.log(pKey);
   if(pKey.length > 0) {
     let uKey = _.filter(auth, (aObj) => {
       return aObj.id === pKey[0].id;
     });
-    Logger.log(uKey);
     if(uKey.length > 0) {
       return _.filter(referArr, (row) => {
         return row[pKey[0].pos].toString() === uKey[0].value;
