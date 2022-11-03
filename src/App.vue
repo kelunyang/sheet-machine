@@ -145,7 +145,7 @@
           </template>
         </el-table-column>
       </el-table>
-      <div class="footerText">Developer: <a class="footerText" href="mailto:kelunyang@outlook.com">Kelunyang</a>@LKSH 2022 <a style="color:#CCC" target="_blank" href="https://github.com/kelunyang/sheet-machine" >GITHUB</a></div>
+      <div class="footerText">Developer: <a class="cleanLink" href="mailto:kelunyang@outlook.com">Kelunyang</a>@LKSH 2022 <a style="color:#CCC" target="_blank" href="https://github.com/kelunyang/sheet-machine" >GITHUB</a></div>
     </el-space>
   </el-dialog>
   <el-dialog
@@ -201,6 +201,13 @@
       <template #default>
         <span style="font-size: 1.5em">
           正在確認你的身分以及查詢你是否有填過，請稍候
+        </span>
+      </template>
+    </el-alert>
+    <el-alert title="Google帳號狀態" type="info" show-icon v-if="googleStatus !== undefined">
+      <template #default>
+        <span style="font-size: 1.5em">
+          {{ googleStatus === '' ? '你還沒登入Google帳號吧？開個新分頁登入之後重新整理本頁就可以了' : '目前登入的Gmail帳號是：' + googleStatus }}
         </span>
       </template>
     </el-alert>
@@ -265,15 +272,16 @@
             :value="item"
           />
         </el-select>
+        <el-button v-if="formatDetector('G', 'P', authColumn)" class="ma1 pa2 xs12" size="large" type="danger" v-on:click="loginGmail(authColumn)">按此驗證你的Google帳號以進入表單</el-button>
         <div class="alertWord" v-if="authColumn.status !== ''">{{ authColumn.status }}</div>
         <div class="captionWord" v-if="authColumn.status === ''">{{ formatHelper(authColumn) }}</div>
       </el-space>
-      <el-button v-if="authDB.length > 0" class="ma1 pa1 xs12" size="large" type="danger" :disabled="checkAuth()" v-on:click="loginView()">{{ checkAuth() ? "格式錯誤或有空值，修正後才可以送出" : "送出認證以" + viewTip + "表單" }}</el-button>
+      <el-button v-if="authtypeCheck()" class="ma1 pa1 xs12" size="large" type="danger" :disabled="checkAuth()" v-on:click="loginView()">{{ checkAuth() ? "格式錯誤或有空值，修正後才可以送出" : "送出認證以" + viewTip + "表單" }}</el-button>
       <el-button v-if="saveSuccessed" class="ma1 pa2 xs12" size="large" type="success" v-on:click="downloadResult()">下載你剛剛填寫的結果</el-button>
       <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="reloadPage()">回到問卷列表</el-button>
       <!-- <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="viewLatest()">查看最後一位填寫者以及你是否曾填寫過</el-button> -->
       <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="viewStat()">查看填答率統計</el-button>
-      <div class="footerText">Developer: <a class="footerText" href="mailto:kelunyang@outlook.com">Kelunyang</a>@LKSH 2022 <a style="color:#CCC" target="_blank" href="https://github.com/kelunyang/sheet-machine" >GITHUB</a></div>
+      <div class="footerText">Developer: <a class="cleanLink" href="mailto:kelunyang@outlook.com">Kelunyang</a>@LKSH 2022 <a style="color:#CCC" target="_blank" href="https://github.com/kelunyang/sheet-machine" >GITHUB</a></div>
     </el-space>
   </el-dialog>
   <el-drawer
@@ -499,6 +507,18 @@
   import SmoothSignature from "smooth-signature";
   export default {
     methods: {
+      authtypeCheck: function() {
+        if(this.authDB.length > 0) {
+          let gmailFinder = _.filter(this.authDB, (column) => {
+            if(/P/.test(column.type)) {
+              return /G/.test(column.format);
+            }
+            return false;
+          });
+          return !gmailFinder.length > 0;
+        }
+        return false;
+      },
       checkSend: function() {
         if(this.emailObj.enable) {
           if(this.emailObj.status === "") {
@@ -593,19 +613,14 @@
         if(currentIndex !== -1) {
           let tempSelected = [...this.currentMulti.selected];
           this.currentMulti.selected.splice(0);
-          console.dir(foundIndexs);
           for(let i=0; i<tempSelected.length; i++) {
             let selected = _.filter(foundIndexs, (item) => {
               return item === i;
             });
-            console.dir(selected.length);
             if(selected.length === 0) {
               this.currentMulti.selected.push(tempSelected[i]);
-              console.dir([...this.currentMulti.selected]);
             }
           }
-          console.dir("aaaa");
-          console.dir([...this.currentMulti.selected]);
           if(direction === 2) {
             newIndex = currentIndex - 1 > 0 ? currentIndex - 1 : 0;
           } else if(direction === 3) {
@@ -615,7 +630,6 @@
           }
           for(let i=0; i<foundIndexs.length; i++) {
             this.currentMulti.selected.splice(newIndex, 0, tempSelected[foundIndexs[i]]);
-            console.dir(this.currentMulti.selected);
             newIndex++;
           }
         }
@@ -701,6 +715,8 @@
             let selectionConfig = column.content.split("::");
             let selections = _.uniq(selectionConfig[1].split(';'));
             tip = "從" + selections.length +"個選項中挑出"+selectionConfig[0]+"個（按上方按鍵去選）";
+          } else if(/G/.test(column.format)) {
+            tip = "本欄無法手動輸入，系統會自動讀取你登入的Google帳號";
           }
           return "格式：" + tip;
         }
@@ -952,6 +968,15 @@
               oriobj.authDB = _.filter(headers, (header) => {
                 return /A|P/.test(header.type);
               });
+              let gmailFinder = _.filter(oriobj.authDB, (column) => {
+                if(/P/.test(column.type)) {
+                  return /G/.test(column.format);
+                }
+                return false;
+              });
+              if(gmailFinder.length > 0) {
+                oriobj.authDB = [gmailFinder[0]];
+              }
             }
             let pkey = _.filter(headers, (header) => {
               return /P/.test(header.type);
@@ -1191,6 +1216,31 @@
           oriobj.scriptError = data;
         }).queryPC(address);
       },
+      loginGmail: function(column) {
+        let oriobj = this;
+        oriobj.googleStatus = undefined;
+        google.script.run
+        .withSuccessHandler((googleAcc) => {
+          if(googleAcc !== "") {
+            oriobj.googleStatus = googleAcc;
+            column.value = googleAcc;
+            column.status = "";
+            nextTick(() => {
+              oriobj.loginView();
+            });
+          } else {
+            column.status = "你根本沒有登入Google帳號，或者是你不是用本單位發的Google帳號，可以開一個新分頁登入Google之後再回來這裡，重新整理網頁即可";
+          }
+        })
+        .withFailureHandler((data) => {
+          oriobj.loginStatus = false;
+          oriobj.googleStatus = undefined;
+          oriobj.scriptError = data;
+          nextTick(() => {
+            oriobj.changeStep("身分確認", "error", "wait", "wait");
+          });
+        }).getGoogleID();
+      },
       loginView: function() {
         if(!this.checkAuth()) {
           let oriobj = this;
@@ -1283,6 +1333,7 @@
             })
             .withFailureHandler((data) => {
               oriobj.loginStatus = false;
+              oriobj.googleStatus = undefined;
               oriobj.scriptError = data;
               nextTick(() => {
                 oriobj.changeStep("身分確認", "error", "wait", "wait");

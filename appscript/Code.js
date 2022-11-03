@@ -56,6 +56,10 @@ function getQList() {
   });
 }
 
+function getGoogleID() {
+  return Session.getActiveUser().getEmail();
+}
+
 function readRecord(referSSID, recordSSID, auth) {
   if(authRecord(referSSID, auth)) {
     let listSS = SpreadsheetApp.openById(appProperties.getProperty('listSheetID'));
@@ -199,10 +203,12 @@ function getUserRow(referSSID, auth) {
   let pKey = _.filter(headers, (header) => {
     return /P/.test(header.type);
   });
+  Logger.log(pKey);
   if(pKey.length > 0) {
     let uKey = _.filter(auth, (aObj) => {
       return aObj.id === pKey[0].id;
     });
+    Logger.log(uKey);
     if(uKey.length > 0) {
       return _.filter(referArr, (row) => {
         return row[pKey[0].pos].toString() === uKey[0].value;
@@ -286,40 +292,58 @@ function getHeaders(referSSID) {
 }
 
 function authRecord(referSSID, auth) {
-  let userRow = getUserRow(referSSID, auth);
-  if(userRow.length > 0) {
-    let headers = getHeaders(referSSID);
-    for(let i=0; i<auth.length; i++) {
-      auth[i].accept = false;
+  let headers = getHeaders(referSSID);
+  for(let i=0; i<auth.length; i++) {
+    auth[i].accept = false;
+  }
+  let gmailFinder = _.filter(headers, (column) => {
+    if(/P/.test(column.type)) {
+      return /G/.test(column.format);
     }
-    let pKey = _.filter(headers, (header) => {
-      return /P/.test(header.type);
-    });
-    if(pKey.length > 0) {
-      let uKey = _.filter(auth, (aObj) => {
-        return aObj.id === pKey[0].id;
+    return false;
+  });
+  let userRow = undefined;
+  if(gmailFinder.length > 0) {
+    let account = Session.getActiveUser().getEmail();
+    if(account !== "") {
+      gmailFinder[0].value = account;
+      userRow = getUserRow(referSSID, [gmailFinder[0]]);
+      if(userRow.length > 0) {
+        return true;
+      }
+    }
+  } else {
+    userRow = getUserRow(referSSID, auth);
+    if(userRow.length > 0) {
+      let pKey = _.filter(headers, (header) => {
+        return /P/.test(header.type);
       });
-      if(uKey.length > 0) {
-        uKey[0].accept = true;
-        for(let i=0; i<auth.length; i++) {
-          let aColumn = _.filter(headers, (header) => {
-            return header.id === auth[i].id;
-          });
-          if(aColumn.length > 0) {
-            if(/A/.test(aColumn[0].type)) {
-              if(userRow[0][aColumn[0].pos].toString() === auth[i].value) {
+      if(pKey.length > 0) {
+        let uKey = _.filter(auth, (aObj) => {
+          return aObj.id === pKey[0].id;
+        });
+        if(uKey.length > 0) {
+          uKey[0].accept = true;
+          for(let i=0; i<auth.length; i++) {
+            let aColumn = _.filter(headers, (header) => {
+              return header.id === auth[i].id;
+            });
+            if(aColumn.length > 0) {
+              if(/A/.test(aColumn[0].type)) {
+                if(userRow[0][aColumn[0].pos].toString() === auth[i].value) {
+                  auth[i].accept = true;
+                } else {
+                  break;
+                }
+              } else if(/G/.test(aColumn[0].type)) {
                 auth[i].accept = true;
-              } else {
-                break;
               }
-            } else if(/G/.test(aColumn[0].type)) {
-              auth[i].accept = true;
+            } else {
+              break;
             }
-          } else {
-            break;
           }
+          return _.every(auth, { 'accept': true });
         }
-        return _.every(auth, { 'accept': true });
       }
     }
   }
