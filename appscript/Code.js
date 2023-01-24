@@ -273,13 +273,19 @@ function getHeaders(referSSID) {
             pos: i,
             value: ""
           };
-          if(!/C/.test(obj.type)) {
-            if(/S/.test(obj.format)) {
-              obj.content = buildSelections(obj, referSSID);
+          if(formatDetector('S', 'F', obj)) {
+            obj.content = buildSelections(obj, referSSID);
+          }
+          if(formatDetector('L', 'F', obj)) {
+            let defaultConfig = [1, 10, 100];
+            let userConfig = obj.content.split(";");
+            if(userConfig.length === 3) {
+              defaultConfig = userConfig;
             }
+            obj.content = _.join(defaultConfig, ";");
           }
           if(obj.group !== "") {
-            obj.group = parseInt(obj.group)
+            obj.group = obj.group
           }
           headers.push(obj);
         }
@@ -353,8 +359,8 @@ function writeRecord(referSSID, recordSSID, auth, record, accept, signatures, em
   let listSheet = listSS.getSheets()[0];
   let listRange = listSheet.getRange("A:O");
   let listArr = listRange.getValues();
-  let writeTick = (new Date()).getTime();
-  let pureData = [writeTick, accept];
+  let writeTick = new Date();
+  let pureData = [writeTick.getTime(), accept];
   let proceedWrite = true;
   let errorLog = [];
   let primaryData = "";
@@ -436,20 +442,38 @@ function writeRecord(referSSID, recordSSID, auth, record, accept, signatures, em
                 proceedWrite = true;
               }
             }
-            if(/F|C/.test(column.type)) {
+            if(formatDetector('', 'C|F', column)) {
               if(proceedWrite) {
                 if(data.value !== "不提供資料") {
                   let errorReason = "";
-                  if(/F/.test(column.format)) {
-                    if(/F/.test(column.type)) {
-                      column.value = data.value;
+                  if(formatDetector('F', 'F', column)) {
+                    column.value = data.value;
+                  } else if(formatDetector('L', 'F', column)) {
+                    let defaultNum = [1, 10, 100];
+                    let numConfig = column.content.split(";");
+                    if(numConfig.length === 3) { 
+                      defaultNum = _.map(numConfig, (str) => {
+                        return parseInt(str);
+                      })
+                    };
+                    if(_.inRange(data.value, defaultNum[1], defaultNum[2]+0.1)) {
+                      let diff = data.value - defaultNum[1];
+                      if(diff % defaultNum[0] === 0) {
+                        column.value = "📝"+parseInt(data.value);
+                      } else {
+                        errorReason = "數字必須是介於" + defaultNum[1] + "和" + defaultNum[2] + "，每次增減" + defaultNum[0] + "的整數！"
+                        proceedWrite = false;
+                      }
+                    } else {
+                      errorReason = "數字必須是介於" + defaultNum[1] + "和" + defaultNum[2] + "，每次增減" + defaultNum[0] + "的整數！"
+                      proceedWrite = false;
                     }
-                  } else if(/N|P/.test(column.format)) {
+                  } else if(formatDetector('N|P', 'F|C', column)) {
                     let numLength = 0;
-                    if(/P/.test(column.format)) {
+                    if(formatDetector('P', 'F|C', column)) {
                       let pConfig = column.content.split(";");
                       numLength = parseInt(pConfig[0]);
-                    } else if(/N/.test(column.format)) {
+                    } else if(formatDetector('N', 'F|C', column)) {
                       if(column.content !== "") {
                         numLength = parseInt(column.content);
                       }
@@ -461,27 +485,27 @@ function writeRecord(referSSID, recordSSID, auth, record, accept, signatures, em
                     } else {
                       proceedWrite = false;
                     }
-                  } else if(/I/.test(column.format)) {
-                    if(/F/.test(column.type)) {
+                  } else if(formatDetector('I', 'F|C', column)) {
+                    if(formatDetector('I', 'F', column)) {
                       if(/^[A-Z][0-9|A-Z]\d{8}$/.test(data.value)) {
                         column.value = data.value;
                       } else {
                         proceedWrite = false;
                       }
                     }
-                  } else if(/E/.test(column.format)) {
+                  } else if(formatDetector('E', 'F|C', column)) {
                     if(/^\w+((-\w+)|(\.\w+))*\@[A-Za-z0-9]+((\.|-)[A-Za-z0-9]+)*\.[A-Za-z]+$/.test(data.value)) {
                       column.value = data.value;
                     } else {
                       proceedWrite = false;
                     }
-                  } else if(/M/.test(column.format)) {
+                  } else if(formatDetector('M', 'F', column)) {
                     if(/^09\d{8}$/.test(data.value)) {
                       column.value = "📝"+data.value;
                     } else {
                       proceedWrite = false;
                     }
-                  } else if(/T/.test(column.format)) {
+                  } else if(formatDetector('T', 'F|C', column)) {
                     if(column.content === "") {
                       column.value = data.value.replace(/台(北|中|南|灣)/,'臺$1');
                     } else {
@@ -492,13 +516,13 @@ function writeRecord(referSSID, recordSSID, auth, record, accept, signatures, em
                         proceedWrite = false;
                       }
                     }
-                  } else if(/S/.test(column.format)) {
+                  } else if(formatDetector('S', 'F|C', column)) {
                     if(new RegExp(data.value).test(column.content)) {
                       column.value = data.value;
                     } else {
                       proceedWrite = false;
                     }
-                  } else if(/U/.test(column.format)) {
+                  } else if(formatDetector('U', 'F|C', column)) {
                     let selectionConfig = column.content.split("::");
                     let selections = _.uniq(selectionConfig[1].split(';'));
                     let selected = _.uniq(data.value.split(';'));
@@ -523,11 +547,12 @@ function writeRecord(referSSID, recordSSID, auth, record, accept, signatures, em
                   }
                 }
               }
-            } else if(/G/.test(column.type)) {
+            } else if(formatDetector('', 'G', column)) {
               if(/G/.test(column.format)) {
                 groupData = data.value;
                 hasGroup = true;
               }
+            } else if(formatDetector('', 'O', column)) {
             } else {
               proceedWrite = false;
               errorLog.push("你竄改數據？" + column.name + "不允許寫入！");
@@ -546,18 +571,28 @@ function writeRecord(referSSID, recordSSID, auth, record, accept, signatures, em
             let groupTest = _.filter(headers, (header) => {
               return header.group === columnGroups[i];
             });
+            let gSetting = columnGroups[i].split(":");
+            let groupName = gSetting[0];
+            let uniqGroup = false;
+            if(gSetting.length > 1) {
+              if(gSetting[1] === "U") {
+                uniqGroup = true;
+              }
+            }
             if(_.every(groupTest, { group: columnGroups[i], value: "" })) {
               proceedWrite = false;
-              errorLog.push("第" + columnGroups[i] + "群組欄位不得均為空");
+              errorLog.push("群組欄位「" + groupName + "」不得均為空"); //分組功能未經測試，理想情境是分組可以用中文，然後分號區隔U是否開啟unique
               break;
             }
-            let uniqed = _.uniqBy(groupTest, (item) => {
-              return item.value.toString().trim();
-            });
-            if(groupTest.length !== uniqed.length) {
-              proceedWrite = false;
-              errorLog.push("第" + columnGroups[i] + "群組欄位，不得重複");
-              break;
+            if(uniqGroup) {
+              let uniqed = _.uniqBy(groupTest, (item) => {
+                return item.value.toString().trim();
+              });
+              if(groupTest.length !== uniqed.length) {
+                proceedWrite = false;
+                errorLog.push("群組欄位「" + groupName + "」中的欄位值不得重複");
+                break;
+              }
             }
           }
         }
@@ -591,7 +626,7 @@ function writeRecord(referSSID, recordSSID, auth, record, accept, signatures, em
                   var imageUpload = Utilities.base64Decode(signature[0].blob.split(",")[1]);
                   let blob = Utilities.newBlob(imageUpload,type,savedSignatures[i]);
                   let writtenFile = folder.createFile(blob);
-                  csvOutput += "你的簽名("+(i+1)+"/"+signature.length+")： "+ writtenFile.getUrl() + "\n";
+                  csvOutput += "你的簽名("+(i+1)+"/"+savedSignatures.length+")： "+ writtenFile.getUrl() + "\n";
                   writtenFile.setName("[" + writtenFile.getId() + "]" + currentSheet[0][0].toString().trim() + primaryData + "的" + savedSignatures[i] + "簽名");
                   signatureIDs.push(writtenFile.getId());
                 }
@@ -629,7 +664,7 @@ function writeRecord(referSSID, recordSSID, auth, record, accept, signatures, em
               let systemTitle = appProperties.getProperty('systemTitle');
               let emailSSID = appProperties.getProperty('emailLog');
               let formTitle = currentSheet[0][0].toString().trim();
-              MailApp.sendEmail(email, replyEmail, systemTitle + "填寫結果回條","您好：感謝您填寫表單「" + formTitle + "」，你的填寫時間是" + now.toLocaleString() + "\n以下是你的填寫結果\n" + csvOutput + "\n任何問題，請回信至：" + replyEmail);
+              MailApp.sendEmail(email, replyEmail, systemTitle + "填寫結果回條","您好：感謝您填寫表單「" + formTitle + "」，你的填寫時間是" + writeTick.toLocaleString() + "\n以下是你的填寫結果\n" + csvOutput + "\n任何問題，請回信至：" + replyEmail);
               let emailSS = SpreadsheetApp.openById(emailSSID);
               let emailSheet = emailSS.getSheets()[0];
               emailSheet.appendRow([now.getTime(), formTitle, primaryData,email]);
@@ -649,7 +684,7 @@ function writeRecord(referSSID, recordSSID, auth, record, accept, signatures, em
     status: result,
     errorLog: errorLog,
     data: recieved,
-    tick: writeTick
+    tick: writeTick.getTime()
   };
 }
 
@@ -868,4 +903,13 @@ function compareSheets(referSSID, recordSSID) {
 
 function getScriptURL() {
   return ScriptApp.getService().getUrl();
+}
+
+function formatDetector(format, type, column) {
+  if((new RegExp(type)).test(column.type)) {
+    if((new RegExp(format)).test(column.format)) {
+      return true;
+    }
+  }
+  return false;
 }

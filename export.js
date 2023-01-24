@@ -1,4 +1,3 @@
-/* 請把下面的程式碼貼在你的列表清單試算表的app script裡面 */
 const _ = LodashGS.load();
 const ui = SpreadsheetApp.getUi(); // Same variations.
 const appProperties = PropertiesService.getScriptProperties();
@@ -148,7 +147,7 @@ function injectRefer(key, headers, row, data) { //應該在這裡，要根據簽
     if(referRow.length > 0) {
       for(let i=0; i< headers.length; i++) {
         if(!/F/.test(headers[i].type)) {
-          row[dataFrom + headers[i].pos] = /N|M|P|G/.test(headers[i].format) ? "📝" + referRow[0][headers[i].pos].toString() : referRow[0][headers[i].pos].toString();
+          row[dataFrom + headers[i].pos] = /L|N|M|P|G/.test(headers[i].format) ? "📝" + referRow[0][headers[i].pos].toString() : referRow[0][headers[i].pos].toString();
         }/* else {
           if(/F/.test(headers[i].format)) {
             let fileID = referRow[0][headers[i].pos].toString();
@@ -173,12 +172,16 @@ function injectRefer(key, headers, row, data) { //應該在這裡，要根據簽
           return header.pos === k - dataFrom;
         })
         if(columnConfig.length > 0) {
-          if(/F/.test(columnConfig[0].format)) {
-            if(row[k].toString() !== "") {
-              let file = DriveApp.getFileById(row[k].toString());
-              returnRow.push(file.getUrl());
+          if(/F/.test(columnConfig[0].type)) {
+            if(/F/.test(columnConfig[0].format)) {
+              if(row[k].toString() !== "") {
+                let file = DriveApp.getFileById(row[k].toString());
+                returnRow.push(file.getUrl());
+              } else {
+                returnRow.push("無檔案");
+              }
             } else {
-              returnRow.push("無檔案");
+              returnRow.push(row[k].toString());  
             }
           } else {
             returnRow.push(row[k].toString());

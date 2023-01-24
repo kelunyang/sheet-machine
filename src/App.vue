@@ -39,8 +39,13 @@
         </el-alert>
         <el-switch v-if="!viewOnly" class="ma1" size="large" active-text="我要修改問卷" v-model="enableModify"></el-switch>
         <el-space direction="vertical" fill wrap class="ma1 pa2 xs12 breakword" v-for="dataColumn in columnDB" :key="dataColumn.tid">
-          <div v-if="!/G/.test(dataColumn.type)" class="qTitle xs12">{{ dataColumn.name }}</div>
-          <div v-if="!/G/.test(dataColumn.type)" class="xs12 breakword">
+          <el-alert :title="dataColumn.name" type="info" show-icon v-if="formatDetector('M', 'C', dataColumn)">
+            <template #default>
+              <span style="font-size: 1.5em" v-html="HTMLConverter(dataColumn.content)"></span>
+            </template>
+          </el-alert>
+          <div v-if="!/G/.test(dataColumn.type)" v-show="!formatDetector('M', 'C', dataColumn)" class="qTitle xs12">{{ dataColumn.name }}</div>
+          <div v-if="!/G/.test(dataColumn.type)" v-show="!formatDetector('M', 'C', dataColumn)" class="xs12 breakword">
             <span class="oriTip">
               {{ formatDetector('F', 'C|F', dataColumn) ? "[系統原本儲存的檔案（點擊開啟新連結）🔎]" : formatDetector('S', 'C', dataColumn) ? "" : "[系統原本儲存的答案]" }}
             </span>
@@ -86,13 +91,26 @@
               :value="item"
             />
           </el-select>
+          <el-slider
+            v-show="enableModify"
+            v-if="formatDetector('L', 'F', dataColumn)"
+            v-model="dataColumn.value"
+            v-on:change="valField(dataColumn)"
+            size="large"
+            input-size="large"
+            :step="dataColumn.content[0]"
+            :min="dataColumn.content[1]"
+            :max="dataColumn.content[2]"
+            show-input
+            show-stops
+          />
           <el-button v-show="enableModify" v-if="formatDetector('P', 'F', dataColumn)" class="ma1 pa2 xs12" size="large" type="success" v-on:click="queryPC(dataColumn)">
             按此自動填入郵遞區號（但你得自己確認對不對）
           </el-button>
           <el-button v-show="enableModify" v-if="formatDetector('F', 'F', dataColumn)" class="ma1 pa2 xs12" size="large" type="success" v-on:click="uploadFile(dataColumn)">點此上傳檔案{{ dataColumn.value !== "" ? "(已上傳)" : "(無上傳)" }}</el-button>
           <el-button v-show="enableModify" v-if="formatDetector('U', 'F', dataColumn)" class="ma1 pa2 xs12" size="large" type="success" v-on:click="multiSelect(dataColumn)">點此挑選你要的選項[{{ dataColumn.value !== "" ? "已選"+(dataColumn.value.split(';')).length : "無選擇" }}]</el-button>
           <div v-show="enableModify" class="captionWord" v-if="dataColumn.nullable">這個欄位可以留空</div>
-          <div v-show="enableModify" class="captionWord" v-if="dataColumn.group !== ''">這個欄位和另外一個欄位編為第{{ dataColumn.group }}組，請至少選一個填入，否則最後會不能存檔</div>
+          <div v-show="enableModify" class="captionWord" v-if="dataColumn.group !== ''">{{ groupTip(dataColumn) }}</div>
           <div v-show="enableModify" class="alertWord" v-if="dataColumn.status !== ''">{{ dataColumn.status }}</div>
           <div v-show="enableModify" class="captionWord" v-if="dataColumn.status === ''">{{ formatHelper(dataColumn) }}</div>
         </el-space>
@@ -131,7 +149,7 @@
             >
               {{ tag.name }}
             </el-tag>
-            <span style='font-weight: bold'>{{ scope.row.name }}</span><br/>
+            <span style="font-weight: bold">{{ scope.row.name }}</span><br/>
             <span v-if="scope.row.writeAllowed">填寫至：{{scope.row.dueDate === 0 ? "不開放" : dateConverter(scope.row.dueDate) }}</span><br/>
             <span v-if="scope.row.writeAllowed">檢視至：{{ dateConverter(scope.row.viewDate) }}</span>
             <span v-if="!scope.row.writeAllowed">本問卷暫時關閉</span>
@@ -145,7 +163,7 @@
           </template>
         </el-table-column>
       </el-table>
-      <div class="footerText">Developer: <a class="cleanLink" href="mailto:kelunyang@outlook.com">Kelunyang</a>@LKSH 2022 <a style="color:#CCC" target="_blank" href="https://github.com/kelunyang/sheet-machine" >GITHUB</a></div>
+      <div class="footerText">Developer: <a class="cleanLink" href="mailto:kelunyang@outlook.com">Kelunyang</a>@LKSH 2023 <a style="color:#CCC" target="_blank" href="https://github.com/kelunyang/sheet-machine" >GITHUB</a></div>
     </el-space>
   </el-dialog>
   <el-dialog
@@ -159,7 +177,7 @@
     <el-alert title="簽名不得為空" type="error" show-icon v-if="emptySignatures.length > 0">
       <template #default>
         <span style="font-size: 1.5em">
-          請完成{{ emptySignatures.join(",") }}的簽名，否則無法繼續提交問卷！（你忘記按「簽下一個」？）
+          {{ emptySignatures.join("、") }}的簽名不得留空，否則無法繼續提交問卷！（你忘記按「簽下一個」？）
         </span>
       </template>
     </el-alert>
@@ -228,7 +246,7 @@
     <el-alert :title="saveSuccessed ? '儲存成功' : '儲存失敗'" :type="saveSuccessed ? 'success' : 'error'" show-icon v-if="saveSuccessed !== undefined">
       <template #default>
         <span style="font-size: 1.5em">
-          {{ saveSuccessed ? "已寫入，如果想查詢你最後一次填寫結果，重新登入即可" : "你輸入的格式錯誤，請依照下面訊息重新修正" }}
+          {{ saveSuccessed ? dateConverter(writeTick) + "已寫入，如果想查詢你最後一次填寫結果，重新登入即可查看" : "你輸入的格式錯誤，請依照下面訊息重新修正" }}
         </span>
       </template>
     </el-alert>
@@ -249,7 +267,7 @@
       <el-space direction="vertical" fill wrap class="ma1 pa2 xs12" v-for="authColumn in authDB" :key="authColumn.tid">
         <div class="qTitle xs12" v-if="!/G/.test(authColumn.type)">{{ authColumn.name }}</div>
         <el-input
-          v-if="formatDetector('I|N|T', 'A|P', authColumn)"
+          v-if="formatDetector('I|N|T|E|M', 'A|P', authColumn)"
           size="large"
           class="xs12"
           :label="authColumn.name"
@@ -280,8 +298,9 @@
       <el-button v-if="saveSuccessed" class="ma1 pa2 xs12" size="large" type="success" v-on:click="downloadResult()">下載你剛剛填寫的結果</el-button>
       <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="reloadPage()">回到問卷列表</el-button>
       <!-- <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="viewLatest()">查看最後一位填寫者以及你是否曾填寫過</el-button> -->
-      <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="viewStat()">查看填答率統計</el-button>
-      <div class="footerText">Developer: <a class="cleanLink" href="mailto:kelunyang@outlook.com">Kelunyang</a>@LKSH 2022 <a style="color:#CCC" target="_blank" href="https://github.com/kelunyang/sheet-machine" >GITHUB</a></div>
+      <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="viewStat()">查看填答率統計 </el-button>
+      <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="sendContact()" v-if="contactEmail !== ''">Email給問卷負責人</el-button>
+      <div class="footerText">Developer: <a class="cleanLink" href="mailto:kelunyang@outlook.com">Kelunyang</a>@LKSH 2023 <a style="color:#CCC" target="_blank" href="https://github.com/kelunyang/sheet-machine" >GITHUB</a></div>
     </el-space>
   </el-dialog>
   <el-drawer
@@ -480,16 +499,16 @@
     :show-close="false"
     v-model="statDialog.show"
     :fullscreen="statDialog.fullscreen"
-    title="填答率統計">
+    :title="currentQuery + '目前總填答率為：' + completeRate + '%'">
     <el-space direction="vertical" fill wrap style="width: 100%">
-      <el-table :data="stats" stripe style="width: 100%">
-        <el-table-column prop="classno" label="班級"/>
-        <el-table-column  prop="rate" label="填答率" sortable>
+      <el-table :data="stats" stripe style="width: 100%" :border="true" :highlight-current-row="true">
+        <el-table-column prop="classno" label="" min-width="10%"/>
+        <el-table-column  prop="rate" label="填答率" sortable :sort-method="rateSort" min-width="10%">
           <template #default="scope">
             <el-progress :percentage="scope.row.rate" :color="progressColor" />
           </template>
         </el-table-column>
-        <el-table-column prop="unfinished" label="未完成者" />
+        <el-table-column prop="unfinished" label="未完成者" min-width="80%" resizable/>
       </el-table>
       <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="downloadCSV(stats, currentQuery + '填寫率統計.csv')">匯出統計表</el-button>
       <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="closeStat()">關閉對話框</el-button>
@@ -507,6 +526,33 @@
   import SmoothSignature from "smooth-signature";
   export default {
     methods: {
+      rateSort: function(a, b) {
+        return parseFloat(a.rate)-parseFloat(b.rate);
+      },
+      sendContact: function() {
+        let element = document.createElement('a');
+        element.setAttribute('href', "mailto:" + this.contactEmail);
+        element.setAttribute('target', "_blank");
+        element.click();
+      },
+      groupTip: function(column) {
+        let tip = "";
+        let helpWord = [];
+        if(this.formatDetector('', 'F', column)) {
+          if(column.group !== "") {
+            let sameGroup = _.filter(this.columnDB, (col) => {
+              return col.group === column.group;
+            })
+            helpWord.push("此欄位和" + sameGroup.length + "個欄位編組為「" + column.group + "」");
+            helpWord.push("各欄位不得均為空");
+            if(column.uniGroup) {
+              helpWord.push("各欄位內容不可重複");
+            }
+            tip = _.join(helpWord, "，");
+          }
+        }
+        return tip;
+      },
       authtypeCheck: function() {
         if(this.authDB.length > 0) {
           let gmailFinder = _.filter(this.authDB, (column) => {
@@ -538,36 +584,34 @@
         }
       },
       multiSelect: function(dataColumn) {
-        if(/F/.test(dataColumn.type)) {
-          if(/U/.test(dataColumn.format)) {
-            let selections = [];
-            let selectionConfig = dataColumn.content.split('::');
-            let oriSelect = selectionConfig[1].split(';');
-            for(let i=0; i<oriSelect.length; i++) {
-              selections.push({
-                key: oriSelect[i],
-                label: oriSelect[i],
-                disabled: false
-              });
-            }
-            this.currentMulti.maxNum = parseInt(selectionConfig[0]);
-            this.currentMulti.name = dataColumn.name;
-            this.currentMulti.id = dataColumn.id;
-            this.currentMulti.selections = selections;
-            this.currentMulti.selected = [];
-            this.currentMulti.modified = [];
-            this.currentMulti.error = "";
-            let selected = _.uniq(dataColumn.value.split(';'));
-            for(let i=0; i<selected.length; i++) {
-              let findObj = _.filter(selections, (item) => {
-                return item.key === selected[i];
-              });
-              if(findObj.length > 0) {
-                this.currentMulti.selected.push(selected[i]);
-              }
-            }
-            this.multisDialog.show = true;
+        if(this.formatDetector('U', 'F', dataColumn)) {
+          let selections = [];
+          let selectionConfig = dataColumn.content.split('::');
+          let oriSelect = selectionConfig[1].split(';');
+          for(let i=0; i<oriSelect.length; i++) {
+            selections.push({
+              key: oriSelect[i],
+              label: oriSelect[i],
+              disabled: false
+            });
           }
+          this.currentMulti.maxNum = parseInt(selectionConfig[0]);
+          this.currentMulti.name = dataColumn.name;
+          this.currentMulti.id = dataColumn.id;
+          this.currentMulti.selections = selections;
+          this.currentMulti.selected = [];
+          this.currentMulti.modified = [];
+          this.currentMulti.error = "";
+          let selected = _.uniq(dataColumn.value.split(';'));
+          for(let i=0; i<selected.length; i++) {
+            let findObj = _.filter(selections, (item) => {
+              return item.key === selected[i];
+            });
+            if(findObj.length > 0) {
+              this.currentMulti.selected.push(selected[i]);
+            }
+          }
+          this.multisDialog.show = true;
         }
       },
       chooseSelection: function(selected) {
@@ -669,34 +713,36 @@
         return "";
       },
       formatHelper: function(column) {
-        if(/F|A|P/.test(column.type)) {
+        if(this.formatDetector('', 'F|A|P', column)) {
           let tip = "";
-          if(/N/.test(column.format)) {
+          if(this.formatDetector('N', 'F|A|P', column)) {
             tip = "數字";
             if(column.content === "0") {
               tip += "，必須以0開頭，長度不限";
             } else {
               tip += "，長度為" + column.content;
             }
-          } else if(/P/.test(column.format)) {
+          } else if(this.formatDetector('P', 'F|A|P', column)) {
             let pConfig = column.content.split(";");
             tip = pConfig[0] + "碼郵遞區號";
-          } else if(/I/.test(column.format)) {
+          } else if(this.formatDetector('I', 'F|A|P', column)) {
             tip = "身份證字號（第一碼一定是英文）";
-          } else if(/M/.test(column.format)) {
+          } else if(this.formatDetector('M', 'F|A|P', column)) {
             tip = "台灣的手機號碼，一定是09開頭";
-          } else if(/E/.test(column.format)) {
+          } else if(this.formatDetector('L', 'F|A|P', column)) {
+            tip = "請拖拉一個從" + column.content[1] + "到" + column.content[2] + "之間的整數，每次增減" + column.content[0];
+          } else if(this.formatDetector('E', 'F|A|P', column)) {
             tip = "Email格式，如test@test.com";
-          } else if(/T/.test(column.format)) {
+          } else if(this.formatDetector('T', 'F|A|P', column)) {
             if(column.content === "") {
               tip = "文字";
             } else {
               let regexConfig = column.content.split("::");
               tip = regexConfig[0];
             }
-          } else if(/S/.test(column.format)) {
+          } else if(this.formatDetector('S', 'F|A|P', column)) {
             tip = "請從選單中選一個正確的值";
-          } else if(/F/.test(column.format)) {
+          } else if(this.formatDetector('F', 'F|A|P', column)) {
             if(column.content === "") {
               tip = "你只能選擇一個檔案"
             } else {
@@ -711,14 +757,14 @@
               filetip.push("你只能選擇一個檔案");
               tip = _.join(filetip, "，");
             }
-          } else if(/U/.test(column.format)) {
+          } else if(this.formatDetector('U', 'F|A|P', column)) {
             let selectionConfig = column.content.split("::");
             let selections = _.uniq(selectionConfig[1].split(';'));
             tip = "從" + selections.length +"個選項中挑出"+selectionConfig[0]+"個（按上方按鍵去選）";
-          } else if(/G/.test(column.format)) {
+          } else if(this.formatDetector('G', 'F|A|P', column)) {
             tip = "本欄無法手動輸入，系統會自動讀取你登入的Google帳號";
           }
-          return "格式：" + tip;
+          return "格式：" + tip + "[輸入後點其他區域會重新檢查本欄位格式]";
         }
         return "";
       },
@@ -836,71 +882,117 @@
       valField: function(column) {
         let passMust = true;
         let skipnull = false;
+        column.status = "";
         if(column.value === "") {
           if(column.nullable) {
             skipnull = true;
           }
         }
-        if(/F/.test(column.type)) {
-          if(column.must) {
+        if(this.formatDetector('', 'F', column)) {
+          if(column.must) { //先檢查是否為空
             if(column.value === "") {
               passMust = false;
               column.status = "這個欄位必需有值！";
+            } else {
+              column.status = "";
+            }
+          }
+          if(column.status === "") {  //再檢查群組設定
+            if(column.group !== "") {
+              let sameGroup = _.filter(this.columnDB, (col) => {
+                return col.group === column.group;
+              })
+              if(_.every(sameGroup, {value: ""})) {
+                for(let i=0; i<sameGroup.length; i++) {
+                  sameGroup[i].status = "群組「" + column.group + "」欄位值不得全為空！";
+                }
+              } else {
+                for(let i=0; i<sameGroup.length; i++) {
+                  sameGroup[i].status = "";
+                }
+              }
+              if(column.uniGroup) {
+                let uniqed = _.uniqBy(sameGroup, (item) => {
+                  return item.value.toString().trim();
+                });
+                if(sameGroup.length !== uniqed.length) {
+                  for(let i=0; i<sameGroup.length; i++) {
+                    sameGroup[i].status = "群組「" + column.group + "」欄位值不得重複！";
+                  }
+                } else {
+                  for(let i=0; i<sameGroup.length; i++) {
+                    sameGroup[i].status = "";
+                  }
+                }
+              }
             }
           }
         }
-        if(passMust) {
-          if(!skipnull) {
-            if(/N|P/.test(column.format)) {
-              let num = 0;
-              if(/P/.test(column.format)) {
-                let pConfig = column.content.split(";");
-                num = parseInt(pConfig[0]);
-              } else if(/N/.test(column.format)) {
-                if(column.content !== "") {
-                  num = parseInt(column.content);
+        if(column.status === "") {  //最後檢查格式
+          if(passMust) {
+            if(!skipnull) {
+              if(this.formatDetector('N|P', 'F|A|P', column)) {
+                let num = 0;
+                if(this.formatDetector('P', 'F|A|P', column)) {
+                  let pConfig = column.content.split(";");
+                  num = parseInt(pConfig[0]);
+                } else if(this.formatDetector('N', 'F|A|P', column)) {
+                  if(column.content !== "") {
+                    num = parseInt(column.content);
+                  }
                 }
-              }
-              let zeroIndicator = num === 0 ? "0" : "";
-              let numLength = num > 0 ? "{" + num + "}" : "*";
-              if(new RegExp("^" + zeroIndicator + "\\d" + numLength + "$").test(column.value)) {
-                column.status = "";
-              } else {
-                column.status = zeroIndicator ? "這裡應該要輸入0開頭的數字" : "這裡應該輸入長度為" +  num + "的數字";
-              }
-            } else if(/I/.test(column.format)) {
-              if(/^[A-Z][0-9|A-Z]\d{8}$/.test(column.value)) {
-                column.status = "";
-              } else {
-                column.status = "這裡應該要輸入身分證號，如A123456789";
-              }
-            } else if(/E/.test(column.format)) {
-              if(/^\w+((-\w+)|(\.\w+))*\@[A-Za-z0-9]+((\.|-)[A-Za-z0-9]+)*\.[A-Za-z]+$/.test(column.value)) {
-                column.status = "";
-              } else {
-                column.status = "這裡應該輸入Email";
-              }
-            } else if(/M/.test(column.format)) {
-              if(/^09\d{8}$/.test(column.value)) {
-                column.status = "";
-              } else {
-                column.status = "這裡應該輸入電話號碼，如0912345678";
-              }
-            } else if(/T/.test(column.format)) {
-              if(column.content !== "") {
-                let regexConfig = column.content.split("::");
-                if(new RegExp(regexConfig[1]).test(column.value)) {
-                  column.value = column.value.replace(/台(北|中|南|灣)/,'臺$1');
+                let zeroIndicator = num === 0 ? "0" : "";
+                let numLength = num > 0 ? "{" + num + "}" : "*";
+                if(new RegExp("^" + zeroIndicator + "\\d" + numLength + "$").test(column.value)) {
                   column.status = "";
                 } else {
-                  column.status = "必須要包含以下關鍵字「" + regexConfig[0] + "」";
+                  column.status = zeroIndicator ? "這裡應該要輸入0開頭的數字" : "這裡應該輸入長度為" +  num + "的數字";
                 }
-              }
-            } else if(/S/.test(column.format)) {
-              if(new RegExp(column.value).test(column.content)) {
-                column.status = "";
-              } else {
-                column.status = "你真的是用選單選出來的值嗎？";
+              } else if(this.formatDetector('L', 'F|A|P', column)) {
+                if(_.inRange(column.value, column.content[1], column.content[2]+0.1)) {
+                  let diff = column.value - column.content[1];
+                  if(diff % column.content[0] === 0) {
+                    column.status = "";
+                  } else {
+                    column.status = "數字必須是介於" + column.content[1] + "和" + column.content[2] + "，每次增減" + column.content[0] + "的整數！"
+                  }
+                } else {
+                  column.status = "數字必須是介於" + column.content[1] + "和" + column.content[2] + "，每次增減" + column.content[0] + "的整數！"
+                }
+              } else if(this.formatDetector('I', 'F|A|P', column)) {
+                if(/^[A-Z][0-9|A-Z]\d{8}$/.test(column.value)) {
+                  column.status = "";
+                } else {
+                  column.status = "這裡應該要輸入身分證號，如A123456789";
+                }
+              } else if(this.formatDetector('E', 'F|A|P', column)) {
+                if(/^\w+((-\w+)|(\.\w+))*\@[A-Za-z0-9]+((\.|-)[A-Za-z0-9]+)*\.[A-Za-z]+$/.test(column.value)) {
+                  column.status = "";
+                } else {
+                  column.status = "這裡應該輸入Email";
+                }
+              } else if(this.formatDetector('M', 'F|A|P', column)) {
+                if(/^09\d{8}$/.test(column.value)) {
+                  column.status = "";
+                } else {
+                  column.status = "這裡應該輸入電話號碼，如0912345678";
+                }
+              } else if(this.formatDetector('T', 'F|A|P', column)) {
+                if(column.content !== "") {
+                  let regexConfig = column.content.split("::");
+                  if(new RegExp(regexConfig[1]).test(column.value)) {
+                    column.value = column.value.replace(/台(北|中|南|灣)/,'臺$1');
+                    column.status = "";
+                  } else {
+                    column.status = "必須要包含以下關鍵字「" + regexConfig[0] + "」";
+                  }
+                }
+              } else if(this.formatDetector('S', 'F|A|P', column)) {
+                if(new RegExp(column.value).test(column.content)) {
+                  column.status = "";
+                } else {
+                  column.status = "你真的是用選單選出來的值嗎？";
+                }
               }
             }
           }
@@ -934,6 +1026,7 @@
             oriobj.alertWords = sheet[0].comment;
             oriobj.submitTip = sheet[0].submitTip;
             oriobj.writeAllowed = sheet[0].writeAllowed;
+            oriobj.contactEmail = sheet[0].email;
             for(let i=0; i<sheet[0].signatures.length; i++) {
               oriobj.signatures.push({
                 id: uuidv4(),
@@ -1195,6 +1288,7 @@
                   } else {
                     pColumn.value = postCode.zipcode.substring(0, parseInt(pConfig[0]));
                   }
+                  pColumn.status = "";
                 } else {
                   pColumn.value = "";
                   pColumn.status = "找不到你提供的地址所屬的郵遞區號，請修正地址或者自己輸入（手動輸入後去點其他的欄位，本訊息即會消失）";
@@ -1294,6 +1388,14 @@
                   let fileDetect = false;
                   oriobj.columnDB[i].tid = uuidv4();
                   if(/F/.test(oriobj.columnDB[i].type)) {
+                    if(oriobj.columnDB[i].group !== "") {
+                      let groupConfig = oriobj.columnDB[i].group.split(':');
+                      oriobj.columnDB[i].group = groupConfig[0];
+                      oriobj.columnDB[i].uniGroup = false;
+                      if(groupConfig.length > 1) {
+                        oriobj.columnDB[i].uniGroup = groupConfig[1] === "U";
+                      }
+                    }
                     if(/F/.test(oriobj.columnDB[i].format)) {
                       if(oriobj.columnDB[i].must) {
                         oriobj.columnDB[i].status = "請至少選擇一個檔案";
@@ -1313,6 +1415,16 @@
                         }
                       }
                       oriobj.columnDB[i].value = _.join(newSelected, ";");
+                    } else if(/L/.test(oriobj.columnDB[i].format)) {
+                      let defaultConfig = [1, 10, 100];
+                      let userConfig = oriobj.columnDB[i].content.split(';');
+                      if(userConfig.length === 3) {
+                        defaultConfig = _.map(userConfig, (str) => {
+                          return parseInt(str);
+                        });
+                      }
+                      oriobj.columnDB[i].value = parseInt(oriobj.columnDB[i].value);
+                      oriobj.columnDB[i].content = defaultConfig;
                     }
                   }
                   if(!fileDetect) {
@@ -1523,6 +1635,14 @@
           return this.signatures[this.currentSignature].name;
         }
         return "";
+      },
+      completeRate: function() {
+        if(this.stats.length > 0) {
+          return (_.meanBy(this.stats, (item) => {
+            return parseInt(item.rate);
+          })).toFixed(2);
+        }
+        return 0;
       }
     },
     mounted() {
@@ -1567,6 +1687,7 @@
     },
     data() {
       return {
+        contactEmail: "",
         writeAllowed: false,
         remainEmail: 0,
         progressColor: [
