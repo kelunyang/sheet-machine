@@ -273,7 +273,7 @@ function getHeaders(referSSID) {
             pos: i,
             value: ""
           };
-          if(formatDetector('S', 'F', obj)) {
+          if(formatDetector('S', 'F|P|A', obj)) {
             obj.content = buildSelections(obj, referSSID);
           }
           if(formatDetector('L', 'F', obj)) {
@@ -504,6 +504,29 @@ function writeRecord(referSSID, recordSSID, auth, record, accept, signatures, em
                       column.value = "📝"+data.value;
                     } else {
                       proceedWrite = false;
+                    }
+                  } else if(formatDetector('X', 'F|C', column)) {
+                    let lenConfig = column.content.split(";");
+                    let lenCheck = false;
+                    if(lenConfig[0] !== '') {
+                      lenConfig[1] = '';
+                      let maxLen = parseInt(lenConfig[0]);
+                      if(data.value.length > maxLen) {
+                        proceedWrite = false;
+                        errorReason = "你輸入的文字長度超過限制！（" + data.value.length + "/" + maxLen +"）";
+                      }
+                    }
+                    if(proceedWrite) {
+                      if(column.content[1] !== '') {
+                        let minLen = parseInt(lenConfig[1]);
+                        if(data.value.length < minLen) {
+                          proceedWrite = false;
+                          errorReason = "你輸入的文字長度太短了！（" + data.value.length + "/" + minLen +"）";
+                        }
+                      }
+                    }
+                    if(proceedWrite) {
+                      column.value = data.value.replace(/台(北|中|南|灣)/,'臺$1');
                     }
                   } else if(formatDetector('T', 'F|C', column)) {
                     if(column.content === "") {

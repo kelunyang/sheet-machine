@@ -76,6 +76,21 @@
             v-on:change="valField(dataColumn)"
             outline>
           </el-input>
+          <el-input
+            v-show="enableModify"
+            v-if="formatDetector('X', 'F', dataColumn)"
+            size="large"
+            class="xs12"
+            :label="dataColumn.name"
+            v-model="dataColumn.value"
+            v-on:change="valField(dataColumn)"
+            :autosize="{ minRows: dataColumn.content[2], maxRows: dataColumn.content[3] }"
+            show-word-limit
+            :maxlength="dataColumn.content[0]"
+            :minlength="dataColumn.content[1]"
+            type="textarea"
+            outline>
+          </el-input>
           <el-select
             v-show="enableModify"
             v-if="formatDetector('S', 'F', dataColumn)"
@@ -503,12 +518,12 @@
     <el-space direction="vertical" fill wrap style="width: 100%">
       <el-table :data="stats" stripe style="width: 100%" :border="true" :highlight-current-row="true">
         <el-table-column prop="classno" label="" min-width="10%"/>
-        <el-table-column  prop="rate" label="填答率" sortable :sort-method="rateSort" min-width="10%">
+        <el-table-column  prop="rate" label="填答率" sortable :sort-method="rateSort" min-width="20%">
           <template #default="scope">
             <el-progress :percentage="scope.row.rate" :color="progressColor" />
           </template>
         </el-table-column>
-        <el-table-column prop="unfinished" label="未完成者" min-width="80%" resizable/>
+        <el-table-column prop="unfinished" label="未完成者" min-width="70%" resizable/>
       </el-table>
       <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="downloadCSV(stats, currentQuery + '填寫率統計.csv')">匯出統計表</el-button>
       <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="closeStat()">關閉對話框</el-button>
@@ -721,6 +736,14 @@
               tip += "，必須以0開頭，長度不限";
             } else {
               tip += "，長度為" + column.content;
+            }
+          } else if(this.formatDetector('X', 'F', column)) {
+            if(column.content[0] !== '') {
+              column.content[1] = '';
+              tip = "最長允許" + column.content[0] + "字";
+            }
+            if(column.content[1] !== '') {
+              tip = "至少要有" + column.content[1] + "字";
             }
           } else if(this.formatDetector('P', 'F|A|P', column)) {
             let pConfig = column.content.split(";");
@@ -947,6 +970,28 @@
                   column.status = "";
                 } else {
                   column.status = zeroIndicator ? "這裡應該要輸入0開頭的數字" : "這裡應該輸入長度為" +  num + "的數字";
+                }
+              } else if(this.formatDetector('X', 'F', column)) {
+                let lenCheck = false;
+                if(column.content[0] !== '') {
+                  column.content[1] = '';
+                  let maxLen = parseInt(column.content[0]);
+                  if(column.value.length > maxLen) {
+                    column.status = "你輸入的文字長度超過限制！（" + column.value.length + "/" + maxLen + "）";
+                    lenCheck = true;
+                  }
+                }
+                if(column.status === "") {
+                  if(column.content[1] !== '') {
+                    let minLen = parseInt(column.content[1]);
+                    if(column.value.length < minLen) {
+                      column.status = "你輸入的文字太少了！（" + column.value.length + "/" + minLen + "）";
+                      lenCheck = true;
+                    }
+                  }
+                }
+                if(!lenCheck) {
+                  column.status = "";
                 }
               } else if(this.formatDetector('L', 'F|A|P', column)) {
                 if(_.inRange(column.value, column.content[1], column.content[2]+0.1)) {
@@ -1424,6 +1469,20 @@
                         });
                       }
                       oriobj.columnDB[i].value = parseInt(oriobj.columnDB[i].value);
+                      oriobj.columnDB[i].content = defaultConfig;
+                    } else if(/X/.test(oriobj.columnDB[i].format)) {
+                      let defaultConfig = ["", "", 2, 4];
+                      let userConfig = oriobj.columnDB[i].content.split(';');
+                      for(let k=0; k<userConfig.length; k++) {
+                        if(k === 0) {
+                          if(userConfig[k] !== '') {
+                            userConfig[1] = '';
+                          }
+                        }
+                        if(userConfig[k] !== '') {
+                          defaultConfig[k] = parseInt(userConfig[k]);
+                        }
+                      }
                       oriobj.columnDB[i].content = defaultConfig;
                     }
                   }

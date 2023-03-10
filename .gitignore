@@ -9,3 +9,4 @@ dist/*
 appscript/*.css
 appscript/*.map
 .clasp.json
+appscript/.clasp.json
