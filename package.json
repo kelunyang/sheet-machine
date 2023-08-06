@@ -3,33 +3,38 @@
   "version": "1.0.0",
   "description": "",
   "scripts": {
-    "build": "parcel build ./src/index.html --dist-dir ./appscript",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
     "glogin": "clasp login",
     "glogout": "clasp logout",
     "gpull": "clasp pull",
-    "gpush": "clasp push",
+    "gpush": "npm run copy-files && clasp push",
     "gcreate": "clasp create --title \"sheet-machine\" --rootDir ./appscript",
-    "gstart": "clasp push --watch"
+    "gstart": "clasp push --watch",
+    "copy-files": "copy .\\src\\Code.js .\\appscript\\ && copy .\\dist\\index.html .\\appscript"
   },
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@types/google-apps-script": "^1.0.54",
+    "@types/google-apps-script": "^1.0.66",
+    "@vitejs/plugin-vue": "^4.2.3",
     "clasp": "^1.0.0",
     "dayjs": "^1.11.5",
     "element": "^0.1.4",
-    "element-plus": "^2.2.14",
+    "element-plus": "^2.3.8",
     "lodash": "^4.17.21",
-    "parcel": "^2.7.0",
     "plus": "^0.1.0",
     "randomcolor": "^0.6.2",
     "smooth-signature": "^1.0.12",
     "uuid": "^8.3.2",
+    "vite": "^4.4.8",
+    "vite-plugin-singlefile": "^0.13.5",
     "vue": "^3.2.37",
     "vue-esign": "^1.1.4",
     "wave-ui": "^2.40.3"
   },
   "devDependencies": {
-    "@parcel/transformer-vue": "^2.7.0"
+    "process": "^0.11.10"
   }
 }

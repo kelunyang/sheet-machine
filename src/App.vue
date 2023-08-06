@@ -30,10 +30,10 @@
         <el-alert title="填寫狀態" type="info" show-icon v-if="scriptError.message === ''">
           <template #default>
             <span style="font-size: 1.5em" v-if="requestCount.length > 0">
-              你填過了{{ requestCount.length }}次，最後一次是在{{ dateConverter(requestCount.lastTick) }}填的，系統會在下面顯示你上次填寫的結果，如果你沒有要更新可以不用一直來填寫，關閉視窗即可
+              你填過了{{ requestCount.length }}次，最後一次是在{{ dateConverter(requestCount.lastTick) }}填的{{ tempFound ? "，本機有你之前沒送出的存檔（檔案欄位不會存檔），已載入" : "，系統會在下面顯示你上次填寫的結果" }}，如果你沒有要更新可以不用一直來填寫，關閉視窗即可
             </span>
             <span style="font-size: 1.5em" v-if="requestCount.length === 0">
-              你沒有填過
+              共 {{ totalInputs.true }} 題，你沒有填過{{ tempFound ? "，但本機有你之前沒送出的存檔（檔案欄位不會存檔），已載入" : "，系統會自動暫存你輸入的結果，請放心輸入" }}
             </span>
           </template>
         </el-alert>
@@ -68,7 +68,7 @@
           </div>
           <el-input
             v-show="enableModify"
-            v-if="formatDetector('M|N|T|E|P', 'F', dataColumn)"
+            v-if="formatDetector('I|M|N|T|E|P', 'F', dataColumn)"
             size="large"
             class="xs12"
             :label="dataColumn.name"
@@ -305,16 +305,16 @@
             :value="item"
           />
         </el-select>
-        <el-button v-if="formatDetector('G', 'P', authColumn)" class="ma1 pa2 xs12" size="large" type="danger" v-on:click="loginGmail(authColumn)">按此驗證你的Google帳號以進入表單</el-button>
+        <el-button v-if="formatDetector('G', 'P', authColumn)" class="ma1 pa2 xs12" size="large" type="danger" v-on:click="loginGmail(authColumn)" v-show="!loginStatus">按此驗證你的Google帳號以進入表單</el-button>
         <div class="alertWord" v-if="authColumn.status !== ''">{{ authColumn.status }}</div>
         <div class="captionWord" v-if="authColumn.status === ''">{{ formatHelper(authColumn) }}</div>
       </el-space>
-      <el-button v-if="authtypeCheck()" class="ma1 pa1 xs12" size="large" type="danger" :disabled="checkAuth()" v-on:click="loginView()">{{ checkAuth() ? "格式錯誤或有空值，修正後才可以送出" : "送出認證以" + viewTip + "表單" }}</el-button>
+      <el-button v-if="authtypeCheck()" class="ma1 pa1 xs12" size="large" type="danger" :disabled="checkAuth()" v-show="!loginStatus" v-on:click="loginView()">{{ checkAuth() ? "格式錯誤或有空值，修正後才可以送出" : "送出認證以" + viewTip + "表單" }}</el-button>
       <el-button v-if="saveSuccessed" class="ma1 pa2 xs12" size="large" type="success" v-on:click="downloadResult()">下載你剛剛填寫的結果</el-button>
-      <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="reloadPage()">回到問卷列表</el-button>
+      <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="reloadPage()" v-if="!loginStatus">回到問卷列表</el-button>
       <!-- <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="viewLatest()">查看最後一位填寫者以及你是否曾填寫過</el-button> -->
-      <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="viewStat()">查看填答率統計 </el-button>
-      <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="sendContact()" v-if="contactEmail !== ''">Email給問卷負責人</el-button>
+      <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="viewStat()" v-if="!loginStatus">查看填答率統計 </el-button>
+      <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="sendContact()" v-show="!loginStatus" v-if="contactEmail !== ''">Email給問卷負責人</el-button>
       <div class="footerText">Developer: <a class="cleanLink" href="mailto:kelunyang@outlook.com">Kelunyang</a>@LKSH 2023 <a style="color:#CCC" target="_blank" href="https://github.com/kelunyang/sheet-machine" >GITHUB</a></div>
     </el-space>
   </el-dialog>
@@ -362,8 +362,8 @@
           <el-button type="primary">請選擇1個檔案</el-button>
         </template>
       </el-upload>
-      <el-button class="ma1 pa2 xs12" size="large" type="danger" v-on:click="startUpload()" :disabled="currentFile.fileList.length === 0">上傳檔案！</el-button>
-      <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="fileDialog.show = false">關閉對話框</el-button>
+      <el-button class="ma1 pa2 xs12" size="large" type="danger" v-on:click="startUpload()" :disabled="currentFile.fileList.length === 0" v-if="!uploadStatus">上傳檔案！</el-button>
+      <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="fileDialog.show = false" v-if="!uploadStatus">關閉對話框</el-button>
     </el-space>
   </el-drawer>
   <el-drawer
@@ -377,7 +377,7 @@
       <el-alert title="勾選數量限制" type="info" show-icon>
         <template #default>
           <span style="font-size: 1.5em">
-            請從 {{ currentMulti.selections.length }} 項中挑出至多 {{ currentMulti.maxNum }} 項，按下方藍色按鈕調整已選區的選項，如果要調整已選區的選項順序，勾選之後會出現調整功能（下方綠色按鈕）
+            請從 {{ currentMulti.selections.length }} 項中 {{ currentMulti.maxNum > 0 ? "挑出至多" + currentMulti.maxNum + "項" : "挑出你要的項目（數量不限）" }}，按下方藍色按鈕調整已選區的選項，如果要調整已選區的選項順序，勾選之後會出現調整功能（下方綠色按鈕）
           </span>
         </template>
       </el-alert>
@@ -483,8 +483,8 @@
         <div class="captionWord" v-if="authColumn.status !== ''">{{ authColumn.status }}</div>
       </el-space>
       <el-button class="ma1 pa2 xs12" size="large" type="danger" :disabled="checkAuth()" v-on:click="sendMod()">{{ checkAuth() ? "格式錯誤或有空值，修正後才可以送出" : "是的，我確定送出本次填寫的結果！" }}</el-button> -->
-      <el-button class="ma1 pa2 xs12" size="large" type="danger" v-on:click="sendMod()" :disabled="checkSend()">{{ checkSend() ? "請修正你提供的Email格式，才能送出" : "是的，我確定送出本次填寫的結果！" }}</el-button>
-      <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="reverseBody()">剛剛輸入的有誤，回去修改</el-button>
+      <el-button class="ma1 pa2 xs12" size="large" type="danger" v-on:click="sendMod()" :disabled="checkSend()" v-if="!uploadStatus">{{ checkSend() ? "請修正你提供的Email格式，才能送出" : "是的，我確定送出本次填寫的結果！" }}</el-button>
+      <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="reverseBody()" v-if="!uploadStatus">剛剛輸入的有誤，回去修改</el-button>
     </el-space>
   <!-- </el-dialog> -->
   </el-drawer>
@@ -540,6 +540,45 @@
   import randomColor from 'randomcolor';
   import SmoothSignature from "smooth-signature";
   export default {
+    watch: {
+      columnDB: {
+        handler(newValue) {
+          if(this.sheetLoaded) {
+            let tempQueue = [];
+            let oriobj = this;
+            for(let i=0; i<newValue.length; i++) {
+              if(/F/.test(newValue[i].type)) {
+                if(!/F/.test(newValue[i].format)) {
+                  tempQueue.push({
+                    id: newValue[i].id,
+                    val: newValue[i].value
+                  })
+                }
+              }
+            }
+            let primaryKeys = _.filter(oriobj.authDB, (item) => {
+              return /P/.test(item.type)
+            });
+            if(primaryKeys.length > 0) {
+              let queueAnswers = localStorage.getItem(primaryKeys[0].value) === undefined || localStorage.getItem(primaryKeys[0].value) === null ? [] : JSON.parse(localStorage.getItem(primaryKeys[0].value));
+              let currentAns = _.findIndex(queueAnswers, (item) => {
+                return item.uid === oriobj.currentUID;
+              });
+              if(currentAns > -1) {
+                queueAnswers[currentAns].queue = tempQueue;
+              } else {
+                queueAnswers.push({
+                  uid: oriobj.currentUID,
+                  queue: tempQueue
+                });
+              }
+              localStorage.setItem(primaryKeys[0].value, JSON.stringify(queueAnswers));
+            }
+          }
+        },
+        deep: true
+      }
+    },
     methods: {
       rateSort: function(a, b) {
         return parseFloat(a.rate)-parseFloat(b.rate);
@@ -592,16 +631,21 @@
       },
       selectionChanged: function(currentItem, direction, key) {
         if(direction === "right") {
-          if(this.currentMulti.selected.length > this.currentMulti.maxNum) {
-            this.currentMulti.selected.splice(this.currentMulti.maxNum);
-            ElMessage('最多只能選' + this.currentMulti.maxNum + '項，系統自動清除你多選的');
+          if(this.currentMulti.maxNum > 0) {
+            if(this.currentMulti.selected.length > this.currentMulti.maxNum) {
+              this.currentMulti.selected.splice(this.currentMulti.maxNum);
+              ElMessage('最多只能選' + this.currentMulti.maxNum + '項，系統自動清除你多選的');
+            }
           }
+        } else {
+          this.currentMulti.modified = [];
         }
       },
       multiSelect: function(dataColumn) {
         if(this.formatDetector('U', 'F', dataColumn)) {
           let selections = [];
           let selectionConfig = dataColumn.content.split('::');
+          if(selectionConfig[0] === '') { selectionConfig[0] = 0; }
           let oriSelect = selectionConfig[1].split(';');
           for(let i=0; i<oriSelect.length; i++) {
             selections.push({
@@ -783,11 +827,14 @@
           } else if(this.formatDetector('U', 'F|A|P', column)) {
             let selectionConfig = column.content.split("::");
             let selections = _.uniq(selectionConfig[1].split(';'));
-            tip = "從" + selections.length +"個選項中挑出"+selectionConfig[0]+"個（按上方按鍵去選）";
+            tip = "從" + selections.length +"個選項中";
+            tip += selectionConfig[0] === "" ? "選擇你要的項目" : "挑出"+selectionConfig[0]+"個項目";
+            tip += "（按上方按鍵去選）";
           } else if(this.formatDetector('G', 'F|A|P', column)) {
             tip = "本欄無法手動輸入，系統會自動讀取你登入的Google帳號";
           }
-          return "格式：" + tip + "[輸入後點其他區域會重新檢查本欄位格式]";
+          let must = column.must ? "[必填]" : "";
+          return must + "格式：" + tip + "[輸入後點其他區域會重新檢查本欄位格式]";
         }
         return "";
       },
@@ -846,7 +893,7 @@
           oriobj.signatures = [];
           oriobj.currentSignature = 0;
           oriobj.sheetsDialog.show = true;
-          nextTick(() => {
+          /*nextTick(() => {
             google.script.url.getLocation(function(location) {
               if(location.hash !== "") {
                 ElMessage("捕捉到你想直接打開ID為" + location.hash + "問卷，請勿點擊其他連結");
@@ -861,7 +908,7 @@
                 }
               }
             });
-          });
+          });*/
         })
         .withFailureHandler((data) => {
           oriobj.scriptError = data;
@@ -911,6 +958,7 @@
             skipnull = true;
           }
         }
+        let formatCheck = false;
         if(this.formatDetector('', 'F', column)) {
           if(column.must) { //先檢查是否為空
             if(column.value === "") {
@@ -918,6 +966,11 @@
               column.status = "這個欄位必需有值！";
             } else {
               column.status = "";
+              formatCheck = true;
+            }
+          } else {
+            if(column.value !== "") {
+              formatCheck = true;
             }
           }
           if(column.status === "") {  //再檢查群組設定
@@ -929,10 +982,12 @@
                 for(let i=0; i<sameGroup.length; i++) {
                   sameGroup[i].status = "群組「" + column.group + "」欄位值不得全為空！";
                 }
+                formatCheck = false;
               } else {
                 for(let i=0; i<sameGroup.length; i++) {
                   sameGroup[i].status = "";
                 }
+                formatCheck = true;
               }
               if(column.uniGroup) {
                 let uniqed = _.uniqBy(sameGroup, (item) => {
@@ -942,16 +997,18 @@
                   for(let i=0; i<sameGroup.length; i++) {
                     sameGroup[i].status = "群組「" + column.group + "」欄位值不得重複！";
                   }
+                  formatCheck = false;
                 } else {
                   for(let i=0; i<sameGroup.length; i++) {
                     sameGroup[i].status = "";
                   }
+                  formatCheck = true;
                 }
               }
             }
           }
         }
-        if(column.status === "") {  //最後檢查格式
+        if(formatCheck) {  //最後檢查格式
           if(passMust) {
             if(!skipnull) {
               if(this.formatDetector('N|P', 'F|A|P', column)) {
@@ -1029,11 +1086,12 @@
                     column.value = column.value.replace(/台(北|中|南|灣)/,'臺$1');
                     column.status = "";
                   } else {
-                    column.status = "必須要包含以下關鍵字「" + regexConfig[0] + "」";
+                    column.status = "格式提示為「" + regexConfig[0] + "」";
                   }
                 }
               } else if(this.formatDetector('S', 'F|A|P', column)) {
-                if(new RegExp(column.value).test(column.content)) {
+                let selections = column.content.split(';');
+                if(_.includes(selections, column.value)) {
                   column.status = "";
                 } else {
                   column.status = "你真的是用選單選出來的值嗎？";
@@ -1064,6 +1122,7 @@
             oriobj.enableModify = sheet[0].enableModify;
             oriobj.scriptError.message = "";
             oriobj.currentSID = sheet[0].id;
+            oriobj.currentUID = sheet[0].sheetID;
             oriobj.currentDue = sheet[0].dueDate;
             oriobj.viewDate = sheet[0].viewDate;
             oriobj.currentQuery = sheet[0].name;
@@ -1071,6 +1130,7 @@
             oriobj.alertWords = sheet[0].comment;
             oriobj.submitTip = sheet[0].submitTip;
             oriobj.writeAllowed = sheet[0].writeAllowed;
+            oriobj.randomQ = sheet[0].randomQ;
             oriobj.contactEmail = sheet[0].email;
             for(let i=0; i<sheet[0].signatures.length; i++) {
               oriobj.signatures.push({
@@ -1194,50 +1254,67 @@
         }
       },
       sendMod: function() {
-        let oriobj = this;
-        this.emailObj.value = this.emailObj.enable ? this.emailObj.value : "";
-        let currentSheet = _.filter(this.sheets, (sheet) => {
-          return sheet.id === oriobj.currentSID;
-        });
-        if(currentSheet.length > 0) {
-          let signatures = [];
-          for(let i=0; i<this.signatures.length; i++) {
-            signatures.push({
-              blob: this.signatures[i].smObject.getPNG(),
-              name: this.signatures[i].name
-            });
-          }
-          this.uploadStatus = true;
-          google.script.run
-            .withSuccessHandler((report) => {
-              oriobj.saveSuccessed = report.status;
-              oriobj.requestCount.pkey = "";
-              oriobj.scriptError.message = report.errorLog.length > 0 ? report.errorLog.join(',') : "";
-              oriobj.lastSubmit = _.filter(report.data, (data) => {
-                return /F/.test(data.type);
+        if(!this.uploadingSheet) {
+          let oriobj = this;
+          this.uploadingSheet = true;
+          this.emailObj.value = this.emailObj.enable ? this.emailObj.value : "";
+          let currentSheet = _.filter(this.sheets, (sheet) => {
+            return sheet.id === oriobj.currentSID;
+          });
+          if(currentSheet.length > 0) {
+            let signatures = [];
+            for(let i=0; i<this.signatures.length; i++) {
+              signatures.push({
+                blob: this.signatures[i].smObject.getPNG(),
+                name: this.signatures[i].name
               });
-              oriobj.columnDialog.show = false;
-              oriobj.confirmDialog.show = false;
-              if(oriobj.saveSuccessed) {
-                oriobj.columnDB = [];
-                oriobj.authDB = [];
-                oriobj.enableModify = false;
-              }
-              oriobj.writeTick = report.tick;
-              oriobj.loginDialog.show = true;
-              nextTick(() => {
-                oriobj.uploadStatus = false;
+            }
+            this.uploadStatus = true;
+            google.script.run
+              .withSuccessHandler((report) => {
+                oriobj.uploadingSheet = false;
+                oriobj.saveSuccessed = report.status;
+                oriobj.requestCount.pkey = "";
+                oriobj.scriptError.message = report.errorLog.length > 0 ? report.errorLog.join(',') : "";
+                oriobj.lastSubmit = _.filter(report.data, (data) => {
+                  return /F/.test(data.type);
+                });
+                oriobj.columnDialog.show = false;
+                oriobj.confirmDialog.show = false;
                 if(oriobj.saveSuccessed) {
-                  oriobj.changeStep("最後確認", "success", "success", "success");
-                } else {
-                  oriobj.changeStep("最後確認", "error", "success", "success");
+                  let primaryKeys = _.filter(oriobj.authDB, (item) => {
+                    return /P/.test(item.type)
+                  });
+                  if(primaryKeys.length > 0) {
+                    let queueAnswers = localStorage.getItem(primaryKeys[0].value) === undefined || localStorage.getItem(primaryKeys[0].value) === null ? [] : JSON.parse(localStorage.getItem(primaryKeys[0].value));
+                    let currentAns = _.findIndex(queueAnswers, (item) => {
+                      return item.uid === oriobj.currentUID;
+                    });
+                    if(currentAns > -1) {
+                      queueAnswers[currentAns] = [];
+                    }
+                  }
+                  oriobj.columnDB = [];
+                  oriobj.authDB = [];
+                  oriobj.enableModify = false;
                 }
-              });
-            })
-            .withFailureHandler((data) => {
-              oriobj.scriptError = data;
-              oriobj.uploadStatus = true;
-            }).writeRecord(currentSheet[0].refer, currentSheet[0].record, this.authDB, this.columnDB, this.enableModify, signatures, this.emailObj.value);
+                oriobj.writeTick = report.tick;
+                oriobj.loginDialog.show = true;
+                nextTick(() => {
+                  oriobj.uploadStatus = false;
+                  if(oriobj.saveSuccessed) {
+                    oriobj.changeStep("最後確認", "success", "success", "success");
+                  } else {
+                    oriobj.changeStep("最後確認", "error", "success", "success");
+                  }
+                });
+              })
+              .withFailureHandler((data) => {
+                oriobj.uploadingSheet = false;
+                oriobj.scriptError = data;
+                oriobj.uploadStatus = false;
+              }).writeRecord(currentSheet[0].refer, currentSheet[0].record, this.authDB, this.columnDB, this.enableModify, signatures, this.emailObj.value);
+          }
         }
       },
       closeLatest: function() {
@@ -1256,42 +1333,52 @@
           }
           this.authDB[i].status = "";
         }*/
-        this.columnDialog.show = false;
-        if(this.signatures.length === 0) {
-          this.confirmDialog.show = true;
-          nextTick(() => {
-            oriobj.changeStep("最後確認", "process", "success", "success");
-          });
+        let ignoreCDB = _.filter(this.columnDB, (column) => {
+          return !/C|G/.test(column.type);
+        })
+        for(let i=0; i<ignoreCDB.length; i++) {
+          this.valField(ignoreCDB[i]);
+        }
+        if(!this.checkData()) {
+          this.columnDialog.show = false;
+          if(this.signatures.length === 0) {
+            this.confirmDialog.show = true;
+            nextTick(() => {
+              oriobj.changeStep("最後確認", "process", "success", "success");
+            });
+          } else {
+            this.enableSignature = true;
+            this.emptySignatures = [];
+            this.signatureDialog.show = true;
+            nextTick(() => {
+              ElMessage('簽名模組準備中，請等待準備完成後再簽名！');
+              if(oriobj.resizeTimer !== undefined) {
+                clearTimeout(oriobj.resizeTimer);
+                oriobj.resizeTimer = undefined;
+              }
+              if(oriobj.clearTimer !== undefined) {
+                clearTimeout(oriobj.clearTimer);
+                oriobj.clearTimer = undefined;
+              }
+              oriobj.clearTimer = setTimeout(() => {
+                oriobj.changeStep("簽名確認", "process", "success", "wait");
+                let canvas = document.querySelector("canvas.signaturePad");
+                oriobj.signatureWidth = canvas.parentElement.clientWidth;
+                oriobj.signatureHeight = canvas.parentElement.clientHeight;
+                ElMessage('簽名清除中...');
+                oriobj.resizeTimer = setTimeout(() => {
+                  let canvas = document.querySelectorAll("canvas.signaturePad");
+                  for(let i=0; i<canvas.length; i++) {
+                    oriobj.signatures[i].canvas = canvas[i];
+                    oriobj.signatures[i].smObject = new SmoothSignature(canvas[i]);
+                  }
+                  ElMessage('簽名模組準備完成，請在灰框內簽名');
+                }, 1000);
+              }, 3000);
+            });
+          }
         } else {
-          this.enableSignature = true;
-          this.emptySignatures = [];
-          this.signatureDialog.show = true;
-          nextTick(() => {
-            ElMessage('簽名模組準備中，請等待準備完成後再簽名！');
-            if(oriobj.resizeTimer !== undefined) {
-              clearTimeout(oriobj.resizeTimer);
-              oriobj.resizeTimer = undefined;
-            }
-            if(oriobj.clearTimer !== undefined) {
-              clearTimeout(oriobj.clearTimer);
-              oriobj.clearTimer = undefined;
-            }
-            oriobj.clearTimer = setTimeout(() => {
-              oriobj.changeStep("簽名確認", "process", "success", "wait");
-              let canvas = document.querySelector("canvas.signaturePad");
-              oriobj.signatureWidth = canvas.parentElement.clientWidth;
-              oriobj.signatureHeight = canvas.parentElement.clientHeight;
-              ElMessage('簽名清除中...');
-              oriobj.resizeTimer = setTimeout(() => {
-                let canvas = document.querySelectorAll("canvas.signaturePad");
-                for(let i=0; i<canvas.length; i++) {
-                  oriobj.signatures[i].canvas = canvas[i];
-                  oriobj.signatures[i].smObject = new SmoothSignature(canvas[i]);
-                }
-                ElMessage('簽名模組準備完成，請在灰框內簽名');
-              }, 1000);
-            }, 3000);
-          });
+          ElMessage('資料送出前預格式檢查失敗，請檢查每個欄位下的錯誤訊息');
         }
       },
       endView: function() {
@@ -1393,6 +1480,7 @@
               oriobj.scriptError.message = "";
               if(!sheetConfig) {
                 oriobj.scriptError.message = sheet[0].loginfailTip;
+                oriobj.loginStatus = false;
                 nextTick(() => {
                   oriobj.changeStep("身分確認", "error", "wait", "wait");
                 });
@@ -1413,6 +1501,23 @@
                     oriobj.loading = false;
                   }).duplicateSubmits(sheet[0].record, pkeyColumns[0].value);
                 }*/
+                let currentAns = { uid: oriobj.currentUID, queue: [] };
+                let primaryKeys = _.filter(oriobj.authDB, (item) => {
+                  return /P/.test(item.type)
+                });
+                if(primaryKeys.length > 0) {
+                  let queueAnswers = localStorage.getItem(primaryKeys[0].value) === undefined || localStorage.getItem(primaryKeys[0].value) === null ? [] : JSON.parse(localStorage.getItem(primaryKeys[0].value));
+                  let currentAnsIndex = _.findIndex(queueAnswers, (item) => {
+                    return item.uid === oriobj.currentUID;
+                  });
+                  if(currentAnsIndex > -1) {
+                    currentAns = queueAnswers[currentAnsIndex];
+                    if(currentAns.queue.length > 0) { oriobj.tempFound = true; }
+                  } else {
+                    queueAnswers.push(currentAns);
+                  }
+                  localStorage.setItem(primaryKeys[0].value, JSON.stringify(queueAnswers));
+                }
                 oriobj.remainEmail = sheetConfig.emailQuota;
                 oriobj.savedSignatures = sheetConfig.signatures;
                 oriobj.requestCount = sheetConfig.status;
@@ -1429,6 +1534,7 @@
                 oriobj.columnDB = _.filter(columns, (column) => {
                   return /F|C|G/.test(column.type);
                 });
+                if(sheet[0].randomQ) { oriobj.columnDB = _.shuffle(oriobj.columnDB); }  //亂數欄位
                 for(let i=0;i<oriobj.columnDB.length; i++) {
                   let fileDetect = false;
                   oriobj.columnDB[i].tid = uuidv4();
@@ -1439,6 +1545,15 @@
                       oriobj.columnDB[i].uniGroup = false;
                       if(groupConfig.length > 1) {
                         oriobj.columnDB[i].uniGroup = groupConfig[1] === "U";
+                      }
+                    }
+                    if(!/F/.test(oriobj.columnDB[i].format)) {
+                      //console.dir(oriobj.columnDB[i]);
+                      let columnIndex = _.findIndex(currentAns.queue, (item) => {
+                        return item.id === oriobj.columnDB[i].id;
+                      });
+                      if(columnIndex > -1) {
+                        oriobj.columnDB[i].value = currentAns.queue[columnIndex].val;
                       }
                     }
                     if(/F/.test(oriobj.columnDB[i].format)) {
@@ -1494,6 +1609,7 @@
                 oriobj.loginStatus = false;
                 oriobj.googleStatus = undefined;
                 oriobj.columnDialog.show = true;
+                oriobj.sheetLoaded = true;
                 nextTick(() => {
                   if(oriobj.viewOnly) {
                     oriobj.changeStep("檢視資料", "process", "success", "wait");
@@ -1614,6 +1730,7 @@
         });
         if(column.length > 0) {
           column[0].value = _.join(this.currentMulti.selected, ";");
+          this.valField(column[0]);
         }
         this.multisDialog.show = false;
       },
@@ -1627,7 +1744,7 @@
           let firstList = this.currentFile.fileList[0];
           let file = 'raw' in firstList ? firstList.raw : firstList;
           const fr = new FileReader();
-          ElMessage("開始打包檔案上傳！");
+          ElMessage("檔案編碼中！");
           fr.onload = function(e) {
             const obj = {
               filename: file.name,
@@ -1677,6 +1794,11 @@
       },
     },
     computed: {
+      totalInputs: function() {
+        return _.countBy(this.columnDB, (column) => {
+          return /F/.test(column.type);
+        });
+      },
       availableSteps: function() {
         return _.filter(this.stepStatus, (step) => {
           return step.show === true;
@@ -1746,6 +1868,10 @@
     },
     data() {
       return {
+        tempFound: false,
+        sheetLoaded: false,
+        currentUID: "",
+        uploadingSheet: false,
         contactEmail: "",
         writeAllowed: false,
         remainEmail: 0,
