@@ -540,7 +540,7 @@ function writeRecord(referSSID, recordSSID, auth, record, accept, signatures, em
                         proceedWrite = false;
                       }
                     }
-                  } else if(formatDetector('S', 'F|C', column)) {
+                  } else if(formatDetector('S', 'F', column)) {
                     let selections = column.content.split(";");
                     if(_.includes(selections, data.value)) {
                       column.value = data.value;
