@@ -44,6 +44,7 @@
               <span style="font-size: 1.5em" v-html="HTMLConverter(dataColumn.content)"></span>
             </template>
           </el-alert>
+          <el-tag v-if="formatDetector('', 'F', dataColumn)" :type="(statusDetector(dataColumn)).status">{{ (statusDetector(dataColumn)).result }}</el-tag>
           <div v-if="!/G/.test(dataColumn.type)" v-show="!formatDetector('M', 'C', dataColumn)" class="qTitle xs12">{{ dataColumn.name }}</div>
           <div v-if="!/G/.test(dataColumn.type)" v-show="!formatDetector('M', 'C', dataColumn)" class="xs12 breakword">
             <span class="oriTip">
@@ -130,8 +131,9 @@
           <div v-show="enableModify" class="captionWord" v-if="dataColumn.status === ''">{{ formatHelper(dataColumn) }}</div>
         </el-space>
         <el-button v-if="!viewOnly" class="ma1 pa2 xs12" size="large" type="danger" v-on:click="authMod()" :disabled="checkData()">
-          {{ !checkData() ? "送出修改" : "你的格式有誤，請檢查" }}
+          {{ !checkData() ? "送出修改" : "請確認必填欄位都已填，並且不可以有格式錯誤（紅字）才可以送出喔！" }}
         </el-button>
+        <el-button v-if="tempFound" class="ma1 pa2 xs12" size="large" type="primary" v-on:click="clearTemp()">清除未送出的暫存答案（會重新載入問卷）</el-button>
         <el-button v-else class="ma1 pa2 xs12" size="large" type="danger" v-on:click="endView()">
           檢視完畢
         </el-button>
@@ -213,12 +215,20 @@
     <el-space direction="vertical" :fill="true" wrap style="width: 100%">
       <el-carousel ref="signaturePad" :autoplay="false" indicator-position="none" arrow="never" @change="changeSignature">
         <el-carousel-item v-for="signature in signatures" :key="signature.id">
+          <el-progress :percentage="signature.percentage" :status="signature.progressStatus">
+            <template #default="{ percentage }">
+              <span>{{ percentage }}%</span>
+              <span v-if="signature.showWarning" style="color: red;">
+                簽名須佔有簽名板的0.5%以上面積
+              </span>
+            </template>
+          </el-progress>
           <canvas class="signaturePad" :width="signatureWidth" :height="signatureHeight" />
         </el-carousel-item>
       </el-carousel>
       <el-button v-if="signatures.length > 1" class="ma1 pa1 xs12" size="large" type="primary" v-on:click="nextSignatrue()">簽下一組（共{{ signatures.length }}組），到最後一個時會回到第一個</el-button>
       <el-button class="ma1 pa1 xs12" size="large" type="success" v-on:click="clearSignature()">清除{{ signatureTip }}的簽名</el-button>
-      <el-button class="ma1 pa2 xs12" size="large" type="danger" v-on:click="endSignature()">提交簽名，下一步！</el-button>
+      <el-button class="ma1 pa2 xs12" size="large" type="danger" v-on:click="endSignature()" :disabled="signatureSubmitStatus.isDisabled">{{ signatureSubmitStatus.message }}</el-button>
       <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="reverseBody()">剛剛輸入的有誤，回去修改</el-button>
     </el-space>
   </el-dialog>
@@ -580,6 +590,56 @@
       }
     },
     methods: {
+      clearTemp: function() {
+        let primaryKeys = _.filter(this.authDB, (item) => {
+          return /P/.test(item.type)
+        });
+        if(primaryKeys.length > 0) {
+          let queueAnswers = localStorage.getItem(primaryKeys[0].value) === undefined || localStorage.getItem(primaryKeys[0].value) === null ? [] : JSON.parse(localStorage.getItem(primaryKeys[0].value));
+          let currentAns = _.findIndex(queueAnswers, (item) => {
+            return item.uid === this.currentUID;
+          });
+          if(currentAns > -1) {
+            queueAnswers[currentAns].queue = [];
+            localStorage.setItem(primaryKeys[0].value, JSON.stringify(queueAnswers));
+            this.reloadPage();
+          } else {
+            ElMessage('找不到你的存檔值，確定這是從正常流程中呼叫的？');
+          }          
+        } else {
+          ElMessage('找不到你的問卷唯一值，確定這是從正常流程中呼叫的？');
+        }
+      },
+      statusDetector: function(column) {
+        let status = "info";
+        let result = "非必填欄位"
+        if(this.formatDetector('', 'F', column)) {
+          if(column.must) {
+            if(column.value === "") {
+              status = "danger";
+              result = "必答題卻未答"
+            }
+          }
+          if(column.status !== "") {
+            status = "danger";
+            result = "填入內容有誤，請查看題目下方說明"
+          } else {
+            if(column.value !== "") {
+              if(column.value !== column.savedContent) {
+                status = "success";
+                result = "已回答";
+              } else {
+                status = "warning";
+                result = "輸入值等於預設值或是儲存值（送出時會進行格式檢查）";
+              }
+            }
+          }
+          return {
+            status: status,
+            result: result
+          };
+        }
+      },
       rateSort: function(a, b) {
         return parseFloat(a.rate)-parseFloat(b.rate);
       },
@@ -1137,7 +1197,10 @@
                 id: uuidv4(),
                 name: sheet[0].signatures[i],
                 canvas: null,
-                smObject: null
+                smObject: null,
+                percentage: 0,
+                showWarning: true,
+                progressStatus: 'exception'
               });
             }
             if(oriobj.expired <= 0) {
@@ -1292,6 +1355,7 @@
                     });
                     if(currentAns > -1) {
                       queueAnswers[currentAns] = [];
+                      localStorage.setItem(primaryKeys[0].value, JSON.stringify(queueAnswers));
                     }
                   }
                   oriobj.columnDB = [];
@@ -1368,9 +1432,13 @@
                 ElMessage('簽名清除中...');
                 oriobj.resizeTimer = setTimeout(() => {
                   let canvas = document.querySelectorAll("canvas.signaturePad");
-                  for(let i=0; i<canvas.length; i++) {
+                  for(let i=0; i<oriobj.signatures.length; i++) {
                     oriobj.signatures[i].canvas = canvas[i];
-                    oriobj.signatures[i].smObject = new SmoothSignature(canvas[i]);
+                    oriobj.signatures[i].smObject = new SmoothSignature(canvas[i], {
+                      onEnd: () => {
+                        oriobj.calculateSignatureRatio(i);
+                      },
+                    });
                   }
                   ElMessage('簽名模組準備完成，請在灰框內簽名');
                 }, 1000);
@@ -1380,6 +1448,38 @@
         } else {
           ElMessage('資料送出前預格式檢查失敗，請檢查每個欄位下的錯誤訊息');
         }
+      },
+      calculateSignatureRatio(index) {
+        const signature = this.signatures[index];
+        const canvas = signature.canvas;
+        const ctx = canvas.getContext('2d');
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const data = imageData.data;
+        const totalPixels = canvas.width * canvas.height;
+        let nonEmptyPixels = 0;
+
+        for (let i = 0; i < data.length; i += 4) {
+          const alpha = data[i + 3]; // alpha通道
+          if (alpha > 0) {
+            nonEmptyPixels++;
+          }
+        }
+
+        // 计算非空白区域占比
+        const nonEmptyPercentage = (nonEmptyPixels / totalPixels) * 100;
+        signature.percentage = parseFloat(nonEmptyPercentage.toFixed(2));
+
+        // 更新进度条状态和警告提示
+        if (signature.percentage < 0.5 || signature.percentage > 90) {
+          signature.progressStatus = 'exception';
+          signature.showWarning = true;
+        } else {
+          signature.progressStatus = 'success';
+          signature.showWarning = false;
+        }
+
+        // 强制更新视图
+        this.$forceUpdate();
       },
       endView: function() {
         let oriobj = this;
@@ -1661,6 +1761,9 @@
       },
       clearSignature: function() {
         this.signatures[this.currentSignature].smObject.clear();
+        this.signatures[this.currentSignature].percentage = 0; // 重置進度條
+        this.signatures[this.currentSignature].showWarning = false; // 隱藏警告
+        this.signatures[this.currentSignature].progressStatus = 'exception'; // 隱藏警告
         ElMessage(this.signatureTip + '簽名已清除！');
       },
       changeSignature: function(index) {
@@ -1794,6 +1897,18 @@
       },
     },
     computed: {
+      signatureSubmitStatus() {
+        const isAnySignatureInvalid = _.some(this.signatures, signature => 
+          signature.showWarning || signature.percentage <= 0.5 || signature.percentage > 50
+        );
+
+        return {
+          isDisabled: isAnySignatureInvalid,
+          message: isAnySignatureInvalid 
+            ? '簽名須佔簽名板的0.5%以上面積才可提交' 
+            : '提交簽名，下一步！'
+        };
+      },
       totalInputs: function() {
         return _.countBy(this.columnDB, (column) => {
           return /F/.test(column.type);
@@ -1856,6 +1971,9 @@
                 oriobj.resizeTimer = setTimeout(() => {
                   for(let i=0; i<oriobj.signatures.length; i++) {
                     oriobj.signatures[i].smObject.clear();
+                    oriobj.signatures[i].percentage = 0; // 重置進度條
+                    oriobj.signatures[i].showWarning = false; // 隱藏警告
+                    oriobj.signatures[i].progressStatus = 'exception'; // 隱藏警告
                     oriobj.signatures[i].smObject = new SmoothSignature(oriobj.signatures[i].canvas);
                   }
                   ElMessage('簽名模組調整完成，請在灰框內簽名');
