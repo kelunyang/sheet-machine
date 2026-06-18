@@ -507,24 +507,24 @@ function writeRecord(referSSID, recordSSID, auth, record, accept, signatures, em
                       proceedWrite = false;
                     }
                   } else if(formatDetector('X', 'F|C', column)) {
-                    let lenConfig = column.content.split(";");
-                    let lenCheck = false;
-                    if(lenConfig[0] !== '') {
-                      lenConfig[1] = '';
-                      let maxLen = parseInt(lenConfig[0]);
+                    let xConfig = column.content.split(";");
+                    let errorMsg = [];
+                    if(xConfig[0] !== '') {
+                      xConfig[1] = '';
+                      let maxLen = parseInt(xConfig[0]);
                       if(data.value.length > maxLen) {
-                        proceedWrite = false;
-                        errorReason = "你輸入的文字長度超過限制！（" + data.value.length + "/" + maxLen +"）";
+                        errorMsg.push("你輸入的文字長度超過限制！（" + data.value.length + "/" + maxLen +"）");
                       }
                     }
-                    if(proceedWrite) {
-                      if(column.content[1] !== '') {
-                        let minLen = parseInt(lenConfig[1]);
-                        if(data.value.length < minLen) {
-                          proceedWrite = false;
-                          errorReason = "你輸入的文字長度太短了！（" + data.value.length + "/" + minLen +"）";
-                        }
+                    if(xConfig[1] !== '') {
+                      let minLen = parseInt(xConfig[1]);
+                      if(data.value.length < minLen) {
+                        errorMsg.push("你輸入的文字太少了！（" + data.value.length + "/" + minLen + "）");
                       }
+                    }
+                    if(errorMsg.length > 0) {
+                      proceedWrite = false;
+                      errorReason = _.join(errorMsg, "，");
                     }
                     if(proceedWrite) {
                       column.value = data.value.replace(/台(北|中|南|灣)/,'臺$1');

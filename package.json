@@ -12,7 +12,7 @@
     "gpush": "npm run copy-files && clasp push",
     "gcreate": "clasp create --title \"sheet-machine\" --rootDir ./appscript",
     "gstart": "clasp push --watch",
-    "copy-files": "copy .\\src\\Code.js .\\appscript\\ && copy .\\dist\\index.html .\\appscript"
+    "copy-files": "cp ./src/Code.js ./appscript/ && cp ./dist/index.html ./appscript/"
   },
   "author": "",
   "license": "ISC",
@@ -26,12 +26,11 @@
     "lodash": "^4.17.21",
     "plus": "^0.1.0",
     "randomcolor": "^0.6.2",
-    "smooth-signature": "^1.0.12",
+    "signature_pad": "^5.1.3",
     "uuid": "^8.3.2",
     "vite": "^4.4.8",
     "vite-plugin-singlefile": "^0.13.5",
     "vue": "^3.2.37",
-    "vue-esign": "^1.1.4",
     "wave-ui": "^2.40.3"
   },
   "devDependencies": {

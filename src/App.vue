@@ -37,6 +37,28 @@
             </span>
           </template>
         </el-alert>
+        <el-row :gutter="10" v-if="enableModify" style="margin-top: 10px;">
+          <el-col :span="12">
+            <el-button
+              style="width: 100%"
+              size="large"
+              type="success"
+              :disabled="!tempFound"
+              @click="exportDrawer.show = true">
+              匯出暫存答案
+            </el-button>
+          </el-col>
+          <el-col :span="12">
+            <el-button
+              style="width: 100%"
+              size="large"
+              type="warning"
+              @click="triggerImportTemp()">
+              匯入暫存答案
+            </el-button>
+          </el-col>
+        </el-row>
+        <input type="file" ref="tempFileInput" accept=".smtemp" style="display:none" @change="onFileSelected" />
         <el-switch v-if="!viewOnly" class="ma1" size="large" active-text="我要修改問卷" v-model="enableModify"></el-switch>
         <el-space direction="vertical" fill wrap class="ma1 pa2 xs12 breakword" v-for="dataColumn in columnDB" :key="dataColumn.tid">
           <el-alert :title="dataColumn.name" type="info" show-icon v-if="formatDetector('M', 'C', dataColumn)">
@@ -498,6 +520,71 @@
     </el-space>
   <!-- </el-dialog> -->
   </el-drawer>
+  <el-drawer
+    v-model="exportDrawer.show"
+    title="匯出暫存答案"
+    direction="btt"
+    size="100%">
+    <el-alert title="注意事項" type="warning" show-icon>
+      <template #default>
+        <span style="font-size: 1.2em">
+          匯出內容包含：文字、選單、已上傳的檔案連結。
+          匯出的檔案經過 AES-256 加密，打開後會看到亂碼。
+          解密需要使用「你的登入帳號 + 你現在輸入的密碼」組合的密碼。
+        </span>
+      </template>
+    </el-alert>
+    <el-space direction="vertical" fill wrap style="width: 100%; margin-top: 20px;">
+      <div>請設定匯出密碼（匯入時需要輸入）：</div>
+      <el-input
+        v-model="exportDrawer.password"
+        type="password"
+        placeholder="請輸入密碼"
+        show-password
+        size="large" />
+      <el-button
+        size="large"
+        type="primary"
+        style="width: 100%"
+        :disabled="exportDrawer.password.length === 0"
+        @click="exportTemp()">
+        確認匯出
+      </el-button>
+    </el-space>
+  </el-drawer>
+  <el-drawer
+    v-model="importDrawer.show"
+    title="匯入暫存答案"
+    direction="btt"
+    size="100%">
+    <el-alert title="注意事項" type="info" show-icon>
+      <template #default>
+        <span style="font-size: 1.2em">
+          匯入的檔案經過 AES-256 加密。
+          解密需要使用「你的登入帳號 + 匯出時設定的密碼」組合的密碼。
+          如果登入帳號不同或密碼錯誤，將無法解密。
+        </span>
+      </template>
+    </el-alert>
+    <el-space direction="vertical" fill wrap style="width: 100%; margin-top: 20px;">
+      <div>已選擇檔案：{{ importDrawer.file?.name || '無' }}</div>
+      <div>請輸入匯出時設定的密碼：</div>
+      <el-input
+        v-model="importDrawer.password"
+        type="password"
+        placeholder="請輸入密碼"
+        show-password
+        size="large" />
+      <el-button
+        size="large"
+        type="primary"
+        style="width: 100%"
+        :disabled="importDrawer.password.length === 0"
+        @click="importTemp()">
+        確認匯入
+      </el-button>
+    </el-space>
+  </el-drawer>
   <el-dialog
     :show-close="false"
     v-model="latestDialog.show"
@@ -548,7 +635,7 @@
   import { v4 as uuidv4 } from 'uuid';
   import _ from'lodash';
   import randomColor from 'randomcolor';
-  import SmoothSignature from "smooth-signature";
+  import SignaturePad from "signature_pad";
   export default {
     watch: {
       columnDB: {
@@ -558,7 +645,18 @@
             let oriobj = this;
             for(let i=0; i<newValue.length; i++) {
               if(/F/.test(newValue[i].type)) {
-                if(!/F/.test(newValue[i].format)) {
+                if(/F/.test(newValue[i].format)) {
+                  // 檔案欄位：儲存 fileID 和 fileURL
+                  if(newValue[i].value !== '') {
+                    tempQueue.push({
+                      id: newValue[i].id,
+                      val: newValue[i].value,
+                      url: newValue[i].lastInput || '',
+                      isFile: true
+                    })
+                  }
+                } else {
+                  // 非檔案欄位：只儲存值
                   tempQueue.push({
                     id: newValue[i].id,
                     val: newValue[i].value
@@ -583,6 +681,19 @@
                 });
               }
               localStorage.setItem(primaryKeys[0].value, JSON.stringify(queueAnswers));
+              // 當有實際填寫過的暫存資料時，更新 tempFound 狀態
+              // 檢查是否有欄位的值與 savedContent (原始值) 不同
+              let hasFilledData = tempQueue.some(item => {
+                let val = item.val;
+                // 空值檢查：空字串、null、undefined、NaN
+                if (val === '' || val === null || val === undefined) return false;
+                if (typeof val === 'number' && isNaN(val)) return false;
+                // 找到對應的欄位，比較是否與原始值不同
+                let column = newValue.find(col => col.id === item.id);
+                if (column && val === column.savedContent) return false;
+                return true;
+              });
+              oriobj.tempFound = hasFilledData;
             }
           }
         },
@@ -605,10 +716,212 @@
             this.reloadPage();
           } else {
             ElMessage('找不到你的存檔值，確定這是從正常流程中呼叫的？');
-          }          
+          }
         } else {
           ElMessage('找不到你的問卷唯一值，確定這是從正常流程中呼叫的？');
         }
+      },
+      // 加密/解密工具方法
+      deriveKey: async function(password) {
+        const encoder = new TextEncoder();
+        const keyMaterial = await window.crypto.subtle.importKey(
+          'raw',
+          encoder.encode(password),
+          'PBKDF2',
+          false,
+          ['deriveBits', 'deriveKey']
+        );
+        return window.crypto.subtle.deriveKey(
+          {
+            name: 'PBKDF2',
+            salt: encoder.encode('sheet-machine-salt'),
+            iterations: 100000,
+            hash: 'SHA-256'
+          },
+          keyMaterial,
+          { name: 'AES-GCM', length: 256 },
+          false,
+          ['encrypt', 'decrypt']
+        );
+      },
+      encrypt: async function(data, password) {
+        const encoder = new TextEncoder();
+        const key = await this.deriveKey(password);
+        const iv = window.crypto.getRandomValues(new Uint8Array(12));
+        const encrypted = await window.crypto.subtle.encrypt(
+          { name: 'AES-GCM', iv: iv },
+          key,
+          encoder.encode(JSON.stringify(data))
+        );
+        // 合併 iv 和加密資料
+        const combined = new Uint8Array(iv.length + encrypted.byteLength);
+        combined.set(iv);
+        combined.set(new Uint8Array(encrypted), iv.length);
+        // 轉為 Base64
+        return btoa(String.fromCharCode.apply(null, combined));
+      },
+      decrypt: async function(encryptedData, password) {
+        const decoder = new TextDecoder();
+        const key = await this.deriveKey(password);
+        // 從 Base64 解碼
+        const combined = Uint8Array.from(atob(encryptedData), c => c.charCodeAt(0));
+        const iv = combined.slice(0, 12);
+        const data = combined.slice(12);
+        const decrypted = await window.crypto.subtle.decrypt(
+          { name: 'AES-GCM', iv: iv },
+          key,
+          data
+        );
+        return JSON.parse(decoder.decode(decrypted));
+      },
+      // 匯出/匯入方法
+      triggerImportTemp: function() {
+        this.$refs.tempFileInput.click();
+      },
+      onFileSelected: function(event) {
+        const file = event.target.files[0];
+        if (file) {
+          this.importDrawer.file = file;
+          this.importDrawer.password = '';
+          this.importDrawer.show = true;
+        }
+        event.target.value = '';
+      },
+      exportTemp: async function() {
+        let primaryKeys = _.filter(this.authDB, (item) => {
+          return /P/.test(item.type);
+        });
+        if (primaryKeys.length === 0) {
+          ElMessage.error('找不到主鍵欄位，無法匯出');
+          return;
+        }
+        let queueAnswers = localStorage.getItem(primaryKeys[0].value);
+        if (!queueAnswers) {
+          ElMessage.error('找不到暫存資料');
+          return;
+        }
+        let parsedQueue = JSON.parse(queueAnswers);
+        let currentAns = _.find(parsedQueue, (item) => {
+          return item.uid === this.currentUID;
+        });
+        if (!currentAns || currentAns.queue.length === 0) {
+          ElMessage.error('沒有可以匯出的暫存資料');
+          return;
+        }
+        // 組成匯出物件
+        let exportData = {
+          version: '1.0',
+          exportTime: new Date().toISOString(),
+          formId: this.currentSID,
+          data: {
+            queue: currentAns.queue
+          }
+        };
+        try {
+          // 加密金鑰 = 主鍵值 + 密碼
+          const encryptPassword = primaryKeys[0].value + this.exportDrawer.password;
+          const encrypted = await this.encrypt(exportData, encryptPassword);
+          // 下載檔案
+          const blob = new Blob([encrypted], { type: 'application/octet-stream' });
+          const url = window.URL.createObjectURL(blob);
+          const element = document.createElement('a');
+          element.setAttribute('href', url);
+          element.setAttribute('download', `問卷暫存_${this.currentQuery}_${dayjs().format('YYYYMMDD_HHmmss')}.smtemp`);
+          element.click();
+          window.URL.revokeObjectURL(url);
+          this.exportDrawer.show = false;
+          this.exportDrawer.password = '';
+          ElMessage.success('暫存資料已匯出！請將檔案傳送到其他裝置後匯入');
+        } catch (error) {
+          ElMessage.error('匯出失敗：' + error.message);
+        }
+      },
+      importTemp: async function() {
+        if (!this.importDrawer.file) {
+          ElMessage.error('請先選擇檔案');
+          return;
+        }
+        let primaryKeys = _.filter(this.authDB, (item) => {
+          return /P/.test(item.type);
+        });
+        if (primaryKeys.length === 0) {
+          ElMessage.error('找不到主鍵欄位，無法匯入');
+          return;
+        }
+        const oriobj = this;
+        const reader = new FileReader();
+        reader.onload = async function(e) {
+          try {
+            // 解密金鑰 = 當前主鍵值 + 密碼
+            const decryptPassword = primaryKeys[0].value + oriobj.importDrawer.password;
+            const importData = await oriobj.decrypt(e.target.result, decryptPassword);
+            // 驗證檔案格式
+            if (!importData.version || !importData.data || !importData.data.queue) {
+              ElMessage.error('匯入檔案格式不正確');
+              return;
+            }
+            // 檢查 formId 是否相符
+            if (importData.formId && importData.formId !== oriobj.currentSID) {
+              ElMessage.warning('注意：匯入的資料來自不同的問卷，部分欄位可能不相容');
+            }
+            // 過濾只匯入存在的欄位（包含檔案欄位）
+            let validFieldIds = oriobj.columnDB
+              .filter(col => /F/.test(col.type))
+              .map(col => col.id);
+            let importedQueue = importData.data.queue.filter(item => {
+              return validFieldIds.includes(item.id);
+            });
+            let skippedCount = importData.data.queue.length - importedQueue.length;
+            if (importedQueue.length === 0) {
+              ElMessage.error('匯入失敗：沒有任何欄位可以匯入（欄位結構可能已變更）');
+              return;
+            }
+            // 儲存到 localStorage
+            let queueAnswers = localStorage.getItem(primaryKeys[0].value);
+            queueAnswers = queueAnswers ? JSON.parse(queueAnswers) : [];
+            let currentAnsIndex = _.findIndex(queueAnswers, (item) => {
+              return item.uid === oriobj.currentUID;
+            });
+            let newAns = {
+              uid: oriobj.currentUID,
+              queue: importedQueue
+            };
+            if (currentAnsIndex > -1) {
+              queueAnswers[currentAnsIndex] = newAns;
+            } else {
+              queueAnswers.push(newAns);
+            }
+            localStorage.setItem(primaryKeys[0].value, JSON.stringify(queueAnswers));
+            // 直接更新 columnDB，讓畫面立即反應
+            for (let i = 0; i < importedQueue.length; i++) {
+              let columnIndex = oriobj.columnDB.findIndex(col => col.id === importedQueue[i].id);
+              if (columnIndex > -1) {
+                oriobj.columnDB[columnIndex].value = importedQueue[i].val;
+                // 檔案欄位：同時設定 lastInput (fileURL)
+                if (importedQueue[i].isFile && importedQueue[i].url) {
+                  oriobj.columnDB[columnIndex].lastInput = importedQueue[i].url;
+                  oriobj.columnDB[columnIndex].status = "";
+                }
+              }
+            }
+            oriobj.tempFound = true;
+            // 顯示結果訊息
+            let message = `成功匯入 ${importedQueue.length} 個欄位的暫存資料`;
+            if (skippedCount > 0) {
+              message += `，${skippedCount} 個欄位因不存在而略過`;
+            }
+            ElMessage.success(message);
+            oriobj.importDrawer.show = false;
+            oriobj.importDrawer.password = '';
+            oriobj.importDrawer.file = null;
+          } catch (error) {
+            ElMessage.error('匯入失敗：密碼錯誤或身分不符');
+          }
+        };
+        reader.onerror = function() {
+          ElMessage.error('檔案讀取失敗');
+        };
+        reader.readAsText(this.importDrawer.file);
       },
       statusDetector: function(column) {
         let status = "info";
@@ -820,8 +1133,14 @@
                     return col.id === columnConfig[0];
                   });
                   if(target.length > 0) {
-                    let value = isNaN(parseInt(target[0].value)) ? 0 : parseInt(target[0].value);
-                    sumValue += value * parseInt(columnConfig[1]);
+                    // 使用正則表達式提取 value 中最後一個數字區塊
+                    let valueStr = target[0].value.toString();
+                    let allMatches = valueStr.match(/\d+/g);
+                    let value = allMatches ? parseInt(allMatches[allMatches.length - 1]) : 0;
+                    
+                    let multiplier = parseInt(columnConfig[1]);
+                    
+                    sumValue += value * multiplier;
                   }
                 }
               }
@@ -842,13 +1161,14 @@
               tip += "，長度為" + column.content;
             }
           } else if(this.formatDetector('X', 'F', column)) {
+            let forMsg = [];
             if(column.content[0] !== '') {
-              column.content[1] = '';
-              tip = "最長允許" + column.content[0] + "字";
+              forMsg.push("最長允許" + column.content[0] + "字");
             }
             if(column.content[1] !== '') {
-              tip = "至少要有" + column.content[1] + "字";
+              forMsg.push("至少要有" + column.content[1] + "字");
             }
+            tip = _.join(forMsg, "，");
           } else if(this.formatDetector('P', 'F|A|P', column)) {
             let pConfig = column.content.split(";");
             tip = pConfig[0] + "碼郵遞區號";
@@ -1089,26 +1409,25 @@
                   column.status = zeroIndicator ? "這裡應該要輸入0開頭的數字" : "這裡應該輸入長度為" +  num + "的數字";
                 }
               } else if(this.formatDetector('X', 'F', column)) {
-                let lenCheck = false;
+                let statusMsg = [];
                 if(column.content[0] !== '') {
-                  column.content[1] = '';
                   let maxLen = parseInt(column.content[0]);
                   if(column.value.length > maxLen) {
-                    column.status = "你輸入的文字長度超過限制！（" + column.value.length + "/" + maxLen + "）";
-                    lenCheck = true;
+                    statusMsg.push("你輸入的文字長度超過限制！（" + column.value.length + "/" + maxLen + "）");
                   }
                 }
                 if(column.status === "") {
                   if(column.content[1] !== '') {
                     let minLen = parseInt(column.content[1]);
                     if(column.value.length < minLen) {
-                      column.status = "你輸入的文字太少了！（" + column.value.length + "/" + minLen + "）";
-                      lenCheck = true;
+                      statusMsg.push("你輸入的文字太少了！（" + column.value.length + "/" + minLen + "）");
                     }
                   }
                 }
-                if(!lenCheck) {
+                if(statusMsg.length === 0) {
                   column.status = "";
+                } else {
+                  column.status = _.join(statusMsg, "，")+"（手動輸入後去點其他的欄位，本訊息即會消失）";
                 }
               } else if(this.formatDetector('L', 'F|A|P', column)) {
                 if(_.inRange(column.value, column.content[1], column.content[2]+0.1)) {
@@ -1328,7 +1647,7 @@
             let signatures = [];
             for(let i=0; i<this.signatures.length; i++) {
               signatures.push({
-                blob: this.signatures[i].smObject.getPNG(),
+                blob: this.signatures[i].smObject.toDataURL('image/png'),
                 name: this.signatures[i].name
               });
             }
@@ -1434,11 +1753,17 @@
                   let canvas = document.querySelectorAll("canvas.signaturePad");
                   for(let i=0; i<oriobj.signatures.length; i++) {
                     oriobj.signatures[i].canvas = canvas[i];
-                    oriobj.signatures[i].smObject = new SmoothSignature(canvas[i], {
-                      onEnd: () => {
-                        oriobj.calculateSignatureRatio(i);
-                      },
+                    const signaturePad = new SignaturePad(canvas[i], {
+                      backgroundColor: 'rgba(255, 255, 255, 0)',
+                      penColor: 'rgb(0, 0, 0)',
+                      minWidth: 2,
+                      maxWidth: 6,
                     });
+                    const index = i;
+                    signaturePad.addEventListener("endStroke", () => {
+                      oriobj.calculateSignatureRatio(index);
+                    });
+                    oriobj.signatures[i].smObject = signaturePad;
                   }
                   ElMessage('簽名模組準備完成，請在灰框內簽名');
                 }, 1000);
@@ -1612,7 +1937,7 @@
                   });
                   if(currentAnsIndex > -1) {
                     currentAns = queueAnswers[currentAnsIndex];
-                    if(currentAns.queue.length > 0) { oriobj.tempFound = true; }
+                    // tempFound 會在 columnDB 初始化完成後檢查
                   } else {
                     queueAnswers.push(currentAns);
                   }
@@ -1657,7 +1982,15 @@
                       }
                     }
                     if(/F/.test(oriobj.columnDB[i].format)) {
-                      if(oriobj.columnDB[i].must) {
+                      // 檔案欄位：從 localStorage 載入已上傳的檔案資訊
+                      let fileColumnIndex = _.findIndex(currentAns.queue, (item) => {
+                        return item.id === oriobj.columnDB[i].id && item.isFile;
+                      });
+                      if(fileColumnIndex > -1) {
+                        oriobj.columnDB[i].value = currentAns.queue[fileColumnIndex].val;
+                        oriobj.columnDB[i].lastInput = currentAns.queue[fileColumnIndex].url;
+                        oriobj.columnDB[i].status = "";
+                      } else if(oriobj.columnDB[i].must) {
                         oriobj.columnDB[i].status = "請至少選擇一個檔案";
                         fileDetect = true;
                       }
@@ -1689,11 +2022,6 @@
                       let defaultConfig = ["", "", 2, 4];
                       let userConfig = oriobj.columnDB[i].content.split(';');
                       for(let k=0; k<userConfig.length; k++) {
-                        if(k === 0) {
-                          if(userConfig[k] !== '') {
-                            userConfig[1] = '';
-                          }
-                        }
                         if(userConfig[k] !== '') {
                           defaultConfig[k] = parseInt(userConfig[k]);
                         }
@@ -1709,6 +2037,20 @@
                 oriobj.loginStatus = false;
                 oriobj.googleStatus = undefined;
                 oriobj.columnDialog.show = true;
+                // 檢查是否有有意義的暫存資料（值不為空且與原始值不同）
+                if(currentAns.queue.length > 0) {
+                  let hasFilledData = currentAns.queue.some(item => {
+                    let val = item.val;
+                    // 空值檢查
+                    if (val === '' || val === null || val === undefined) return false;
+                    if (typeof val === 'number' && isNaN(val)) return false;
+                    // 找到對應的欄位，比較是否與原始值不同
+                    let column = oriobj.columnDB.find(col => col.id === item.id);
+                    if (column && val === column.savedContent) return false;
+                    return true;
+                  });
+                  oriobj.tempFound = hasFilledData;
+                }
                 oriobj.sheetLoaded = true;
                 nextTick(() => {
                   if(oriobj.viewOnly) {
@@ -1974,7 +2316,17 @@
                     oriobj.signatures[i].percentage = 0; // 重置進度條
                     oriobj.signatures[i].showWarning = false; // 隱藏警告
                     oriobj.signatures[i].progressStatus = 'exception'; // 隱藏警告
-                    oriobj.signatures[i].smObject = new SmoothSignature(oriobj.signatures[i].canvas);
+                    const signaturePad = new SignaturePad(oriobj.signatures[i].canvas, {
+                      backgroundColor: 'rgba(255, 255, 255, 0)',
+                      penColor: 'rgb(0, 0, 0)',
+                      minWidth: 2,
+                      maxWidth: 6,
+                    });
+                    const index = i;
+                    signaturePad.addEventListener("endStroke", () => {
+                      oriobj.calculateSignatureRatio(index);
+                    });
+                    oriobj.signatures[i].smObject = signaturePad;
                   }
                   ElMessage('簽名模組調整完成，請在灰框內簽名');
                 }, 1000);
@@ -1987,6 +2339,8 @@
     data() {
       return {
         tempFound: false,
+        exportDrawer: { show: false, password: '' },
+        importDrawer: { show: false, password: '', file: null },
         sheetLoaded: false,
         currentUID: "",
         uploadingSheet: false,

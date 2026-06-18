@@ -1,0 +1,364 @@
+# Sheet Machine 架構文件
+
+## 概述
+
+Sheet Machine 是一個基於 Google Apps Script 和 Vue.js 的動態表單系統，使用 Google Sheets 作為資料庫。
+
+## 系統架構
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        前端 (Vue.js + Element Plus)              │
+│  ┌─────────────┐   ┌─────────────┐   ┌─────────────────────┐   │
+│  │   sheets    │   │   authDB    │   │      columnDB       │   │
+│  │  (問卷列表) │   │  (驗證欄位) │   │    (表單欄位資料)    │   │
+│  └─────────────┘   └─────────────┘   └─────────────────────┘   │
+│         │                 │                    │                │
+│         │                 │                    ▼                │
+│         │                 │          ┌─────────────────┐        │
+│         │                 │          │  watch handler  │        │
+│         │                 │          │  (監聽變更)      │        │
+│         │                 │          └────────┬────────┘        │
+│         │                 │                   │                 │
+│         │                 │                   ▼                 │
+│         │                 │          ┌─────────────────┐        │
+│         │                 │          │  localStorage   │        │
+│         │                 │          │  (暫存答案)      │        │
+│         │                 │          └─────────────────┘        │
+│         │                 │                   │                 │
+│         │                 │       ┌───────────┼───────────┐     │
+│         │                 │       ▼                       ▼     │
+│         │                 │  ┌─────────┐           ┌─────────┐  │
+│         │                 │  │ 匯出     │           │ 匯入     │  │
+│         │                 │  │ .smtemp │           │ .smtemp │  │
+│         │                 │  └─────────┘           └─────────┘  │
+└─────────┼─────────────────┼─────────────────────────────────────┘
+          │                 │
+          │  google.script.run
+          ▼                 ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                   後端 (Google Apps Script)                      │
+│  ┌─────────────┐   ┌─────────────┐   ┌─────────────────────┐   │
+│  │  getQList   │   │ authRecord  │   │    readRecord       │   │
+│  │  取得問卷列表│   │  驗證身分   │   │    讀取表單資料      │   │
+│  └─────────────┘   └─────────────┘   └─────────────────────┘   │
+│                                                                 │
+│  ┌─────────────┐   ┌─────────────┐   ┌─────────────────────┐   │
+│  │ writeRecord │   │  saveFile   │   │   compareSheets     │   │
+│  │  寫入紀錄   │   │  上傳檔案   │   │    統計填寫率        │   │
+│  └─────────────┘   └─────────────┘   └─────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+          │                 │                    │
+          ▼                 ▼                    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      Google Sheets 資料庫                        │
+│  ┌─────────────┐   ┌─────────────┐   ┌─────────────────────┐   │
+│  │  listSheet  │   │  referSheet │   │    recordSheet      │   │
+│  │  問卷清單   │   │  欄位定義   │   │    填寫紀錄         │   │
+│  └─────────────┘   └─────────────┘   └─────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## 資料結構
+
+### 欄位類型 (column.type)
+
+| Type | 說明 | 用途 |
+|------|------|------|
+| P | Primary Key | 主鍵，用於身分識別（如學號、帳號） |
+| A | Auth | 驗證欄位（如密碼、驗證碼） |
+| F | Field | 表單輸入欄位 |
+| G | Group | 群組欄位 |
+| C | Calculated | 計算/顯示欄位（唯讀） |
+| O | Output | 輸出欄位 |
+
+### 欄位格式 (column.format)
+
+| Format | 說明 | 驗證規則 |
+|--------|------|----------|
+| T | Text | 純文字，可用 RegExp 驗證 |
+| N | Number | 數字，可指定位數 |
+| P | Padded | 補零數字 |
+| I | ID | 身分證字號 (台灣) |
+| E | Email | 電子郵件 |
+| M | Mobile | 手機號碼 (09xxxxxxxx) |
+| S | Select | 單選下拉選單 |
+| U | Multi-select | 多選（分號分隔） |
+| L | Slider | 數字滑桿 (min;max;step) |
+| F | File | 檔案上傳 |
+| G | Google | Google 帳號登入 |
+| X | Textarea | 多行文字框 |
+
+### columnDB 結構
+
+```javascript
+{
+  id: "欄位ID",           // 對應 Google Sheet 的欄位標題
+  name: "欄位顯示名稱",
+  type: "F",              // 欄位類型
+  format: "T",            // 欄位格式
+  group: "群組名稱",       // 可選，用於欄位分組驗證
+  content: "設定內容",     // 格式相關設定
+  must: true,             // 是否必填
+  nullable: false,        // 是否允許清空已有資料
+  value: "當前值",        // 使用者輸入的值
+  savedContent: "原始值", // 從伺服器讀取的原始值
+  lastInput: "上次輸入",  // 上次提交的值
+  status: "",             // 驗證錯誤訊息
+  tid: "uuid"             // 前端用的唯一識別碼
+}
+```
+
+### localStorage 暫存結構
+
+```javascript
+// Key: 主鍵值 (如學號)
+// Value:
+[
+  {
+    uid: "問卷唯一ID",
+    queue: [
+      { id: "欄位ID", val: "欄位值" },
+      // ...
+    ]
+  }
+]
+```
+
+### 匯出檔案格式 (.smtemp)
+
+AES-256-GCM 加密後的 Base64 字串，解密後：
+
+```javascript
+{
+  version: "1.0",
+  exportTime: "ISO 時間戳",
+  formId: "問卷ID",
+  data: {
+    queue: [
+      { id: "欄位ID", val: "欄位值" },
+      // ...
+    ]
+  }
+}
+```
+
+## 資料流程
+
+### 1. 載入問卷列表
+
+```
+前端 mounted()
+  → google.script.run.getQList()
+  → 後端讀取 listSheet
+  → 過濾有效問卷（未過期、已啟用）
+  → 回傳 sheets 陣列
+```
+
+### 2. 身分驗證
+
+```
+使用者輸入驗證資訊
+  → authDB 更新
+  → google.script.run.readRecord()
+  → 後端 authRecord() 驗證
+  → 讀取 referSheet 取得欄位定義
+  → 讀取使用者已填資料 (savedContent, lastInput)
+  → 回傳 headers 陣列
+  → 前端填充 columnDB
+```
+
+### 3. 暫存機制
+
+```
+使用者修改欄位
+  → columnDB 變更
+  → watch handler 觸發
+  → 建立 tempQueue (過濾檔案欄位)
+  → 存入 localStorage
+  → 更新 tempFound 狀態
+```
+
+### 4. 匯出暫存
+
+```
+點擊「匯出暫存答案」
+  → 讀取 localStorage 的 tempQueue
+  → 組合加密金鑰 (主鍵值 + 使用者密碼)
+  → deriveKey() 產生 AES 金鑰
+  → encrypt() 加密資料
+  → 下載 .smtemp 檔案
+```
+
+### 5. 匯入暫存
+
+```
+點擊「匯入暫存答案」
+  → 選擇 .smtemp 檔案
+  → 輸入密碼
+  → decrypt() 解密 (使用當前主鍵值 + 密碼)
+  → 驗證檔案格式
+  → 過濾有效欄位
+  → 儲存到 localStorage
+  → 直接更新 columnDB (Vue 響應式)
+  → 畫面立即更新
+```
+
+### 6. 提交表單
+
+```
+點擊「送出」
+  → 前端預檢 (checkData)
+  → 群組驗證
+  → 簽名驗證 (如需要)
+  → google.script.run.writeRecord()
+  → 後端格式驗證
+  → 寫入 recordSheet
+  → 發送確認郵件 (如設定)
+  → 回傳結果
+```
+
+## 簽名機制
+
+### 技術棧
+
+- **前端套件**: [signature_pad](https://github.com/szimek/signature_pad) v5.1.3
+- **繪圖技術**: HTML5 Canvas + Pointer Events API
+- **輸出格式**: PNG (Base64 DataURL)
+
+### 簽名資料結構
+
+```javascript
+signatures: [
+  {
+    id: "uuid",              // 唯一識別碼
+    name: "簽名項目名稱",     // 如「本人簽名」、「家長簽名」
+    canvas: HTMLCanvasElement,
+    smObject: SignaturePad,  // signature_pad 實例
+    percentage: 0,           // 簽名佔比 (%)
+    showWarning: false,      // 是否顯示警告
+    progressStatus: ''       // 進度條狀態 ('success' | 'exception')
+  }
+]
+```
+
+### 簽名流程
+
+```
+1. 初始化簽名板
+   前端 checkData() 通過
+     → 進入簽名步驟
+     → 取得 canvas 元素 (document.querySelectorAll("canvas.signaturePad"))
+     → 為每個簽名項目建立 SignaturePad 實例
+     → 綁定 endStroke 事件監聽器
+
+2. 使用者簽名
+   觸控/滑鼠繪製
+     → SignaturePad 內部處理 Pointer Events
+     → 繪製完成觸發 endStroke 事件
+     → 呼叫 calculateSignatureRatio() 計算佔比
+
+3. 簽名佔比計算
+   calculateSignatureRatio(index)
+     → 讀取 canvas.getContext('2d').getImageData()
+     → 遍歷所有像素的 alpha 通道
+     → 計算非空白像素佔比
+     → 更新 percentage 和 progressStatus
+     → 佔比 < 0.5% 或 > 90% 視為無效
+
+4. 簽名驗證
+   endSignature()
+     → 檢查所有簽名的 isEmpty()
+     → 空白簽名加入 emptySignatures 陣列
+     → 全部非空才能進入確認步驟
+
+5. 提交簽名
+   submitData()
+     → 遍歷 signatures 陣列
+     → 呼叫 smObject.toDataURL('image/png') 取得 Base64
+     → 組成 { blob: "data:image/png;base64,...", name: "簽名名稱" }
+     → 傳送至後端 writeRecord()
+
+6. 後端處理 (Code.js writeRecord)
+     → 解析 Base64: signature.blob.split(",")[1]
+     → Utilities.base64Decode() 解碼
+     → Utilities.newBlob() 建立 Blob
+     → DriveApp.getFolderById() 上傳至指定資料夾
+     → 檔案 ID 寫入 Google Sheets (格式: "ID1;ID2;...")
+```
+
+### SignaturePad 設定
+
+```javascript
+new SignaturePad(canvas, {
+  backgroundColor: 'rgba(255, 255, 255, 0)',  // 透明背景
+  penColor: 'rgb(0, 0, 0)',                   // 黑色筆跡
+  minWidth: 2,                                 // 最小筆寬
+  maxWidth: 6,                                 // 最大筆寬
+});
+```
+
+### 主要 API
+
+| 方法 | 說明 |
+|------|------|
+| `smObject.toDataURL('image/png')` | 取得 PNG 格式 Base64 |
+| `smObject.clear()` | 清除簽名 |
+| `smObject.isEmpty()` | 檢查是否為空 |
+| `smObject.addEventListener('endStroke', fn)` | 監聽繪製結束事件 |
+
+### 裝置旋轉處理
+
+```
+監聽 deviceorientation 事件
+  → 偵測 screen.width 變化
+  → 清除現有簽名 (避免破圖)
+  → 重新計算 canvas 尺寸
+  → 重建 SignaturePad 實例
+```
+
+### 相關程式碼位置
+
+| 檔案 | 行號 | 說明 |
+|------|------|------|
+| src/App.vue | 638 | import SignaturePad |
+| src/App.vue | 1650 | toDataURL() 取得簽名 |
+| src/App.vue | 1756-1766 | 初始化 SignaturePad |
+| src/App.vue | 1777-1804 | calculateSignatureRatio() |
+| src/App.vue | 2104-2109 | clearSignature() |
+| src/App.vue | 2118-2135 | endSignature() 驗證 |
+| src/App.vue | 2295-2337 | deviceorientation 處理 |
+| src/Code.js | 646-661 | 後端簽名上傳處理 |
+
+## 檔案結構
+
+```
+sheet-machine/
+├── src/
+│   ├── App.vue          # 主要前端元件 (所有邏輯)
+│   ├── Code.js          # Google Apps Script 後端
+│   ├── index.js         # Vue 進入點
+│   └── style.css        # 樣式
+├── appscript/           # clasp 部署目錄
+│   ├── Code.js          # 複製自 src/
+│   ├── index.html       # 建置後複製自 dist/
+│   └── appsscript.json  # GAS 設定
+├── dist/                # Vite 建置輸出
+├── vite.config.js       # Vite 設定 (singlefile)
+├── package.json         # npm 設定
+└── .clasp.json          # clasp 設定
+```
+
+## 部署流程
+
+```bash
+npm run build          # Vite 建置
+npm run gpush          # 複製檔案 + clasp push
+```
+
+## 安全考量
+
+1. **身分驗證**: 使用 P 類型欄位 + A 類型欄位進行多重驗證
+2. **Google 帳號**: 支援 G 格式直接使用 Google 帳號驗證
+3. **匯出加密**: AES-256-GCM 加密，金鑰 = 主鍵值 + 使用者密碼
+4. **跨裝置匯入**: 需相同主鍵值 + 正確密碼才能解密
