@@ -2,16 +2,35 @@ const _ = LodashGS.load();
 const appProperties = PropertiesService.getScriptProperties();
 
 function doGet(e) {
-  var template = HtmlService.createTemplateFromFile('index')
-  var html = template.evaluate()
-    .setTitle(appProperties.getProperty('systemTitle'));
-  
-  var htmlOutput = HtmlService.createHtmlOutput(html);
-  htmlOutput.addMetaTag('viewport', 'width=device-width, initial-scale=1');
-  return htmlOutput;
+  try {
+    let template = HtmlService.createTemplateFromFile('index')
+    let html = template.evaluate()
+      .setTitle(appProperties.getProperty('systemTitle'));
+
+    let htmlOutput = HtmlService.createHtmlOutput(html);
+    htmlOutput.addMetaTag('viewport', 'width=device-width, initial-scale=1');
+    return htmlOutput;
+  } catch (err) {
+    console.error('doGet failed: ' + err.stack);
+    throw err;
+  }
+}
+
+// 主要 RPC 進入點統一包一層錯誤記錄（記錄到 Stackdriver 後重拋，前端 withFailureHandler 行為不變）
+function logged_(name, fn) {
+  try {
+    return fn();
+  } catch (err) {
+    console.error(name + ' failed: ' + (err.stack || err));
+    throw err;
+  }
 }
 
 function getQList() {
+  return logged_('getQList', () => getQList_());
+}
+
+function getQList_() {
   let listSS = SpreadsheetApp.openById(appProperties.getProperty('listSheetID'));
   let listSheet = listSS.getSheets()[0];
   let listRange = listSheet.getRange("A:P");
@@ -52,8 +71,134 @@ function getQList() {
     outofDate[i].signatures = [];
     outofDate[i].enableModify = false;
   }
-  return _.filter(lists, (item) => {
+  let visible = _.filter(lists, (item) => {
     return item.viewDate > (new Date()).getTime();
+  });
+  // 線上暫存功能開關：有設定 draftSheetID 才啟用
+  let draftEnabled = draftEnabled_();
+  for(let i=0; i<visible.length; i++) {
+    visible[i].draftEnabled = draftEnabled;
+  }
+  return visible;
+}
+
+// ===== 線上暫存 =====
+// 暫存試算表：ScriptProperties 的 draftSheetID 指定，一份問卷一個分頁（分頁名 = referSSID）
+// 分頁結構：A 欄主鍵、B 欄更新時間(ms)、C 欄之後為 JSON 切塊（單一儲存格上限 50000 字元）
+const DRAFT_CHUNK_SIZE = 45000;
+
+function draftEnabled_() {
+  let draftID = appProperties.getProperty('draftSheetID');
+  return draftID !== null && draftID.toString().trim() !== "";
+}
+
+function draftKey_(referSSID, auth) {
+  let headers = getHeaders(referSSID);
+  let pKey = _.filter(headers, (header) => {
+    return /P/.test(header.type);
+  });
+  if(pKey.length === 0) { return null; }
+  if(/G/.test(pKey[0].format)) {
+    let account = Session.getActiveUser().getEmail();
+    return account === "" ? null : account;
+  }
+  let uKey = _.filter(auth, (aObj) => {
+    return aObj.id === pKey[0].id;
+  });
+  if(uKey.length > 0) {
+    let value = uKey[0].value.toString().trim();
+    return value === "" ? null : value;
+  }
+  return null;
+}
+
+function draftSheet_(referSSID) {
+  let draftSS = SpreadsheetApp.openById(appProperties.getProperty('draftSheetID'));
+  let sheet = draftSS.getSheetByName(referSSID);
+  if(sheet === null) {
+    sheet = draftSS.insertSheet(referSSID);
+  }
+  return sheet;
+}
+
+function draftRowIndex_(sheet, key) {
+  let lastRow = sheet.getLastRow();
+  if(lastRow === 0) { return -1; }
+  let keys = sheet.getRange(1, 1, lastRow, 1).getValues();
+  for(let i=0; i<keys.length; i++) {
+    if(keys[i][0].toString() === key) { return i + 1; }
+  }
+  return -1;
+}
+
+function saveDraft(referSSID, auth, payload) {
+  return logged_('saveDraft', () => {
+    if(!draftEnabled_()) { return { success: false, message: "線上暫存未啟用" }; }
+    if(!authRecord(referSSID, auth)) { return { success: false, message: "身分驗證失敗，無法線上暫存" }; }
+    let key = draftKey_(referSSID, auth);
+    if(key === null) { return { success: false, message: "找不到主鍵值，無法線上暫存" }; }
+    let payloadStr = payload.toString();
+    let chunks = [];
+    for(let i=0; i<payloadStr.length; i+=DRAFT_CHUNK_SIZE) {
+      chunks.push(payloadStr.substring(i, i + DRAFT_CHUNK_SIZE));
+    }
+    let updatedAt = (new Date()).getTime();
+    let lock = LockService.getScriptLock();
+    lock.waitLock(10000);
+    try {
+      let sheet = draftSheet_(referSSID);
+      let rowIndex = draftRowIndex_(sheet, key);
+      if(rowIndex === -1) { rowIndex = sheet.getLastRow() + 1; }
+      // 先清整列，避免新資料切塊數比舊資料少時殘留舊塊
+      if(sheet.getLastColumn() > 0) {
+        sheet.getRange(rowIndex, 1, 1, sheet.getLastColumn()).clearContent();
+      }
+      sheet.getRange(rowIndex, 1, 1, 2 + chunks.length).setValues([[key, updatedAt].concat(chunks)]);
+      return { success: true, updatedAt: updatedAt };
+    } finally {
+      lock.releaseLock();
+    }
+  });
+}
+
+function loadDraft(referSSID, auth) {
+  return logged_('loadDraft', () => {
+    if(!draftEnabled_()) { return null; }
+    // 驗證是安全邊界：web app 為匿名存取，沒通過驗證就不能撈任何人的暫存
+    if(!authRecord(referSSID, auth)) { return null; }
+    let key = draftKey_(referSSID, auth);
+    if(key === null) { return null; }
+    let sheet = draftSheet_(referSSID);
+    let rowIndex = draftRowIndex_(sheet, key);
+    if(rowIndex === -1) { return null; }
+    let row = sheet.getRange(rowIndex, 1, 1, sheet.getLastColumn()).getValues()[0];
+    let payloadStr = "";
+    for(let i=2; i<row.length; i++) {
+      payloadStr += row[i].toString();
+    }
+    if(payloadStr === "") { return null; }
+    return { updatedAt: parseInt(row[1].toString()), payload: payloadStr };
+  });
+}
+
+function deleteDraft(referSSID, auth) {
+  return logged_('deleteDraft', () => {
+    if(!draftEnabled_()) { return false; }
+    if(!authRecord(referSSID, auth)) { return false; }
+    let key = draftKey_(referSSID, auth);
+    if(key === null) { return false; }
+    let lock = LockService.getScriptLock();
+    lock.waitLock(10000);
+    try {
+      let sheet = draftSheet_(referSSID);
+      let rowIndex = draftRowIndex_(sheet, key);
+      if(rowIndex !== -1) {
+        sheet.deleteRow(rowIndex);
+      }
+      return true;
+    } finally {
+      lock.releaseLock();
+    }
   });
 }
 
@@ -62,6 +207,10 @@ function getGoogleID() {
 }
 
 function readRecord(referSSID, recordSSID, auth) {
+  return logged_('readRecord', () => readRecord_(referSSID, recordSSID, auth));
+}
+
+function readRecord_(referSSID, recordSSID, auth) {
   if(authRecord(referSSID, auth)) {
     let listSS = SpreadsheetApp.openById(appProperties.getProperty('listSheetID'));
     let listSheet = listSS.getSheets()[0];
@@ -116,7 +265,7 @@ function readRecord(referSSID, recordSSID, auth) {
                       let storageID = column.content === "" ? appProperties.getProperty('universalStorageID') : column.content;
                       let files = DriveApp.searchFiles('parents in "'+ storageID +'" and title contains "' + imgContent + '"');
                       while(files.hasNext()) {
-                        var file = files.next();
+                        let file = files.next();
                         column.savedContent = file.getUrl();
                       }
                     } else {
@@ -139,7 +288,7 @@ function readRecord(referSSID, recordSSID, auth) {
                         }
                         let files = DriveApp.searchFiles('parents in "'+ storageID +'" and title contains "' + fileContent + '"');
                         while (files.hasNext()) {
-                          var file = files.next();
+                          let file = files.next();
                           column.savedContent = file.getUrl();
                         }
                       } else {
@@ -218,7 +367,7 @@ function getUserRow(referSSID, auth) {
 }
 
 function queryPC(address) {
-  let postCodeAPI = UrlFetchApp.fetch(appProperties.getProperty('postCodeAPI') + address);
+  let postCodeAPI = UrlFetchApp.fetch(appProperties.getProperty('postCodeAPI') + encodeURIComponent(address.toString()));
   return postCodeAPI.getContentText();
 }
 
@@ -356,6 +505,10 @@ function authRecord(referSSID, auth) {
 }
 
 function writeRecord(referSSID, recordSSID, auth, record, accept, signatures, email) {
+  return logged_('writeRecord', () => writeRecord_(referSSID, recordSSID, auth, record, accept, signatures, email));
+}
+
+function writeRecord_(referSSID, recordSSID, auth, record, accept, signatures, email) {
   let listSS = SpreadsheetApp.openById(appProperties.getProperty('listSheetID'));
   let listSheet = listSS.getSheets()[0];
   let listRange = listSheet.getRange("A:O");
@@ -647,8 +800,8 @@ function writeRecord(referSSID, recordSSID, auth, record, accept, signatures, em
                   return sign.name === savedSignatures[i];
                 });
                 if(signature.length > 0) {
-                  var type = (signature[0].blob.split(";")[0]).replace('data:','');
-                  var imageUpload = Utilities.base64Decode(signature[0].blob.split(",")[1]);
+                  let type = (signature[0].blob.split(";")[0]).replace('data:','');
+                  let imageUpload = Utilities.base64Decode(signature[0].blob.split(",")[1]);
                   let blob = Utilities.newBlob(imageUpload,type,savedSignatures[i]);
                   let writtenFile = folder.createFile(blob);
                   csvOutput += "你的簽名("+(i+1)+"/"+savedSignatures.length+")： "+ writtenFile.getUrl() + "\n";
@@ -714,6 +867,10 @@ function writeRecord(referSSID, recordSSID, auth, record, accept, signatures, em
 }
 
 function saveFile(referSSID, recordSSID, auth, columnID, fileObj) {
+  return logged_('saveFile', () => saveFile_(referSSID, recordSSID, auth, columnID, fileObj));
+}
+
+function saveFile_(referSSID, recordSSID, auth, columnID, fileObj) {
   let listSS = SpreadsheetApp.openById(appProperties.getProperty('listSheetID'));
   let listSheet = listSS.getSheets()[0];
   let listRange = listSheet.getRange("A:O");

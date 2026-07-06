@@ -38,7 +38,7 @@
           </template>
         </el-alert>
         <el-row :gutter="10" v-if="enableModify" style="margin-top: 10px;">
-          <el-col :span="12">
+          <el-col :span="draftEnabled ? 8 : 12">
             <el-button
               style="width: 100%"
               size="large"
@@ -48,13 +48,24 @@
               匯出暫存答案
             </el-button>
           </el-col>
-          <el-col :span="12">
+          <el-col :span="draftEnabled ? 8 : 12">
             <el-button
               style="width: 100%"
               size="large"
               type="warning"
               @click="triggerImportTemp()">
               匯入暫存答案
+            </el-button>
+          </el-col>
+          <el-col v-if="draftEnabled" :span="8">
+            <el-button
+              style="width: 100%"
+              size="large"
+              type="primary"
+              :disabled="!tempFound"
+              :loading="draftSaving"
+              @click="saveDraftOnline()">
+              線上暫存
             </el-button>
           </el-col>
         </el-row>
@@ -630,12 +641,21 @@
 
 <script>
   import { nextTick } from 'vue';
-  import { ElMessage } from 'element-plus';
+  import { ElMessage, ElMessageBox } from 'element-plus';
   import dayjs from 'dayjs';
   import { v4 as uuidv4 } from 'uuid';
   import _ from'lodash';
   import randomColor from 'randomcolor';
   import SignaturePad from "signature_pad";
+  import { marked } from 'marked';
+  import DOMPurify from 'dompurify';
+  // 比照原本 showdown 的 openLinksInNewWindow：消毒後把連結一律開新分頁
+  DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+    if (node.tagName === 'A' && node.getAttribute('href')) {
+      node.setAttribute('target', '_blank');
+      node.setAttribute('rel', 'noopener noreferrer');
+    }
+  });
   export default {
     watch: {
       columnDB: {
@@ -722,7 +742,16 @@
         }
       },
       // 加密/解密工具方法
-      deriveKey: async function(password) {
+      uint8ToBase64: function(bytes) {
+        // 分段轉換，避免 String.fromCharCode.apply 在大資料時超出呼叫堆疊上限
+        let binary = '';
+        const chunkSize = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunkSize) {
+          binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+        }
+        return btoa(binary);
+      },
+      deriveKey: async function(password, salt) {
         const encoder = new TextEncoder();
         const keyMaterial = await window.crypto.subtle.importKey(
           'raw',
@@ -734,7 +763,7 @@
         return window.crypto.subtle.deriveKey(
           {
             name: 'PBKDF2',
-            salt: encoder.encode('sheet-machine-salt'),
+            salt: salt,
             iterations: 100000,
             hash: 'SHA-256'
           },
@@ -746,27 +775,39 @@
       },
       encrypt: async function(data, password) {
         const encoder = new TextEncoder();
-        const key = await this.deriveKey(password);
+        // smv2 格式：隨機 salt 隨密文儲存，佈局為 salt(16) + iv(12) + 密文
+        const salt = window.crypto.getRandomValues(new Uint8Array(16));
+        const key = await this.deriveKey(password, salt);
         const iv = window.crypto.getRandomValues(new Uint8Array(12));
         const encrypted = await window.crypto.subtle.encrypt(
           { name: 'AES-GCM', iv: iv },
           key,
           encoder.encode(JSON.stringify(data))
         );
-        // 合併 iv 和加密資料
-        const combined = new Uint8Array(iv.length + encrypted.byteLength);
-        combined.set(iv);
-        combined.set(new Uint8Array(encrypted), iv.length);
-        // 轉為 Base64
-        return btoa(String.fromCharCode.apply(null, combined));
+        const combined = new Uint8Array(salt.length + iv.length + encrypted.byteLength);
+        combined.set(salt);
+        combined.set(iv, salt.length);
+        combined.set(new Uint8Array(encrypted), salt.length + iv.length);
+        // base64 字元集不含冒號，舊格式檔案不可能以此前綴開頭
+        return 'smv2:' + this.uint8ToBase64(combined);
       },
       decrypt: async function(encryptedData, password) {
         const decoder = new TextDecoder();
-        const key = await this.deriveKey(password);
-        // 從 Base64 解碼
-        const combined = Uint8Array.from(atob(encryptedData), c => c.charCodeAt(0));
-        const iv = combined.slice(0, 12);
-        const data = combined.slice(12);
+        const encoder = new TextEncoder();
+        let key, iv, data;
+        if (encryptedData.startsWith('smv2:')) {
+          const combined = Uint8Array.from(atob(encryptedData.slice(5)), c => c.charCodeAt(0));
+          const salt = combined.slice(0, 16);
+          iv = combined.slice(16, 28);
+          data = combined.slice(28);
+          key = await this.deriveKey(password, salt);
+        } else {
+          // 舊格式（固定 salt）：維持可解密，僅供匯入舊檔
+          const combined = Uint8Array.from(atob(encryptedData), c => c.charCodeAt(0));
+          iv = combined.slice(0, 12);
+          data = combined.slice(12);
+          key = await this.deriveKey(password, encoder.encode('sheet-machine-salt'));
+        }
         const decrypted = await window.crypto.subtle.decrypt(
           { name: 'AES-GCM', iv: iv },
           key,
@@ -922,6 +963,121 @@
           ElMessage.error('檔案讀取失敗');
         };
         reader.readAsText(this.importDrawer.file);
+      },
+      // 線上暫存：把目前的填寫進度（localStorage 的 queue）上傳到雲端暫存試算表
+      saveDraftOnline: function() {
+        let oriobj = this;
+        if (this.draftSaving) { return; }
+        let currentSheet = _.filter(this.sheets, (sheet) => {
+          return sheet.id === oriobj.currentSID;
+        });
+        if (currentSheet.length === 0) { return; }
+        let primaryKeys = _.filter(this.authDB, (item) => {
+          return /P/.test(item.type);
+        });
+        if (primaryKeys.length === 0) {
+          ElMessage.error('找不到主鍵欄位，無法線上暫存');
+          return;
+        }
+        let queueAnswers = localStorage.getItem(primaryKeys[0].value);
+        let parsedQueue = queueAnswers ? JSON.parse(queueAnswers) : [];
+        let currentAns = _.find(parsedQueue, (item) => {
+          return item.uid === this.currentUID;
+        });
+        if (!currentAns || !currentAns.queue || currentAns.queue.length === 0) {
+          ElMessage.error('目前沒有可以暫存的填寫內容');
+          return;
+        }
+        // 與匯出檔相同的封裝格式，載入時走同一套驗證
+        let payload = {
+          version: '1.0',
+          savedTime: new Date().toISOString(),
+          formId: this.currentSID,
+          data: { queue: currentAns.queue }
+        };
+        this.draftSaving = true;
+        google.script.run
+          .withSuccessHandler((result) => {
+            oriobj.draftSaving = false;
+            if (result && result.success) {
+              ElMessage.success('已線上暫存！換裝置用同一組身分登入即可還原（簽名需重簽）');
+            } else {
+              ElMessage.error(result && result.message ? result.message : '線上暫存失敗');
+            }
+          })
+          .withFailureHandler((data) => {
+            oriobj.draftSaving = false;
+            ElMessage.error('線上暫存失敗，請稍後再試');
+          }).saveDraft(currentSheet[0].refer, JSON.parse(JSON.stringify(this.authDB)), JSON.stringify(payload));
+      },
+      // 登入成功後檢查雲端是否有暫存，有的話詢問是否還原
+      checkOnlineDraft: function(currentSheet) {
+        let oriobj = this;
+        google.script.run
+          .withSuccessHandler((draft) => {
+            if (!draft || !draft.payload) { return; }
+            let importData;
+            try {
+              importData = JSON.parse(draft.payload);
+            } catch (e) { return; }
+            if (!importData.data || !importData.data.queue || importData.data.queue.length === 0) { return; }
+            ElMessageBox.confirm(
+              '雲端有你在 ' + dayjs(draft.updatedAt).format('YYYY/MM/DD HH:mm') + ' 的線上暫存，要載入嗎？載入會覆蓋目前畫面上已填的內容（簽名一律需要重簽）',
+              '發現線上暫存',
+              { confirmButtonText: '載入雲端暫存', cancelButtonText: '不用，維持現狀', type: 'info' }
+            ).then(() => {
+              oriobj.applyOnlineDraft(importData);
+            }).catch(() => {});
+          })
+          .withFailureHandler((data) => {
+            // 載入暫存失敗不影響正常填寫流程
+            console.error('loadDraft failed', data);
+          }).loadDraft(currentSheet.refer, JSON.parse(JSON.stringify(this.authDB)));
+      },
+      applyOnlineDraft: function(importData) {
+        let oriobj = this;
+        let primaryKeys = _.filter(this.authDB, (item) => {
+          return /P/.test(item.type);
+        });
+        if (primaryKeys.length === 0) { return; }
+        // 與 importTemp 相同的還原邏輯：過濾只還原存在的欄位（包含檔案欄位的 Drive 連結）
+        let validFieldIds = this.columnDB
+          .filter(col => /F/.test(col.type))
+          .map(col => col.id);
+        let importedQueue = importData.data.queue.filter(item => {
+          return validFieldIds.includes(item.id);
+        });
+        if (importedQueue.length === 0) {
+          ElMessage.error('雲端暫存沒有任何欄位可以還原（欄位結構可能已變更）');
+          return;
+        }
+        let queueAnswers = localStorage.getItem(primaryKeys[0].value);
+        queueAnswers = queueAnswers ? JSON.parse(queueAnswers) : [];
+        let currentAnsIndex = _.findIndex(queueAnswers, (item) => {
+          return item.uid === oriobj.currentUID;
+        });
+        let newAns = {
+          uid: oriobj.currentUID,
+          queue: importedQueue
+        };
+        if (currentAnsIndex > -1) {
+          queueAnswers[currentAnsIndex] = newAns;
+        } else {
+          queueAnswers.push(newAns);
+        }
+        localStorage.setItem(primaryKeys[0].value, JSON.stringify(queueAnswers));
+        for (let i = 0; i < importedQueue.length; i++) {
+          let columnIndex = oriobj.columnDB.findIndex(col => col.id === importedQueue[i].id);
+          if (columnIndex > -1) {
+            oriobj.columnDB[columnIndex].value = importedQueue[i].val;
+            if (importedQueue[i].isFile && importedQueue[i].url) {
+              oriobj.columnDB[columnIndex].lastInput = importedQueue[i].url;
+              oriobj.columnDB[columnIndex].status = "";
+            }
+          }
+        }
+        oriobj.tempFound = true;
+        ElMessage.success('已還原 ' + importedQueue.length + ' 個欄位的雲端暫存');
       },
       statusDetector: function(column) {
         let status = "info";
@@ -1112,13 +1268,7 @@
       },
       HTMLConverter: function (msg) {
         msg = msg === null || msg == undefined ? '**test**' : msg;
-        let converter = new showdown.Converter({
-          openLinksInNewWindow: true,
-          simplifiedAutoLink: true
-        });
-        return converter.makeHtml(msg);
-        //return marked(msg);
-        //return msg;
+        return DOMPurify.sanitize(marked.parse(msg, { async: false, gfm: true }), { ADD_ATTR: ['target'] });
       },
       sumUp: function(column) {
         if(/C/.test(column.type)) {
@@ -1677,6 +1827,14 @@
                       localStorage.setItem(primaryKeys[0].value, JSON.stringify(queueAnswers));
                     }
                   }
+                  // 正式送出成功後清掉雲端暫存（失敗不阻斷流程）；要在 authDB 清空前呼叫
+                  if(oriobj.draftEnabled) {
+                    google.script.run
+                      .withSuccessHandler(() => {})
+                      .withFailureHandler((err) => {
+                        console.error('deleteDraft failed', err);
+                      }).deleteDraft(currentSheet[0].refer, JSON.parse(JSON.stringify(oriobj.authDB)));
+                  }
                   oriobj.columnDB = [];
                   oriobj.authDB = [];
                   oriobj.enableModify = false;
@@ -2052,6 +2210,11 @@
                   oriobj.tempFound = hasFilledData;
                 }
                 oriobj.sheetLoaded = true;
+                // 線上暫存：問卷有啟用且非檢視模式時，查雲端有沒有暫存可還原
+                oriobj.draftEnabled = sheet[0].draftEnabled === true;
+                if(oriobj.draftEnabled && !oriobj.viewOnly) {
+                  oriobj.checkOnlineDraft(sheet[0]);
+                }
                 nextTick(() => {
                   if(oriobj.viewOnly) {
                     oriobj.changeStep("檢視資料", "process", "success", "wait");
@@ -2339,6 +2502,8 @@
     data() {
       return {
         tempFound: false,
+        draftEnabled: false,
+        draftSaving: false,
         exportDrawer: { show: false, password: '' },
         importDrawer: { show: false, password: '', file: null },
         sheetLoaded: false,
