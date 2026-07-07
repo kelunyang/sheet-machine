@@ -4,7 +4,15 @@
 >
 > **執行狀態（2026-07-07 確認開工）**：Phase 1 → Phase 2 依序執行；Phase 3 待暑假時段。
 >
-> **✅ Phase 1、Phase 2 已於 2026-07-07 完成並部署為 @150**。實作與計畫的差異：
+> **✅ Phase 1、Phase 2 已於 2026-07-07 完成並部署為 @150**。
+>
+> **✅ Phase 3 已於 2026-07-07 完成（未部署）**：ESLint+Prettier（flat config，含 `vue/no-undef-properties`
+> 模板綁定檢查）、Vitest 48 個測試、App.vue 拆分為 `<script setup>` + composables + FormField 元件、
+> 孤兒檔移入 `tools/`。與計畫的差異：測試 chunk 切割時順手把 Code.js 的切塊邏輯抽成 `chunkPayload_`；
+> 另統一了重複邏輯（`findPrimaryKey`/`findGmailPrimary`/`buildQueuePayload`/`plainClone`）。
+> 待辦：實機驗證完整填答流程後再部署。
+>
+> Phase 1、2 實作與計畫的差異：
 > 1. showdown 有無修復版的 ReDoS 漏洞（GHSA-rmmh-p597-ppvv），改用 `marked`（App.vue 原本就有註解掉的 marked 呼叫），連結開新分頁改由 DOMPurify hook 處理
 > 2. 檔案上傳欄位**有**納入線上暫存——檔案在選取時就已上傳 Drive，暫存的只是連結參照（與匯入暫存檔的行為一致）
 > 3. 待管理者設定：ScriptProperties 新增 `draftSheetID`（暫存專用試算表的 ID，部署帳號需有編輯權），未設定前功能自動隱藏

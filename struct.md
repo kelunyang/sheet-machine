@@ -319,39 +319,56 @@ new SignaturePad(canvas, {
 
 ### 相關程式碼位置
 
-| 檔案 | 行號 | 說明 |
-|------|------|------|
-| src/App.vue | 638 | import SignaturePad |
-| src/App.vue | 1650 | toDataURL() 取得簽名 |
-| src/App.vue | 1756-1766 | 初始化 SignaturePad |
-| src/App.vue | 1777-1804 | calculateSignatureRatio() |
-| src/App.vue | 2104-2109 | clearSignature() |
-| src/App.vue | 2118-2135 | endSignature() 驗證 |
-| src/App.vue | 2295-2337 | deviceorientation 處理 |
-| src/Code.js | 646-661 | 後端簽名上傳處理 |
+| 檔案 | 說明 |
+|------|------|
+| src/composables/useSignatures.js | SignaturePad 初始化、calculateSignatureRatio()、clearSignature()、deviceorientation 旋轉重建（簽名板全部邏輯） |
+| src/App.vue | authMod() 進入簽名流程、endSignature() 驗證、sendMod() 以 collectSignatures() 取得 PNG dataURL |
+| src/Code.js | 後端簽名上傳處理（writeRecord 內） |
 
 ## 檔案結構
+
+> 2026-07 Phase 3 拆分：App.vue 由 2600+ 行 Options API 轉為 `<script setup>` + composables。
+> vite-plugin-singlefile 仍打包成單一 index.html，執行架構（SPA、GAS 往返次數）不變。
 
 ```
 sheet-machine/
 ├── src/
-│   ├── App.vue          # 主要前端元件 (所有邏輯)
-│   ├── Code.js          # Google Apps Script 後端
-│   ├── index.js         # Vue 進入點
-│   └── style.css        # 樣式
-├── appscript/           # clasp 部署目錄
-│   ├── Code.js          # 複製自 src/
-│   ├── index.html       # 建置後複製自 dist/
-│   └── appsscript.json  # GAS 設定
-├── dist/                # Vite 建置輸出
-├── vite.config.js       # Vite 設定 (singlefile)
-├── package.json         # npm 設定
-└── .clasp.json          # clasp 設定
+│   ├── App.vue                    # 主元件（script setup）：狀態編排、對話框流程、GAS 呼叫
+│   ├── components/
+│   │   └── FormField.vue          # 單一問卷欄位（各 format 的輸入元件 + 驗證顯示）
+│   ├── composables/
+│   │   ├── useCrypto.js           # 匯出檔 AES-256-GCM 加解密（smv2 + 舊格式相容）
+│   │   ├── useGasRpc.js           # google.script.run 的 Promise 包裝（gasRun/plainClone）
+│   │   ├── useDraft.js            # 線上暫存：saveDraft/loadDraft/deleteDraft 前端邏輯
+│   │   ├── useSteps.js            # 頂部步驟條狀態機
+│   │   └── useSignatures.js       # 簽名板：SignaturePad 管理、比例檢查、旋轉重建
+│   ├── utils/
+│   │   ├── columnRules.js         # 欄位規則純函數：formatDetector、驗證、提示文字
+│   │   ├── tempQueue.js           # 暫存 queue 純邏輯：組裝、有效性判斷、還原
+│   │   ├── tempStorage.js         # localStorage 暫存存取層
+│   │   └── markdown.js            # marked + DOMPurify（HTMLConverter）
+│   ├── Code.js                    # Google Apps Script 後端
+│   ├── index.js                   # Vue 進入點
+│   └── style.css                  # 樣式
+├── tests/                         # Vitest 單元測試（純函數 + Code.js chunk 邏輯）
+├── tools/                         # 管理者手動工具（不隨 clasp 部署，見 tools/README.md）
+├── appscript/                     # clasp 部署目錄
+│   ├── Code.js                    # 複製自 src/
+│   ├── index.html                 # 建置後複製自 dist/
+│   └── appsscript.json            # GAS 設定（含 LodashGS 函式庫、webapp 存取設定）
+├── dist/                          # Vite 建置輸出
+├── vite.config.js                 # Vite 設定 (singlefile)
+├── vitest.config.js               # Vitest 設定
+├── eslint.config.js               # ESLint flat config（Vue 前端 / GAS 後端 / Node 測試）
+├── package.json                   # npm 設定
+└── .clasp.json                    # clasp 設定
 ```
 
-## 部署流程
+## 開發與部署流程
 
 ```bash
+npm run lint           # ESLint（含 vue/no-undef-properties 模板綁定檢查）
+npm test               # Vitest 單元測試
 npm run build          # Vite 建置
 npm run gpush          # 複製檔案 + clasp push
 ```

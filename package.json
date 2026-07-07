@@ -15,7 +15,12 @@
     "gpush": "npm run copy-files && clasp push",
     "gcreate": "clasp create --title \"sheet-machine\" --rootDir ./appscript",
     "gstart": "clasp push --watch",
-    "copy-files": "cp ./src/Code.js ./appscript/ && cp ./dist/index.html ./appscript/"
+    "copy-files": "cp ./src/Code.js ./appscript/ && cp ./dist/index.html ./appscript/",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write src tests tools *.js *.json *.md",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "author": "",
   "license": "ISC",
@@ -32,10 +37,18 @@
     "vue": "^3.5.38"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/google-apps-script": "^2.0.11",
     "@vitejs/plugin-vue": "^6.0.7",
     "clasp": "^1.0.0",
+    "eslint": "^10.6.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-vue": "^10.9.2",
+    "globals": "^17.7.0",
+    "prettier": "^3.9.4",
     "vite": "^8.0.16",
-    "vite-plugin-singlefile": "^2.3.3"
-  }
+    "vite-plugin-singlefile": "^2.3.3",
+    "vitest": "^4.1.10"
+  },
+  "type": "module"
 }

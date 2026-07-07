@@ -1,0 +1,4 @@
+dist/
+node_modules/
+appscript/
+package-lock.json

@@ -18,7 +18,7 @@ function exportSheet() {
     let destFolder = DriveApp.getFolderById(appProperties.getProperty('exportStorage'));
     let copyPrompt = ui.prompt('資料從哪一行開始','你的寫入表資料標題有幾行？請自行輸入（如果你不知道請輸入2）', ui.ButtonSet.OK);
     if(copyPrompt.getSelectedButton() === ui.Button.OK) {
-      let uniquePrimary = true;
+      let uniquePrimary;
       var result = ui.alert(
                   '只看用戶寫的最新的那筆？',
                   '如果你按下OK，輸出時系統會自動過濾用戶輸出結果，只輸出他們寫的最新的那筆',

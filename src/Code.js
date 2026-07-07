@@ -87,6 +87,15 @@ function getQList_() {
 // 分頁結構：A 欄主鍵、B 欄更新時間(ms)、C 欄之後為 JSON 切塊（單一儲存格上限 50000 字元）
 const DRAFT_CHUNK_SIZE = 45000;
 
+// 把 payload 字串切成單一儲存格放得下的塊（空字串回傳空陣列）
+function chunkPayload_(payloadStr) {
+  let chunks = [];
+  for(let i=0; i<payloadStr.length; i+=DRAFT_CHUNK_SIZE) {
+    chunks.push(payloadStr.substring(i, i + DRAFT_CHUNK_SIZE));
+  }
+  return chunks;
+}
+
 function draftEnabled_() {
   let draftID = appProperties.getProperty('draftSheetID');
   return draftID !== null && draftID.toString().trim() !== "";
@@ -137,11 +146,7 @@ function saveDraft(referSSID, auth, payload) {
     if(!authRecord(referSSID, auth)) { return { success: false, message: "身分驗證失敗，無法線上暫存" }; }
     let key = draftKey_(referSSID, auth);
     if(key === null) { return { success: false, message: "找不到主鍵值，無法線上暫存" }; }
-    let payloadStr = payload.toString();
-    let chunks = [];
-    for(let i=0; i<payloadStr.length; i+=DRAFT_CHUNK_SIZE) {
-      chunks.push(payloadStr.substring(i, i + DRAFT_CHUNK_SIZE));
-    }
+    let chunks = chunkPayload_(payload.toString());
     let updatedAt = (new Date()).getTime();
     let lock = LockService.getScriptLock();
     lock.waitLock(10000);
@@ -434,9 +439,6 @@ function getHeaders(referSSID) {
             }
             obj.content = _.join(defaultConfig, ";");
           }
-          if(obj.group !== "") {
-            obj.group = obj.group
-          }
           headers.push(obj);
         }
       }
@@ -456,7 +458,7 @@ function authRecord(referSSID, auth) {
     }
     return false;
   });
-  let userRow = undefined;
+  let userRow;
   if(gmailFinder.length > 0) {
     let account = Session.getActiveUser().getEmail();
     if(account !== "") {
@@ -648,7 +650,7 @@ function writeRecord_(referSSID, recordSSID, auth, record, accept, signatures, e
                       }
                     }
                   } else if(formatDetector('E', 'F|C', column)) {
-                    if(/^\w+((-\w+)|(\.\w+))*\@[A-Za-z0-9]+((\.|-)[A-Za-z0-9]+)*\.[A-Za-z]+$/.test(data.value)) {
+                    if(/^\w+((-\w+)|(\.\w+))*@[A-Za-z0-9]+((\.|-)[A-Za-z0-9]+)*\.[A-Za-z]+$/.test(data.value)) {
                       column.value = data.value;
                     } else {
                       proceedWrite = false;
@@ -731,6 +733,7 @@ function writeRecord_(referSSID, recordSSID, auth, record, accept, signatures, e
                 hasGroup = true;
               }
             } else if(formatDetector('', 'O', column)) {
+              // O 欄位（輸出用）：前端傳來也不寫入，但不算竄改
             } else {
               proceedWrite = false;
               errorLog.push("你竄改數據？" + column.name + "不允許寫入！");
@@ -816,7 +819,7 @@ function writeRecord_(referSSID, recordSSID, auth, record, accept, signatures, e
           pureData.push(groupData);
           for(let i=0; i<headers.length; i++) {
             pureData.push(headers[i].value.toString());
-            if(/^\w+((-\w+)|(\.\w+))*\@[A-Za-z0-9]+((\.|-)[A-Za-z0-9]+)*\.[A-Za-z]+$/.test(email)) {
+            if(/^\w+((-\w+)|(\.\w+))*@[A-Za-z0-9]+((\.|-)[A-Za-z0-9]+)*\.[A-Za-z]+$/.test(email)) {
               if(/F/.test(headers[i].type)) {
                 if(/F/.test(headers[i].format)) {
                   if(headers[i].value !== "") {
@@ -835,7 +838,7 @@ function writeRecord_(referSSID, recordSSID, auth, record, accept, signatures, e
           let recordSheet = recordSS.getSheets()[0];
           recordSheet.appendRow(pureData);
           result = true;
-          if(/^\w+((-\w+)|(\.\w+))*\@[A-Za-z0-9]+((\.|-)[A-Za-z0-9]+)*\.[A-Za-z]+$/.test(email)) {
+          if(/^\w+((-\w+)|(\.\w+))*@[A-Za-z0-9]+((\.|-)[A-Za-z0-9]+)*\.[A-Za-z]+$/.test(email)) {
             if(MailApp.getRemainingDailyQuota() > 0) {
               let now = new Date();
               let replyEmail = currentSheet[0][12].toString().trim();
