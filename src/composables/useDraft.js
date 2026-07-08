@@ -2,14 +2,28 @@ import { ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import dayjs from 'dayjs';
 import _ from 'lodash';
-import { gasRun, plainClone } from './useGasRpc';
+import { gasRun } from './useGasRpc';
 import { findPrimaryKey } from '../utils/columnRules';
-import { buildQueuePayload, filterImportableQueue, applyQueueToColumns } from '../utils/tempQueue';
+import {
+  buildTempQueue,
+  buildQueuePayload,
+  filterImportableQueue,
+  applyQueueToColumns,
+} from '../utils/tempQueue';
 import { getQueueAnswers, findAnsIndex, replaceAns } from '../utils/tempStorage';
 
 // 線上暫存：把 localStorage 的 queue 上傳到雲端暫存試算表／登入後詢問還原。
-// 後端驗證（authRecord）是安全邊界：驗證欄位不對就存取不到任何人的暫存。
-export function useDraft({ sheets, currentSID, currentUID, authDB, columnDB, tempFound }) {
+// 後端 token 驗證（authByToken_）是安全邊界：沒有有效 token 就存取不到任何人的暫存。
+export function useDraft({
+  sheets,
+  currentSID,
+  currentUID,
+  authDB,
+  columnDB,
+  tempFound,
+  authToken,
+  onTokenExpired,
+}) {
   const draftEnabled = ref(false);
   const draftSaving = ref(false);
 
@@ -43,11 +57,13 @@ export function useDraft({ sheets, currentSID, currentUID, authDB, columnDB, tem
       let result = await gasRun(
         'saveDraft',
         currentSheet[0].refer,
-        plainClone(authDB.value),
+        authToken.value,
         JSON.stringify(payload)
       );
       if (result && result.success) {
         ElMessage.success('已線上暫存！換裝置用同一組身分登入即可還原（簽名需重簽）');
+      } else if (result && result.tokenExpired) {
+        onTokenExpired();
       } else {
         ElMessage.error(result && result.message ? result.message : '線上暫存失敗');
       }
@@ -59,14 +75,52 @@ export function useDraft({ sheets, currentSID, currentUID, authDB, columnDB, tem
     }
   }
 
+  // 發簽名邀請前強制上雲：以 columnDB 現值直接組 queue 上傳（繞過 hasFilledData 的
+  // 空 queue 拒存——就算填寫者什麼都沒改，受邀者也要能看到 read-only 問卷內容）。
+  // 回傳是否成功，邀請流程據此決定要不要繼續寄信
+  async function saveDraftForInvite() {
+    let currentSheet = _.filter(sheets.value, (sheet) => {
+      return sheet.id === currentSID.value;
+    });
+    if (currentSheet.length === 0) {
+      return false;
+    }
+    let payload = buildQueuePayload(currentSID.value, buildTempQueue(columnDB.value));
+    draftSaving.value = true;
+    try {
+      let result = await gasRun(
+        'saveDraft',
+        currentSheet[0].refer,
+        authToken.value,
+        JSON.stringify(payload)
+      );
+      if (result && result.success) {
+        return true;
+      }
+      if (result && result.tokenExpired) {
+        onTokenExpired();
+      }
+      return false;
+    } catch (err) {
+      console.error('saveDraftForInvite failed', err);
+      return false;
+    } finally {
+      draftSaving.value = false;
+    }
+  }
+
   // 登入成功後檢查雲端是否有暫存，有的話詢問是否還原
   async function checkOnlineDraft(currentSheet) {
     let draft;
     try {
-      draft = await gasRun('loadDraft', currentSheet.refer, plainClone(authDB.value));
+      draft = await gasRun('loadDraft', currentSheet.refer, authToken.value);
     } catch (err) {
       // 載入暫存失敗不影響正常填寫流程
       console.error('loadDraft failed', err);
+      return;
+    }
+    if (draft && draft.tokenExpired) {
+      onTokenExpired();
       return;
     }
     if (!draft || !draft.payload) {
@@ -111,15 +165,22 @@ export function useDraft({ sheets, currentSID, currentUID, authDB, columnDB, tem
     ElMessage.success('已還原 ' + importedQueue.length + ' 個欄位的雲端暫存');
   }
 
-  // 正式送出成功後清掉雲端暫存（失敗不阻斷流程）；要在 authDB 清空前呼叫
+  // 正式送出成功後清掉雲端暫存（失敗不阻斷流程）；要在 authToken 清空前呼叫
   function deleteDraftOnline(currentSheet) {
     if (!draftEnabled.value) {
       return;
     }
-    gasRun('deleteDraft', currentSheet.refer, plainClone(authDB.value)).catch((err) => {
+    gasRun('deleteDraft', currentSheet.refer, authToken.value).catch((err) => {
       console.error('deleteDraft failed', err);
     });
   }
 
-  return { draftEnabled, draftSaving, saveDraftOnline, checkOnlineDraft, deleteDraftOnline };
+  return {
+    draftEnabled,
+    draftSaving,
+    saveDraftOnline,
+    saveDraftForInvite,
+    checkOnlineDraft,
+    deleteDraftOnline,
+  };
 }

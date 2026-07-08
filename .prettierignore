@@ -2,3 +2,4 @@ dist/
 node_modules/
 appscript/
 package-lock.json
+src/styles/_theme-generated.scss

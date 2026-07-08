@@ -1,4 +1,11 @@
 <template>
+  <JwtCountdownBar
+    v-if="authToken !== ''"
+    :remaining-time="remainingTime"
+    :session-percentage="sessionPercentage"
+    :renewing="renewing"
+    @renew="handleRenewClick"
+  />
   <el-dialog
     v-model="columnDialog.show"
     :fullscreen="columnDialog.fullscreen"
@@ -20,13 +27,7 @@
             <span style="font-size: 1.5em" v-html="HTMLConverter(alertWords)"></span>
           </template>
         </el-alert>
-        <el-alert title="發生錯誤" type="error" show-icon v-if="scriptError.message !== ''">
-          <template #default>
-            <span style="font-size: 1.5em">
-              {{ scriptError.message }}
-            </span>
-          </template>
-        </el-alert>
+        <ErrorAlert :message="scriptError.message" />
         <el-alert title="填寫狀態" type="info" show-icon v-if="scriptError.message === ''">
           <template #default>
             <span style="font-size: 1.5em" v-if="requestCount.length > 0">
@@ -44,7 +45,7 @@
               size="large"
               type="success"
               :disabled="!tempFound"
-              @click="exportDrawer.show = true">
+              @click="tempTransfer.openExport()">
               匯出暫存答案
             </el-button>
           </el-col>
@@ -53,7 +54,7 @@
               style="width: 100%"
               size="large"
               type="warning"
-              @click="triggerImportTemp()">
+              @click="tempTransfer.openImport()">
               匯入暫存答案
             </el-button>
           </el-col>
@@ -69,7 +70,6 @@
             </el-button>
           </el-col>
         </el-row>
-        <input type="file" ref="tempFileInput" accept=".smtemp" style="display:none" @change="onFileSelected" />
         <el-switch v-if="!viewOnly" class="ma1" size="large" active-text="我要修改問卷" v-model="enableModify"></el-switch>
         <FormField
           v-for="dataColumn in columnDB"
@@ -96,13 +96,7 @@
     v-model="sheetsDialog.show"
     :fullscreen="sheetsDialog.fullscreen"
     title="可供檢視／填答的表單">
-    <el-alert title="發生錯誤" type="error" show-icon v-if="scriptError.message !== ''">
-      <template #default>
-        <span style="font-size: 1.5em">
-          {{ scriptError.message }}
-        </span>
-      </template>
-    </el-alert>
+    <ErrorAlert :message="scriptError.message" />
     <el-space direction="vertical" fill wrap style="width: 100%">
       <div class="xs12" style="font-size: 1em; color: #666; text-align: center;" v-if="sheets.length === 0">無資料</div>
       <el-table :data="sheets" stripe style="width: 100%" v-else>
@@ -111,8 +105,8 @@
             <el-tag
               v-for="tag in scope.row.tags"
               :key="tag.id"
-              :color="tag.color"
-              style="margin:1px"
+              :color="tag.color.background"
+              :style="{ margin: '1px', color: tag.color.text, borderColor: tag.color.background }"
               effect="dark"
             >
               {{ tag.name }}
@@ -131,6 +125,17 @@
           </template>
         </el-table-column>
       </el-table>
+      <el-divider>我有簽名的驗證碼（我只是簽名者之一）</el-divider>
+      <el-input
+        v-model="inviteCodeInput"
+        size="large"
+        placeholder="貼上邀請信中的驗證碼，即可檢視問卷並簽名"
+        clearable
+      >
+        <template #append>
+          <el-button v-on:click="openInviteeByCode()">進入簽名</el-button>
+        </template>
+      </el-input>
       <div class="footerText">Developer: <a class="cleanLink" href="mailto:kelunyang@outlook.com">Kelunyang</a>@LKSH 2023 <a style="color:#CCC" target="_blank" href="https://github.com/kelunyang/sheet-machine" >GITHUB</a></div>
     </el-space>
   </el-dialog>
@@ -138,7 +143,7 @@
     :show-close="false"
     v-model="signatureDialog.show"
     :fullscreen="signatureDialog.fullscreen"
-    :title="'請提交'+signatures.length+'組簽名'">
+    :title="'簽名確認（本表單共需' + allSignNames.length + '組簽名）'">
     <el-steps :active="stepIndicator" finish-status="finish" align-center>
       <el-step :title="step.title" v-for="(step, index) in availableSteps" :key="index" :status="step.status" />
     </el-steps>
@@ -153,32 +158,80 @@
       <template #default>
         <span style="font-size: 1.5em">
           以下是你提交過的簽名存檔，再次提交會洗掉舊的簽名喔！
-          <el-link v-for="(sign, k) in savedSignatures" :key="'sign' + k" :href="sign" target="_blank">查看第{{ k + 1 }}個存檔簽名🔎</el-link>
         </span>
-      </template>
-    </el-alert>
-    <el-alert :title="'你正在簽第' + (currentSignature + 1) + '組簽名，共' + signatures.length + '組'" type="warning" show-icon>
-      <template #default>
-        <span style="font-size: 1.5em">
-          <span style="font-weight: bold;">請在灰框內簽下「 {{ signatureTip }}」的簽名（完成本表單共需要{{ signatures.length }}組簽名，這是第{{ currentSignature + 1 }}組）</span>，請注意，簽名需親簽（或得到授權），否則可能違反刑法217條偽造署押罪</span>
+        <div>
+          <img
+            v-for="(sign, k) in savedSignatures"
+            :key="'sign' + k"
+            :src="sign"
+            :alt="'第' + (k + 1) + '個存檔簽名'"
+            class="savedSignatureImg"
+          />
+        </div>
       </template>
     </el-alert>
     <el-space direction="vertical" :fill="true" wrap style="width: 100%">
-      <el-carousel ref="signaturePad" :autoplay="false" indicator-position="none" arrow="never" @change="changeSignature">
-        <el-carousel-item v-for="signature in signatures" :key="signature.id">
-          <el-progress :percentage="signature.percentage" :status="signature.progressStatus">
-            <template #default="{ percentage }">
-              <span>{{ percentage }}%</span>
-              <span v-if="signature.showWarning" style="color: red;">
-                簽名須佔有簽名板的0.5%以上面積
-              </span>
-            </template>
-          </el-progress>
-          <canvas class="signaturePad" :width="signatureWidth" :height="signatureHeight" />
-        </el-carousel-item>
-      </el-carousel>
-      <el-button v-if="signatures.length > 1" class="ma1 pa1 xs12" size="large" type="primary" v-on:click="nextSignature()">簽下一組（共{{ signatures.length }}組），到最後一個時會回到第一個</el-button>
-      <el-button class="ma1 pa1 xs12" size="large" type="success" v-on:click="clearSignature()">清除{{ signatureTip }}的簽名</el-button>
+      <template v-for="name in allSignNames" :key="'invite-' + name">
+        <el-card v-if="inviteStateFor(name).status !== 'none'" shadow="never">
+          <template #header>
+            <span style="font-weight: bold; font-size: 1.2em">「{{ name }}」的簽名</span>
+            <el-tag
+              style="margin-left: 8px"
+              :type="inviteStateFor(name).status === 'signed' ? 'success' : inviteStateFor(name).status === 'expired' ? 'danger' : 'warning'">
+              {{ inviteStateFor(name).status === 'signed' ? '已簽名' : inviteStateFor(name).status === 'expired' ? '邀請已過期' : '授權中' }}
+            </el-tag>
+          </template>
+          <div v-if="inviteStateFor(name).status === 'signed'">
+            <img :src="inviteStateFor(name).image" :alt="name + '的遠端簽名'" class="savedSignatureImg" />
+            <div class="captionWord">已由受邀者（{{ inviteStateFor(name).email }}）遠端簽署完成</div>
+            <el-button class="ma1" size="large" type="danger" :loading="inviteBusy" v-on:click="revokeSlot(name)">
+              撤回這個簽名，在這個裝置重簽
+            </el-button>
+          </div>
+          <div v-else>
+            <div class="captionWord">
+              已邀請 {{ inviteStateFor(name).email }}（{{ inviteStateFor(name).status === 'expired' ? '已於' : '有效至' }}{{ dateConverter(inviteStateFor(name).expireAt) }}{{ inviteStateFor(name).status === 'expired' ? '過期' : '' }}），等待對方簽名中；對方簽完之前你無法送出問卷
+            </div>
+            <el-button class="ma1" size="large" type="primary" :loading="inviteBusy" v-on:click="resendSlot(name)">重發授權信</el-button>
+            <el-button class="ma1" size="large" type="warning" :loading="inviteBusy" v-on:click="changeSlotEmail(name)">更換簽名者Email</el-button>
+            <el-button class="ma1" size="large" type="danger" :loading="inviteBusy" v-on:click="revokeSlot(name)">撤回授權，在這個裝置簽名</el-button>
+          </div>
+        </el-card>
+      </template>
+      <el-button v-if="hasInviteCards" class="ma1 pa1 xs12" size="large" type="info" :loading="inviteBusy" v-on:click="refreshInviteStates()">
+        重新整理邀請狀態（受邀者簽完了嗎？）
+      </el-button>
+      <template v-if="signatures.length > 0">
+        <el-alert :title="'你正在簽第' + (currentSignature + 1) + '組簽名，本機共' + signatures.length + '組'" type="warning" show-icon>
+          <template #default>
+            <span style="font-size: 1.5em">
+              <span style="font-weight: bold;">請在灰框內簽下「 {{ signatureTip }}」的簽名（需在本機簽{{ signatures.length }}組，這是第{{ currentSignature + 1 }}組）</span>，請注意，簽名需親簽（或得到授權），否則可能違反刑法217條偽造署押罪</span>
+          </template>
+        </el-alert>
+        <el-carousel ref="signaturePad" :autoplay="false" indicator-position="none" arrow="never" @change="changeSignature">
+          <el-carousel-item v-for="signature in signatures" :key="signature.id">
+            <el-progress :percentage="signature.percentage" :status="signature.progressStatus">
+              <template #default="{ percentage }">
+                <span>{{ percentage }}%</span>
+                <span v-if="signature.showWarning" style="color: red;">
+                  簽名須佔有簽名板的0.5%以上面積
+                </span>
+              </template>
+            </el-progress>
+            <canvas class="signaturePad" :width="signatureWidth" :height="signatureHeight" />
+          </el-carousel-item>
+        </el-carousel>
+        <el-button v-if="signatures.length > 1" class="ma1 pa1 xs12" size="large" type="primary" v-on:click="nextSignature()">簽下一組（共{{ signatures.length }}組），到最後一個時會回到第一個</el-button>
+        <el-button class="ma1 pa1 xs12" size="large" type="success" v-on:click="clearSignature()">清除{{ signatureTip }}的簽名</el-button>
+        <el-button v-if="draftEnabled && !viewOnly" class="ma1 pa1 xs12" size="large" type="warning" :loading="inviteBusy" v-on:click="inviteSlot(signatureTip)">
+          「{{ signatureTip }}」不在現場？用Email邀請他遠端簽名
+        </el-button>
+      </template>
+      <el-alert v-else-if="pendingInviteNames.length === 0 && allSignNames.length > 0" title="全部簽名已完成" type="success" show-icon>
+        <template #default>
+          <span style="font-size: 1.5em">所有簽名格都已完成（含遠端簽名），請按下方按鈕繼續</span>
+        </template>
+      </el-alert>
       <el-button class="ma1 pa2 xs12" size="large" type="danger" v-on:click="endSignature()" :disabled="signatureSubmitStatus.isDisabled">{{ signatureSubmitStatus.message }}</el-button>
       <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="reverseBody()">剛剛輸入的有誤，回去修改</el-button>
     </el-space>
@@ -226,13 +279,7 @@
         </span>
       </template>
     </el-alert>
-    <el-alert title="發生錯誤" type="error" show-icon v-if="scriptError.message !== ''">
-      <template #default>
-        <span style="font-size: 1.5em">
-          {{ scriptError.message }}
-        </span>
-      </template>
-    </el-alert>
+    <ErrorAlert :message="scriptError.message" />
     <el-alert title="問卷提示" type="warning" show-icon v-show="scriptError.message === '' && saveSuccessed === undefined">
       <template #default>
         <span style="font-size: 1.5em" v-html='HTMLConverter(loginTip)'></span>
@@ -277,99 +324,19 @@
       <div class="footerText">Developer: <a class="cleanLink" href="mailto:kelunyang@outlook.com">Kelunyang</a>@LKSH 2023 <a style="color:#CCC" target="_blank" href="https://github.com/kelunyang/sheet-machine" >GITHUB</a></div>
     </el-space>
   </el-dialog>
-  <el-drawer
-    v-model="fileDialog.show"
-    title="你正在處理檔案欄位"
-    direction="btt"
-    show-close="false"
-    size="90%"
-  >
-    <el-alert title="發生錯誤" type="error" show-icon v-if="scriptError.message !== ''">
-      <template #default>
-        <span style="font-size: 1.5em">
-          {{ scriptError.message }}
-        </span>
-      </template>
-    </el-alert>
-    <el-alert title="發生錯誤" type="error" show-icon v-if="scriptError.message === ''" v-show="uploadErrors !== ''">
-      <template #default>
-        <span style="font-size: 1.5em">{{ uploadErrors }}</span>
-      </template>
-    </el-alert>
-    <el-alert title="檔案限制" type="warning" show-icon v-if="scriptError.message === ''">
-      <template #default>
-        <span style="font-size: 1.5em">檔案類型：{{ currentFile.mimeAlt === "" ? "無限制" : currentFile.mimeAlt }}／檔案大小：{{ currentFile.maxSize }}MB／只能選擇1個檔案</span>
-      </template>
-    </el-alert>
-    <el-alert title="上傳中" type="info" show-icon v-if="uploadStatus">
-      <template #default>
-        <span style="font-size: 1.5em">
-          上傳可能會花上一段時間，在本訊息結束之前，請不要關閉視窗
-        </span>
-      </template>
-    </el-alert>
-    <div>欄位名稱：{{ currentFile.name }}</div>
-    <el-space direction="vertical" fill wrap style="width: 100%">
-      <el-upload
-        :limit="1"
-        :auto-upload="false"
-        v-model:file-list="currentFile.fileList"
-        :on-exceed="exceedLimit"
-        class="ma1 pa2 xs12"
-      >
-        <template #trigger>
-          <el-button type="primary">請選擇1個檔案</el-button>
-        </template>
-      </el-upload>
-      <el-button class="ma1 pa2 xs12" size="large" type="danger" v-on:click="startUpload()" :disabled="currentFile.fileList.length === 0" v-if="!uploadStatus">上傳檔案！</el-button>
-      <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="fileDialog.show = false" v-if="!uploadStatus">關閉對話框</el-button>
-    </el-space>
-  </el-drawer>
-  <el-drawer
-    v-model="multisDialog.show"
-    title="你正在處理多選欄位"
-    direction="btt"
-    show-close="false"
-    size="90%"
-  >
-    <el-space direction="vertical" fill wrap style="width: 100%">
-      <el-alert title="勾選數量限制" type="info" show-icon>
-        <template #default>
-          <span style="font-size: 1.5em">
-            請從 {{ currentMulti.selections.length }} 項中 {{ currentMulti.maxNum > 0 ? "挑出至多" + currentMulti.maxNum + "項" : "挑出你要的項目（數量不限）" }}，按下方藍色按鈕調整已選區的選項，如果要調整已選區的選項順序，勾選之後會出現調整功能（下方綠色按鈕）
-          </span>
-        </template>
-      </el-alert>
-      <el-alert title="發生錯誤" type="error" show-icon v-if="currentMulti.error !== ''">
-        <template #default>
-          <span style="font-size: 1.5em">{{ currentMulti.error }}</span>
-        </template>
-      </el-alert>
-      <div>欄位名稱：{{ currentMulti.name }}</div>
-      <el-transfer
-        class="ma1 pa2 xs12"
-        v-model="currentMulti.selected"
-        filterable
-        :filter-method="filterMethod"
-        filter-placeholder="在此可以打字搜尋"
-        :data="currentMulti.selections"
-        v-on:change="selectionChanged"
-        v-on:right-check-change="chooseSelection"
-        target-order="push"
-        :titles="['候選名單', '已選名單']"
-        :button-texts="['移出已選', '移入已選']"
-      >
-      </el-transfer>
-      <el-space direction="horizonal" fill wrap class="ma1 pa2 xs12" v-if="currentMulti.modified.length > 0">
-        <el-button class="ma1 pa2 xs12" size="large" type="success" @click="selectionMove(0)">將已選的{{ currentMulti.modified.length }}個選項置頂</el-button>
-        <el-button class="ma1 pa2 xs12" size="large" type="success" @click="selectionMove(2)">將已選的{{ currentMulti.modified.length }}個選項向上一格</el-button>
-        <el-button class="ma1 pa2 xs12" size="large" type="success" @click="selectionMove(3)">將已選的{{ currentMulti.modified.length }}個選項向下一格</el-button>
-        <el-button class="ma1 pa2 xs12" size="large" type="success" @click="selectionMove(1)">將已選的{{ currentMulti.modified.length }}個選項置底</el-button>
-      </el-space>
-      <el-button class="ma1 pa2 xs12" size="large" type="danger" v-on:click="endSelection()">選擇完畢！</el-button>
-      <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="multisDialog.show = false">放棄選擇，回到上一頁</el-button>
-    </el-space>
-  </el-drawer>
+  <FileUploadDrawer
+    v-model:show="fileDrawer.show"
+    :column="fileDrawer.column"
+    :sheet="currentSheet"
+    :auth-token="authToken"
+    @uploaded="applyFileUpload"
+    @token-expired="handleTokenExpired"
+  />
+  <MultiSelectDrawer
+    v-model:show="multiDrawer.show"
+    :column="multiDrawer.column"
+    @done="applyMultiSelection"
+  />
   <el-drawer
     v-model="confirmDialog.show"
     title="確定要送出了嗎？"
@@ -387,13 +354,7 @@
         </span>
       </template>
     </el-alert>
-    <el-alert title="發生錯誤" type="error" show-icon v-if="scriptError.message !== ''">
-      <template #default>
-        <span style="font-size: 1.5em">
-          {{ scriptError.message }}
-        </span>
-      </template>
-    </el-alert>
+    <ErrorAlert :message="scriptError.message" />
     <el-space direction="vertical" fill wrap style="width: 100%">
       <div class="qTitle">你確定資料無誤，可以送出了嗎？</div>
       <el-switch class="ma1" size="large" :active-text="'請寄一個確認信給我（本日剩餘Email通知信配額' + remainEmail  + '封）'" v-model="emailObj.enable" v-if="remainEmail > 0"></el-switch>
@@ -412,122 +373,37 @@
       <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="reverseBody()" v-if="!uploadStatus">剛剛輸入的有誤，回去修改</el-button>
     </el-space>
   </el-drawer>
-  <el-drawer
-    v-model="exportDrawer.show"
-    title="匯出暫存答案"
-    direction="btt"
-    size="100%">
-    <el-alert title="注意事項" type="warning" show-icon>
-      <template #default>
-        <span style="font-size: 1.2em">
-          匯出內容包含：文字、選單、已上傳的檔案連結。
-          匯出的檔案經過 AES-256 加密，打開後會看到亂碼。
-          解密需要使用「你的登入帳號 + 你現在輸入的密碼」組合的密碼。
-        </span>
-      </template>
-    </el-alert>
-    <el-space direction="vertical" fill wrap style="width: 100%; margin-top: 20px;">
-      <div>請設定匯出密碼（匯入時需要輸入）：</div>
-      <el-input
-        v-model="exportDrawer.password"
-        type="password"
-        placeholder="請輸入密碼"
-        show-password
-        size="large" />
-      <el-button
-        size="large"
-        type="primary"
-        style="width: 100%"
-        :disabled="exportDrawer.password.length === 0"
-        @click="exportTemp()">
-        確認匯出
-      </el-button>
-    </el-space>
-  </el-drawer>
-  <el-drawer
-    v-model="importDrawer.show"
-    title="匯入暫存答案"
-    direction="btt"
-    size="100%">
-    <el-alert title="注意事項" type="info" show-icon>
-      <template #default>
-        <span style="font-size: 1.2em">
-          匯入的檔案經過 AES-256 加密。
-          解密需要使用「你的登入帳號 + 匯出時設定的密碼」組合的密碼。
-          如果登入帳號不同或密碼錯誤，將無法解密。
-        </span>
-      </template>
-    </el-alert>
-    <el-space direction="vertical" fill wrap style="width: 100%; margin-top: 20px;">
-      <div>已選擇檔案：{{ importDrawer.file?.name || '無' }}</div>
-      <div>請輸入匯出時設定的密碼：</div>
-      <el-input
-        v-model="importDrawer.password"
-        type="password"
-        placeholder="請輸入密碼"
-        show-password
-        size="large" />
-      <el-button
-        size="large"
-        type="primary"
-        style="width: 100%"
-        :disabled="importDrawer.password.length === 0"
-        @click="importTemp()">
-        確認匯入
-      </el-button>
-    </el-space>
-  </el-drawer>
-  <el-dialog
-    :show-close="false"
-    v-model="latestDialog.show"
-    :fullscreen="latestDialog.fullscreen"
-    title="最後一位填寫者以及你是否填過">
-    <el-space direction="vertical" fill wrap style="width: 100%">
-      <div class="qTitle">最後一位填寫者</div>
-      <div>[{{ lastSender.modified ? "有修改" : "無修改" }}]{{ lastSender.pkey }}（{{ dateConverter(lastSender.tick) }}）</div>
-      <div class="qTitle" v-if="pkeyName !== ''">查詢你填過沒有（請輸入{{ pkeyName }}）</div>
-      <el-input
-        v-if="pkeyName !== ''"
-        size="large"
-        class="xs12"
-        :label="'輸入你想查詢的使用者的'+pkeyName"
-        v-model="requestedUser"
-        outline>
-      </el-input>
-      <div v-if="requestCount.pkey !== ''">[最後一次{{ requestCount.modified ? "有修改" : "無修改" }}]{{ requestCount.pkey }}（寫了{{ requestCount.length }}次，最後一次寫的時間是 {{ dateConverter(requestCount.lastTick) }} ）</div>
-      <el-button class="ma1 pa2 xs12" size="large" type="danger" :disabled="requestedUser === ''" v-on:click="queryExist()">按此查詢是否填過</el-button>
-      <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="closeLatest()">關閉對話框</el-button>
-    </el-space>
-  </el-dialog>
-  <el-dialog
-    :show-close="false"
-    v-model="statDialog.show"
-    :fullscreen="statDialog.fullscreen"
-    :title="currentQuery + '目前總填答率為：' + completeRate + '%'">
-    <el-space direction="vertical" fill wrap style="width: 100%">
-      <el-table :data="stats" stripe style="width: 100%" :border="true" :highlight-current-row="true">
-        <el-table-column prop="classno" label="" min-width="10%"/>
-        <el-table-column  prop="rate" label="填答率" sortable :sort-method="rateSort" min-width="20%">
-          <template #default="scope">
-            <el-progress :percentage="scope.row.rate" :color="progressColor" />
-          </template>
-        </el-table-column>
-        <el-table-column prop="unfinished" label="未完成者" min-width="70%" resizable/>
-      </el-table>
-      <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="downloadCSV(stats, currentQuery + '填寫率統計.csv')">匯出統計表</el-button>
-      <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="closeStat()">關閉對話框</el-button>
-    </el-space>
-  </el-dialog>
+  <TempTransferDrawers
+    ref="tempTransfer"
+    :auth-db="authDB"
+    :column-db="columnDB"
+    :uid="currentUID"
+    :sid="currentSID"
+    :sheet-name="currentQuery"
+    @imported="tempFound = true"
+  />
+  <LatestDialog ref="latestDialogRef" :sheet="currentSheet" :pkey-name="pkeyName" />
+  <StatDialog ref="statDialogRef" :sheet="currentSheet" :sheet-name="currentQuery" />
+  <InviteeSignDialog ref="inviteeDialogRef" @closed="handleInviteeClosed" />
 </template>
 
 <script setup>
 import { ref, reactive, computed, watch, onMounted, nextTick } from 'vue';
-import { ElMessage } from 'element-plus';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import dayjs from 'dayjs';
 import { v4 as uuidv4 } from 'uuid';
 import _ from 'lodash';
-import randomColor from 'randomcolor';
+import { getTagPalette } from './theme/colors.config.js';
 import FormField from './components/FormField.vue';
+import ErrorAlert from './components/ErrorAlert.vue';
+import MultiSelectDrawer from './components/MultiSelectDrawer.vue';
+import FileUploadDrawer from './components/FileUploadDrawer.vue';
+import TempTransferDrawers from './components/TempTransferDrawers.vue';
+import LatestDialog from './components/LatestDialog.vue';
+import StatDialog from './components/StatDialog.vue';
+import JwtCountdownBar from './components/JwtCountdownBar.vue';
+import InviteeSignDialog from './components/InviteeSignDialog.vue';
+import { dateConverter, downloadCSV } from './utils/formatters';
 import { htmlConverter } from './utils/markdown';
 import {
   formatDetector,
@@ -536,27 +412,15 @@ import {
   findGmailPrimary,
   validateColumn,
 } from './utils/columnRules';
-import {
-  buildTempQueue,
-  buildQueuePayload,
-  hasFilledData,
-  filterImportableQueue,
-  applyQueueToColumns,
-} from './utils/tempQueue';
-import {
-  getQueueAnswers,
-  findAnsIndex,
-  upsertQueue,
-  replaceAns,
-  clearQueue,
-  clearSubmitted,
-  loadOrCreateAns,
-} from './utils/tempStorage';
-import { encrypt, decrypt } from './composables/useCrypto';
+import { prepareColumnsForDisplay } from './utils/columnPrep';
+import { buildTempQueue, hasFilledData } from './utils/tempQueue';
+import { upsertQueue, clearQueue, clearSubmitted, loadOrCreateAns } from './utils/tempStorage';
 import { gasRun, plainClone } from './composables/useGasRpc';
 import { useSteps } from './composables/useSteps';
 import { useSignatures } from './composables/useSignatures';
 import { useDraft } from './composables/useDraft';
+import { useInvites } from './composables/useInvites';
+import { useJwtSession } from './composables/useJwtSession';
 
 // ===== 基本狀態 =====
 const tempFound = ref(false);
@@ -574,33 +438,23 @@ const contactEmail = ref('');
 const writeAllowed = ref(false);
 const remainEmail = ref(0);
 const pkeyName = ref('');
-const requestedUser = ref('');
 const loginStatus = ref(false);
 const googleStatus = ref(undefined);
 const saveSuccessed = ref(undefined);
 const uploadingSheet = ref(false);
 const uploadStatus = ref(false);
-const uploadErrors = ref('');
 const savedSignatures = ref([]);
 const writeTick = ref(0);
 const lastSubmit = ref([]);
 const scriptError = ref({ message: '' });
 const columnDB = ref([]);
 const authDB = ref([]);
+// 登入後的 JWT：特權 RPC 只帶它，認證欄位值（個資）不再重傳（Phase 5）
+const authToken = ref('');
 const enableModify = ref(false);
 const sheets = ref([]);
-const colors = ref([]);
-const stats = ref([]);
-const lastSender = ref({ tick: 0, modified: true, pkey: '' });
+const tagPalette = getTagPalette();
 const requestCount = ref({ pkey: '', modified: false, length: 0, lastTick: 0 });
-
-const progressColor = [
-  { color: '#F56C6C', percentage: 20 },
-  { color: '#FF9900', percentage: 40 },
-  { color: '#E6A23C', percentage: 60 },
-  { color: '#CCCC00', percentage: 80 },
-  { color: '#67C23A', percentage: 100 },
-];
 
 const emailObj = reactive({
   value: '',
@@ -611,43 +465,24 @@ const emailObj = reactive({
   enable: false,
 });
 
-const currentFile = reactive({
-  name: '',
-  mimeAlt: '',
-  mimeType: '',
-  maxSize: 1,
-  id: '',
-  fileList: [],
-});
-
-const currentMulti = reactive({
-  id: '',
-  name: '',
-  selections: [],
-  selected: [],
-  maxNum: 0,
-  modified: [],
-  error: '',
-});
-
 // 對話框開關
 const sheetsDialog = reactive({ show: true, fullscreen: true });
 const loginDialog = reactive({ show: false, fullscreen: true });
 const columnDialog = reactive({ show: false, fullscreen: true });
 const signatureDialog = reactive({ show: false, fullscreen: true });
 const confirmDialog = reactive({ show: false, fullscreen: true });
-const multisDialog = reactive({ show: false, fullscreen: true });
-const fileDialog = reactive({ show: false, fullscreen: true });
-const statDialog = reactive({ show: false, fullscreen: true });
-const latestDialog = reactive({ show: false, fullscreen: true });
-
-// 匯出／匯入暫存檔
-const exportDrawer = reactive({ show: false, password: '' });
-const importDrawer = reactive({ show: false, password: '', file: null });
+const multiDrawer = reactive({ show: false, column: null });
+const fileDrawer = reactive({ show: false, column: null });
 
 // template refs
-const tempFileInput = ref(null);
+const tempTransfer = ref(null); // TempTransferDrawers
+const latestDialogRef = ref(null); // LatestDialog
+const statDialogRef = ref(null); // StatDialog
 const signaturePad = ref(null); // el-carousel
+const inviteeDialogRef = ref(null); // InviteeSignDialog
+
+// 受邀簽名者入口：首屏手動貼驗證碼（邀請信也提供 ?token= 連結直接進入）
+const inviteCodeInput = ref('');
 
 // ===== composables =====
 const { stepIndicator, availableSteps, changeStep, viewStep } = useSteps();
@@ -670,8 +505,40 @@ const {
   findEmptySignatures,
   collectSignatures,
 } = useSignatures();
-const { draftEnabled, draftSaving, saveDraftOnline, checkOnlineDraft, deleteDraftOnline } =
-  useDraft({ sheets, currentSID, currentUID, authDB, columnDB, tempFound });
+const {
+  draftEnabled,
+  draftSaving,
+  saveDraftOnline,
+  saveDraftForInvite,
+  checkOnlineDraft,
+  deleteDraftOnline,
+} = useDraft({
+  sheets,
+  currentSID,
+  currentUID,
+  authDB,
+  columnDB,
+  tempFound,
+  authToken,
+  onTokenExpired: handleTokenExpired,
+});
+const { remainingTime, sessionPercentage, renewing, handleRenewClick } = useJwtSession({
+  token: authToken,
+  onRenew: renewAuthToken,
+  onExpired: handleTokenExpired,
+});
+const {
+  inviteStates,
+  inviteBusy,
+  refreshInvites,
+  sendInvite: sendInviteRpc,
+  revokeInvite: revokeInviteRpc,
+} = useInvites({
+  currentSheet: computed(() => currentSheet.value),
+  authToken,
+  saveDraftForInvite,
+  onTokenExpired: handleTokenExpired,
+});
 
 // 模板沿用原本的方法名
 const HTMLConverter = htmlConverter;
@@ -687,18 +554,35 @@ const viewTip = computed(() => {
   return viewOnly.value ? '檢視' : '檢視&填寫';
 });
 
+// 目前開啟的問卷（供抽出去的元件自己打 RPC 用）
+const currentSheet = computed(() => {
+  return _.find(sheets.value, (sheet) => sheet.id === currentSID.value) || null;
+});
+
 const expired = computed(() => {
   let now = dayjs().valueOf();
   return ((currentDue.value - now) / 1000).toFixed(0);
 });
 
-const completeRate = computed(() => {
-  if (stats.value.length > 0) {
-    return _.meanBy(stats.value, (item) => {
-      return parseInt(item.rate);
-    }).toFixed(2);
-  }
-  return 0;
+// ===== 簽名邀請狀態（填寫者側） =====
+// 問卷設定的全部簽名格（邀請後 useSignatures 的 signatures 只剩本機簽的格，兩者要分開）
+const allSignNames = computed(() => {
+  return currentSheet.value ? currentSheet.value.signatures : [];
+});
+
+function inviteStateFor(name) {
+  return inviteStates.value[name] || { status: 'none' };
+}
+
+const hasInviteCards = computed(() => {
+  return _.some(allSignNames.value, (name) => inviteStateFor(name).status !== 'none');
+});
+
+// 還在等受邀者簽的格（含過期）：送出前必須清空——重發、等對方簽完、或撤回改本機簽
+const pendingInviteNames = computed(() => {
+  return _.filter(allSignNames.value, (name) => {
+    return /pending|expired/.test(inviteStateFor(name).status);
+  });
 });
 
 // ===== 本機暫存：columnDB 一變動就寫回 localStorage =====
@@ -731,119 +615,7 @@ function clearTemp() {
   }
 }
 
-// ===== 匯出／匯入暫存答案 =====
-function triggerImportTemp() {
-  tempFileInput.value.click();
-}
-
-function onFileSelected(event) {
-  const file = event.target.files[0];
-  if (file) {
-    importDrawer.file = file;
-    importDrawer.password = '';
-    importDrawer.show = true;
-  }
-  event.target.value = '';
-}
-
-async function exportTemp() {
-  let primaryKey = findPrimaryKey(authDB.value);
-  if (primaryKey === undefined) {
-    ElMessage.error('找不到主鍵欄位，無法匯出');
-    return;
-  }
-  let queueAnswers = getQueueAnswers(primaryKey.value);
-  let ansIndex = findAnsIndex(queueAnswers, currentUID.value);
-  let currentAns = ansIndex > -1 ? queueAnswers[ansIndex] : undefined;
-  if (!currentAns || currentAns.queue.length === 0) {
-    ElMessage.error('沒有可以匯出的暫存資料');
-    return;
-  }
-  // 組成匯出物件（與線上暫存同一格式）
-  let exportData = buildQueuePayload(currentSID.value, currentAns.queue);
-  try {
-    // 加密金鑰 = 主鍵值 + 密碼
-    const encryptPassword = primaryKey.value + exportDrawer.password;
-    const encrypted = await encrypt(exportData, encryptPassword);
-    // 下載檔案
-    const blob = new Blob([encrypted], { type: 'application/octet-stream' });
-    const url = window.URL.createObjectURL(blob);
-    const element = document.createElement('a');
-    element.setAttribute('href', url);
-    element.setAttribute(
-      'download',
-      `問卷暫存_${currentQuery.value}_${dayjs().format('YYYYMMDD_HHmmss')}.smtemp`
-    );
-    element.click();
-    window.URL.revokeObjectURL(url);
-    exportDrawer.show = false;
-    exportDrawer.password = '';
-    ElMessage.success('暫存資料已匯出！請將檔案傳送到其他裝置後匯入');
-  } catch (error) {
-    ElMessage.error('匯出失敗：' + error.message);
-  }
-}
-
-function importTemp() {
-  if (!importDrawer.file) {
-    ElMessage.error('請先選擇檔案');
-    return;
-  }
-  let primaryKey = findPrimaryKey(authDB.value);
-  if (primaryKey === undefined) {
-    ElMessage.error('找不到主鍵欄位，無法匯入');
-    return;
-  }
-  const reader = new FileReader();
-  reader.onload = async function (e) {
-    try {
-      // 解密金鑰 = 當前主鍵值 + 密碼
-      const decryptPassword = primaryKey.value + importDrawer.password;
-      const importData = await decrypt(e.target.result, decryptPassword);
-      // 驗證檔案格式
-      if (!importData.version || !importData.data || !importData.data.queue) {
-        ElMessage.error('匯入檔案格式不正確');
-        return;
-      }
-      // 檢查 formId 是否相符
-      if (importData.formId && importData.formId !== currentSID.value) {
-        ElMessage.warning('注意：匯入的資料來自不同的問卷，部分欄位可能不相容');
-      }
-      // 過濾只匯入存在的欄位（包含檔案欄位）
-      let importedQueue = filterImportableQueue(importData.data.queue, columnDB.value);
-      let skippedCount = importData.data.queue.length - importedQueue.length;
-      if (importedQueue.length === 0) {
-        ElMessage.error('匯入失敗：沒有任何欄位可以匯入（欄位結構可能已變更）');
-        return;
-      }
-      // 儲存到 localStorage 並直接更新 columnDB，讓畫面立即反應
-      replaceAns(primaryKey.value, currentUID.value, importedQueue);
-      applyQueueToColumns(importedQueue, columnDB.value);
-      tempFound.value = true;
-      // 顯示結果訊息
-      let message = `成功匯入 ${importedQueue.length} 個欄位的暫存資料`;
-      if (skippedCount > 0) {
-        message += `，${skippedCount} 個欄位因不存在而略過`;
-      }
-      ElMessage.success(message);
-      importDrawer.show = false;
-      importDrawer.password = '';
-      importDrawer.file = null;
-    } catch {
-      ElMessage.error('匯入失敗：密碼錯誤或身分不符');
-    }
-  };
-  reader.onerror = function () {
-    ElMessage.error('檔案讀取失敗');
-  };
-  reader.readAsText(importDrawer.file);
-}
-
 // ===== 一般工具 =====
-function rateSort(a, b) {
-  return parseFloat(a.rate) - parseFloat(b.rate);
-}
-
 function sendContact() {
   let element = document.createElement('a');
   element.setAttribute('href', 'mailto:' + contactEmail.value);
@@ -869,15 +641,6 @@ function checkSend() {
   }
 }
 
-function dateConverter(tick) {
-  if (tick === '' || tick === undefined) {
-    return '無';
-  } else {
-    let dayObj = dayjs(tick);
-    return dayObj.format('YYYY-MM-DD HH:mm:ss');
-  }
-}
-
 function viewCheck(sheet) {
   let now = dayjs().valueOf();
   if (sheet.dueDate <= now) return true;
@@ -891,135 +654,16 @@ function valField(column) {
 // ===== 多選欄位 =====
 function multiSelect(dataColumn) {
   if (formatDetector('U', 'F', dataColumn)) {
-    let selections = [];
-    let selectionConfig = dataColumn.content.split('::');
-    if (selectionConfig[0] === '') {
-      selectionConfig[0] = 0;
-    }
-    let oriSelect = selectionConfig[1].split(';');
-    for (let i = 0; i < oriSelect.length; i++) {
-      selections.push({
-        key: oriSelect[i],
-        label: oriSelect[i],
-        disabled: false,
-      });
-    }
-    currentMulti.maxNum = parseInt(selectionConfig[0]);
-    currentMulti.name = dataColumn.name;
-    currentMulti.id = dataColumn.id;
-    currentMulti.selections = selections;
-    currentMulti.selected = [];
-    currentMulti.modified = [];
-    currentMulti.error = '';
-    let selected = _.uniq(dataColumn.value.split(';'));
-    for (let i = 0; i < selected.length; i++) {
-      let findObj = _.filter(selections, (item) => {
-        return item.key === selected[i];
-      });
-      if (findObj.length > 0) {
-        currentMulti.selected.push(selected[i]);
-      }
-    }
-    multisDialog.show = true;
+    multiDrawer.column = dataColumn;
+    multiDrawer.show = true;
   }
 }
 
-function filterMethod(query, item) {
-  return item.label.includes(query);
-}
-
-function selectionChanged(currentItem, direction) {
-  if (direction === 'right') {
-    if (currentMulti.maxNum > 0) {
-      if (currentMulti.selected.length > currentMulti.maxNum) {
-        currentMulti.selected.splice(currentMulti.maxNum);
-        ElMessage('最多只能選' + currentMulti.maxNum + '項，系統自動清除你多選的');
-      }
-    }
-  } else {
-    currentMulti.modified = [];
+function applyMultiSelection(selected) {
+  if (multiDrawer.column) {
+    multiDrawer.column.value = _.join(selected, ';');
+    valField(multiDrawer.column);
   }
-}
-
-function chooseSelection(selected) {
-  currentMulti.modified = selected;
-  let validArr = [];
-  for (let i = 0; i < currentMulti.selected.length; i++) {
-    let checkSelect = _.filter(currentMulti.selections, (selection) => {
-      return selection.key === currentMulti.selected[i];
-    });
-    if (checkSelect.length > 0) {
-      validArr.push(true);
-    }
-  }
-  let confirmedArr = _.filter(validArr, (item) => {
-    return item === false;
-  });
-  if (confirmedArr.length > 0) {
-    currentMulti.error = '你為什麼可以選到選項裡沒有的值？';
-  }
-}
-
-function selectionMove(direction) {
-  let currentIndex = -1;
-  let foundIndexs = [];
-  let newIndex = 0;
-  if (direction === 0) {
-    newIndex = 0;
-  }
-  for (let i = 0; i < currentMulti.modified.length; i++) {
-    let nowIndex = _.findIndex(currentMulti.selected, (item) => {
-      return item === currentMulti.modified[i];
-    });
-    if (nowIndex > -1) {
-      foundIndexs.push(nowIndex);
-    }
-  }
-  foundIndexs = foundIndexs.sort();
-  if (foundIndexs.length > 0) {
-    if (direction === 2) {
-      currentIndex = foundIndexs[0];
-    } else {
-      currentIndex = foundIndexs[foundIndexs.length - 1];
-    }
-  }
-  if (currentIndex !== -1) {
-    let tempSelected = [...currentMulti.selected];
-    currentMulti.selected.splice(0);
-    for (let i = 0; i < tempSelected.length; i++) {
-      let selected = _.filter(foundIndexs, (item) => {
-        return item === i;
-      });
-      if (selected.length === 0) {
-        currentMulti.selected.push(tempSelected[i]);
-      }
-    }
-    if (direction === 2) {
-      newIndex = currentIndex - 1 > 0 ? currentIndex - 1 : 0;
-    } else if (direction === 3) {
-      newIndex =
-        currentIndex + 1 > currentMulti.selected.length
-          ? currentMulti.selected.length
-          : currentIndex + 1;
-    } else if (direction === 1) {
-      newIndex = currentMulti.selected.length > 0 ? currentMulti.selected.length : 0;
-    }
-    for (let i = 0; i < foundIndexs.length; i++) {
-      currentMulti.selected.splice(newIndex, 0, tempSelected[foundIndexs[i]]);
-      newIndex++;
-    }
-  }
-}
-
-function endSelection() {
-  let column = _.filter(columnDB.value, (column) => {
-    return column.id === currentMulti.id;
-  });
-  if (column.length > 0) {
-    column[0].value = _.join(currentMulti.selected, ';');
-    valField(column[0]);
-  }
-  multisDialog.show = false;
 }
 
 // ===== 下載結果 =====
@@ -1032,23 +676,7 @@ function downloadResult() {
       你填寫的值: data.value,
     });
   }
-  downloadCSV(result, '你填寫的結果');
-}
-
-function downloadCSV(arr, name) {
-  let output =
-    '﻿' +
-    Papa.unparse(arr) +
-    '\r\n寫入資料庫時間,' +
-    dateConverter(writeTick.value) +
-    '\r\n本資料產生時間,' +
-    dayjs().format('YYYY-MM-DD HH:mm:ss');
-  let blob = new Blob([output], { type: 'text/csv' });
-  let url = window.URL.createObjectURL(blob);
-  let element = document.createElement('a');
-  element.setAttribute('href', url);
-  element.setAttribute('download', name);
-  element.click();
+  downloadCSV(result, '你填寫的結果', writeTick.value);
 }
 
 // ===== 問卷列表 =====
@@ -1064,7 +692,7 @@ async function loadSheet() {
         for (let k = 0; k < tags.length; k++) {
           list[i].tags.push({
             name: tags[k].replace(/\[|\]/g, ''),
-            color: colors.value[(i * 10 + k) % colors.value.length],
+            color: tagPalette[(i * 10 + k) % tagPalette.length],
             id: uuidv4(),
           });
         }
@@ -1076,6 +704,7 @@ async function loadSheet() {
     saveSuccessed.value = undefined;
     requestCount.value.pkey = '';
     lastSubmit.value = [];
+    authToken.value = '';
     resetSignatures();
     sheetsDialog.show = true;
   } catch (err) {
@@ -1152,72 +781,14 @@ async function openSheet(sid) {
   }
 }
 
-// 最後填寫者查詢對話框（latestDialog）的進入點；目前列表頁按鈕停用中，保留供還原
-async function viewLatest() {
-  let sheet = _.filter(sheets.value, (item) => {
-    return item.id === currentSID.value;
-  });
-  ElMessage('載入問卷最後存取資訊中，請稍後');
-  if (sheet.length > 0) {
-    try {
-      const latest = await gasRun('latestSubmits', sheet[0].record);
-      scriptError.value.message = '';
-      latest.tick = parseInt(latest.tick);
-      latest.modified = /true|TRUE/.test(latest.modified) ? true : false;
-      lastSender.value = latest;
-      latestDialog.show = true;
-    } catch (err) {
-      scriptError.value = err;
-    }
-  }
+// 最後填寫者查詢對話框（LatestDialog）的進入點；目前列表頁按鈕停用中，保留供還原
+function viewLatest() {
+  latestDialogRef.value.open();
 }
 defineExpose({ viewLatest });
 
-async function queryExist() {
-  let sheet = _.filter(sheets.value, (item) => {
-    return item.id === currentSID.value;
-  });
-  ElMessage('查詢指定用戶是否填寫過問卷中，請稍後');
-  if (sheet.length > 0) {
-    try {
-      const requested = await gasRun('duplicateSubmits', sheet[0].record, requestedUser.value);
-      scriptError.value.message = '';
-      requestedUser.value = '';
-      requested.modified = /true|TRUE/.test(requested.modified) ? true : false;
-      requested.lastTick = parseInt(requested.lastTick);
-      requestCount.value = requested;
-    } catch (err) {
-      scriptError.value = err;
-    }
-  }
-}
-
-async function viewStat() {
-  let sheet = _.filter(sheets.value, (item) => {
-    return item.id === currentSID.value;
-  });
-  ElMessage('載入統計列表中，請稍後');
-  if (sheet.length > 0) {
-    try {
-      const statsObj = await gasRun('compareSheets', sheet[0].refer, sheet[0].record);
-      scriptError.value.message = '';
-      stats.value = statsObj;
-      writeTick.value = dayjs().valueOf();
-      statDialog.show = true;
-    } catch (err) {
-      scriptError.value = err;
-    }
-  }
-}
-
-function closeLatest() {
-  requestCount.value.pkey = '';
-  latestDialog.show = false;
-}
-
-function closeStat() {
-  stats.value = [];
-  statDialog.show = false;
+function viewStat() {
+  statDialogRef.value.open();
 }
 
 // ===== 驗證與流程控制 =====
@@ -1258,7 +829,7 @@ function reverseBody() {
   });
 }
 
-function authMod() {
+async function authMod() {
   let ignoreCDB = _.filter(columnDB.value, (column) => {
     return !/C|G/.test(column.type);
   });
@@ -1267,7 +838,7 @@ function authMod() {
   }
   if (!checkData()) {
     columnDialog.show = false;
-    if (signatures.length === 0) {
+    if (allSignNames.value.length === 0) {
       confirmDialog.show = true;
       nextTick(() => {
         changeStep('最後確認', 'process', 'success', 'success');
@@ -1275,11 +846,21 @@ function authMod() {
     } else {
       enableSignature.value = true;
       emptySignatures.value = [];
+      // 有啟用線上暫存才有邀請功能：進簽名步驟前先抓各格邀請狀態，
+      // 已邀請的格不建 canvas（rebuildSignatureUI 只放未邀請的格）
+      if (draftEnabled.value && !viewOnly.value) {
+        await refreshInvites();
+      }
+      rebuildSignatureUI(false);
       signatureDialog.show = true;
       nextTick(() => {
-        initSignaturePads(() => {
+        if (signatures.length > 0) {
+          initSignaturePads(() => {
+            changeStep('簽名確認', 'process', 'success', 'wait');
+          });
+        } else {
           changeStep('簽名確認', 'process', 'success', 'wait');
-        });
+        }
       });
     }
   } else {
@@ -1291,7 +872,109 @@ function nextSignature() {
   switchToNextSignature(signaturePad.value);
 }
 
+// 依邀請狀態重建本機簽名板：只有「未邀請」的格用 canvas 親簽。
+// 不動 useSignatures 內部——canvas 數量與 signatures.length 恆等，iPadOS 13 的時機處理不碰。
+// reinit=true 時（邀請狀態變化）重跑 initSignaturePads，已畫的簽名會被清掉需重簽
+function rebuildSignatureUI(reinit) {
+  let localNames = _.filter(allSignNames.value, (name) => {
+    return inviteStateFor(name).status === 'none';
+  });
+  resetSignatures();
+  addSignatures(localNames);
+  if (reinit && signatureDialog.show && localNames.length > 0) {
+    nextTick(() => {
+      initSignaturePads();
+    });
+  }
+}
+
+// ===== 簽名邀請的格別操作 =====
+async function inviteSlot(signName) {
+  let email;
+  try {
+    const answer = await ElMessageBox.prompt(
+      '受邀者會收到含連結與驗證碼的 Email，可在自己的裝置檢視唯讀問卷並簽署「' +
+        signName +
+        '」。發出邀請後這一格就不能在本機簽，且要等對方簽完你才能送出問卷；' +
+        '發出邀請會重建簽名板，其他格已畫的簽名需要重簽。',
+      '邀請他人遠端簽「' + signName + '」',
+      {
+        confirmButtonText: '寄出邀請信',
+        cancelButtonText: '取消',
+        inputPlaceholder: '受邀者的 Email',
+        inputPattern: /^\S+@\S+\.\S+$/,
+        inputErrorMessage: 'Email 格式錯誤',
+      }
+    );
+    email = answer.value;
+  } catch {
+    return; // 取消
+  }
+  const ok = await sendInviteRpc(signName, email.toString().trim());
+  if (ok) {
+    rebuildSignatureUI(true);
+  }
+}
+
+async function resendSlot(signName) {
+  // 同 email 重發：換新 token、舊連結立即失效；狀態仍是授權中，簽名板不用重建
+  await sendInviteRpc(signName, inviteStateFor(signName).email);
+}
+
+async function changeSlotEmail(signName) {
+  let email;
+  try {
+    const answer = await ElMessageBox.prompt(
+      '輸入新的受邀者 Email；舊的邀請連結與驗證碼會立即失效',
+      '更換「' + signName + '」的簽名者',
+      {
+        confirmButtonText: '寄出新邀請信',
+        cancelButtonText: '取消',
+        inputPlaceholder: '新受邀者的 Email',
+        inputPattern: /^\S+@\S+\.\S+$/,
+        inputErrorMessage: 'Email 格式錯誤',
+      }
+    );
+    email = answer.value;
+  } catch {
+    return;
+  }
+  await sendInviteRpc(signName, email.toString().trim());
+}
+
+// 撤回授權，在這個裝置簽名（簽好的簽名要撤會有二段確認，在 useInvites 內）
+async function revokeSlot(signName) {
+  const ok = await revokeInviteRpc(signName);
+  if (ok) {
+    rebuildSignatureUI(true);
+  }
+}
+
+async function refreshInviteStates() {
+  await refreshInvites();
+  rebuildSignatureUI(true);
+}
+
 function endSignature() {
+  if (pendingInviteNames.value.length > 0) {
+    ElMessage.error(
+      '「' +
+        pendingInviteNames.value.join('、') +
+        '」還在等待受邀者簽名，等對方簽完（按「重新整理邀請狀態」確認）或撤回授權改在本機簽，才能繼續送出'
+    );
+    nextTick(() => {
+      changeStep('簽名確認', 'error', 'success', 'wait');
+    });
+    return;
+  }
+  if (signatures.length === 0) {
+    // 全部簽名格都已由受邀者遠端完成
+    confirmDialog.show = true;
+    nextTick(() => {
+      changeStep('最後確認', 'process', 'success', 'wait');
+    });
+    return;
+  }
   emptySignatures.value = findEmptySignatures();
   if (emptySignatures.value.length === 0) {
     confirmDialog.show = true;
@@ -1306,6 +989,7 @@ function endSignature() {
 }
 
 function endView() {
+  authToken.value = '';
   for (let i = 0; i < authDB.value.length; i++) {
     authDB.value[i].value = '';
     authDB.value[i].status = '';
@@ -1405,6 +1089,14 @@ async function loginView() {
             changeStep('身分確認', 'error', 'wait', 'wait');
           });
         } else {
+          // 登入成功：改持有 token，清掉認證欄位值（身分證等個資不再駐留記憶體）。
+          // 主鍵欄位值保留——它是 localStorage 暫存的 key，也本來就會存在瀏覽器
+          authToken.value = sheetConfig.token || '';
+          for (let i = 0; i < authDB.value.length; i++) {
+            if (!/P/.test(authDB.value[i].type)) {
+              authDB.value[i].value = '';
+            }
+          }
           let currentAns = { uid: currentUID.value, queue: [] };
           let primaryKey = findPrimaryKey(authDB.value);
           if (primaryKey !== undefined) {
@@ -1431,79 +1123,7 @@ async function loginView() {
           if (sheet[0].randomQ) {
             columnDB.value = _.shuffle(columnDB.value);
           } //亂數欄位
-          for (let i = 0; i < columnDB.value.length; i++) {
-            let fileDetect = false;
-            let column = columnDB.value[i];
-            column.tid = uuidv4();
-            if (/F/.test(column.type)) {
-              if (column.group !== '') {
-                let groupConfig = column.group.split(':');
-                column.group = groupConfig[0];
-                column.uniGroup = false;
-                if (groupConfig.length > 1) {
-                  column.uniGroup = groupConfig[1] === 'U';
-                }
-              }
-              if (!/F/.test(column.format)) {
-                let columnIndex = _.findIndex(currentAns.queue, (item) => {
-                  return item.id === column.id;
-                });
-                if (columnIndex > -1) {
-                  column.value = currentAns.queue[columnIndex].val;
-                }
-              }
-              if (/F/.test(column.format)) {
-                // 檔案欄位：從 localStorage 載入已上傳的檔案資訊
-                let fileColumnIndex = _.findIndex(currentAns.queue, (item) => {
-                  return item.id === column.id && item.isFile;
-                });
-                if (fileColumnIndex > -1) {
-                  column.value = currentAns.queue[fileColumnIndex].val;
-                  column.lastInput = currentAns.queue[fileColumnIndex].url;
-                  column.status = '';
-                } else if (column.must) {
-                  column.status = '請至少選擇一個檔案';
-                  fileDetect = true;
-                }
-              } else if (/U/.test(column.format)) {
-                let selectionConfig = column.content.split('::');
-                let selections = _.uniq(selectionConfig[1].split(';'));
-                let selected = _.uniq(column.value.split(';'));
-                let newSelected = [];
-                for (let k = 0; k < selected.length; k++) {
-                  let checkSelect = _.filter(selections, (selection) => {
-                    return selection === selected[k];
-                  });
-                  if (checkSelect.length > 0) {
-                    newSelected.push(checkSelect[0]);
-                  }
-                }
-                column.value = _.join(newSelected, ';');
-              } else if (/L/.test(column.format)) {
-                let defaultConfig = [1, 10, 100];
-                let userConfig = column.content.split(';');
-                if (userConfig.length === 3) {
-                  defaultConfig = _.map(userConfig, (str) => {
-                    return parseInt(str);
-                  });
-                }
-                column.value = parseInt(column.value);
-                column.content = defaultConfig;
-              } else if (/X/.test(column.format)) {
-                let defaultConfig = ['', '', 2, 4];
-                let userConfig = column.content.split(';');
-                for (let k = 0; k < userConfig.length; k++) {
-                  if (userConfig[k] !== '') {
-                    defaultConfig[k] = parseInt(userConfig[k]);
-                  }
-                }
-                column.content = defaultConfig;
-              }
-            }
-            if (!fileDetect) {
-              column.status = '';
-            }
-          }
+          prepareColumnsForDisplay(columnDB.value, currentAns.queue);
           loginDialog.show = false;
           loginStatus.value = false;
           googleStatus.value = undefined;
@@ -1538,6 +1158,49 @@ async function loginView() {
   }
 }
 
+// token 逾時（倒數歸零或後端回 tokenExpired）：導回身分確認重新登入。
+// 已填內容不動——columnDB 與 localStorage 暫存都在，重新登入後會自動載回
+function handleTokenExpired() {
+  authToken.value = '';
+  columnDialog.show = false;
+  signatureDialog.show = false;
+  confirmDialog.show = false;
+  fileDrawer.show = false;
+  loginDialog.show = true;
+  loginStatus.value = false;
+  scriptError.value.message =
+    '登入已逾時，請重新驗證身分。你已填的內容都還在，重新登入後會自動載回（簽名需重簽）';
+  nextTick(() => {
+    changeStep('身分確認', 'error', 'wait', 'wait');
+  });
+}
+
+// 點倒數條手動續約：拿仍有效的 token 跟後端換一顆新的（重新計時 1 小時）
+async function renewAuthToken() {
+  let sheet = currentSheet.value;
+  if (sheet === null || authToken.value === '') {
+    return false;
+  }
+  try {
+    const result = await gasRun('renewToken', sheet.refer, sheet.record, authToken.value);
+    if (result && result.renewed && result.token) {
+      authToken.value = result.token;
+      ElMessage.success('已延長登入時間 1 小時');
+      return true;
+    }
+    if (result && result.tokenExpired) {
+      handleTokenExpired();
+      return false;
+    }
+    ElMessage.error(result && result.message ? result.message : '延長登入時間失敗');
+    return false;
+  } catch (err) {
+    console.error('renewToken failed', err);
+    ElMessage.error('延長登入時間失敗，請稍後再試');
+    return false;
+  }
+}
+
 async function sendMod() {
   if (!uploadingSheet.value) {
     uploadingSheet.value = true;
@@ -1553,13 +1216,18 @@ async function sendMod() {
           'writeRecord',
           currentSheet[0].refer,
           currentSheet[0].record,
-          plainClone(authDB.value),
+          authToken.value,
           plainClone(columnDB.value),
           enableModify.value,
           signatureBlobs,
           emailObj.value
         );
         uploadingSheet.value = false;
+        if (report.tokenExpired) {
+          uploadStatus.value = false;
+          handleTokenExpired();
+          return;
+        }
         saveSuccessed.value = report.status;
         requestCount.value.pkey = '';
         scriptError.value.message = report.errorLog.length > 0 ? report.errorLog.join(',') : '';
@@ -1573,10 +1241,11 @@ async function sendMod() {
           if (primaryKey !== undefined) {
             clearSubmitted(primaryKey.value, currentUID.value);
           }
-          // 正式送出成功後清掉雲端暫存（失敗不阻斷流程）；要在 authDB 清空前呼叫
+          // 正式送出成功後清掉雲端暫存（失敗不阻斷流程）；要在 token 清空前呼叫
           deleteDraftOnline(currentSheet[0]);
           columnDB.value = [];
           authDB.value = [];
+          authToken.value = '';
           enableModify.value = false;
         }
         writeTick.value = report.tick;
@@ -1605,105 +1274,59 @@ function reloadPage() {
 }
 
 // ===== 檔案上傳 =====
-function exceedLimit(file) {
-  ElMessage('只能接受一個檔案！');
-  currentFile.fileList = file;
-}
-
 function uploadFile(column) {
-  currentFile.id = column.id;
-  currentFile.name = column.name;
-  currentFile.maxSize = 1;
-  currentFile.mimeType = '';
-  currentFile.mimeAlt = '';
-  if (column.content !== '') {
-    let contentConfig = column.content.split(';');
-    if (contentConfig[0] !== '') {
-      currentFile.mimeAlt = contentConfig[0];
-    }
-    if (contentConfig[1] !== '') {
-      currentFile.mimeType = contentConfig[1];
-    }
-    if (contentConfig[2] !== '') {
-      currentFile.maxSize = parseInt(contentConfig[2]);
-    }
-  }
-  currentFile.fileList = [];
-  uploadErrors.value = '';
-  fileDialog.show = true;
+  fileDrawer.column = column;
+  fileDrawer.show = true;
 }
 
-function startUpload() {
-  let currentSheet = _.filter(sheets.value, (sheet) => {
-    return sheet.id === currentSID.value;
+// FileUploadDrawer 上傳成功後回寫 columnDB
+function applyFileUpload({ columnId, fileID, fileURL }) {
+  let column = _.filter(columnDB.value, (column) => {
+    return column.id === columnId;
   });
-  uploadErrors.value = '';
-  if (currentFile.fileList.length > 0) {
-    let firstList = currentFile.fileList[0];
-    let file = 'raw' in firstList ? firstList.raw : firstList;
-    const fr = new FileReader();
-    ElMessage('檔案編碼中！');
-    fr.onload = async function (e) {
-      const obj = {
-        filename: file.name,
-        mimeType: file.type,
-        bytes: [...new Int8Array(e.target.result)],
-      };
-      if (new RegExp(currentFile.mimeType, 'i').test(file.type)) {
-        if (file.size <= currentFile.maxSize * 1000000) {
-          ElMessage('檔案上傳中！');
-          uploadStatus.value = true;
-          try {
-            const report = await gasRun(
-              'saveFile',
-              currentSheet[0].refer,
-              currentSheet[0].record,
-              plainClone(authDB.value),
-              currentFile.id,
-              obj
-            );
-            if (report.status) {
-              let column = _.filter(columnDB.value, (column) => {
-                return column.id === currentFile.id;
-              });
-              if (column.length > 0) {
-                column[0].value = report.fileID;
-                column[0].lastInput = report.fileURL;
-                column[0].status = '';
-                uploadStatus.value = false;
-                fileDialog.show = false;
-                ElMessage('上傳成功！');
-              } else {
-                uploadErrors.value = '無法對應檔案！';
-                uploadStatus.value = false;
-              }
-            } else {
-              uploadErrors.value = _.join(report.errorLog, '、');
-              uploadStatus.value = false;
-            }
-          } catch (err) {
-            scriptError.value = err;
-            uploadStatus.value = false;
-          }
-        } else {
-          uploadErrors.value = '檔案超過大小限制！';
-        }
-      } else {
-        uploadErrors.value = '無法接受你的檔案格式！';
-      }
-    };
-    fr.readAsArrayBuffer(file);
+  if (column.length > 0) {
+    column[0].value = fileID;
+    column[0].lastInput = fileURL;
+    column[0].status = '';
+  } else {
+    ElMessage('無法對應檔案！');
+  }
+}
+
+// ===== 受邀簽名者入口 =====
+function openInviteeByCode() {
+  let code = inviteCodeInput.value.toString().trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(code)) {
+    ElMessage.error('驗證碼格式不對——應該是邀請信裡的一長串英數字，請完整複製後貼上');
+    return;
+  }
+  sheetsDialog.show = false;
+  inviteeDialogRef.value.open(code);
+}
+
+// 受邀者關閉簽名對話框：回問卷列表（邀請連結直接進入時列表還沒載過，補載）
+function handleInviteeClosed() {
+  inviteCodeInput.value = '';
+  if (sheets.value.length === 0) {
+    loadSheet();
+  } else {
+    sheetsDialog.show = true;
   }
 }
 
 // ===== 初始化 =====
 onMounted(() => {
-  colors.value = randomColor({
-    count: 30,
-    luminosity: 'dark',
-    format: 'rgb',
-  });
-  loadSheet();
+  // 邀請連結（?token=xxx，由後端 doGet 驗證格式後注入）：跳過問卷列表直接進簽名模式
+  const inviteToken =
+    typeof window.__SM_INVITE_TOKEN__ === 'string' ? window.__SM_INVITE_TOKEN__ : '';
+  if (inviteToken !== '') {
+    sheetsDialog.show = false;
+    nextTick(() => {
+      inviteeDialogRef.value.open(inviteToken);
+    });
+  } else {
+    loadSheet();
+  }
   setupOrientationListener();
 });
 </script>

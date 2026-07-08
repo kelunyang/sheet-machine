@@ -2,9 +2,32 @@
 
 ## 待處理
 
-### 5. 主題系統：SCSS 配色架構（參考 scoringSystem-cf，換用校徽色盤）
+### 5. 主題系統：SCSS 配色架構（參考 scoringSystem-cf，換用校徽色盤）✅
 
-**動機**：讓版面配色活潑一些。架構完全照搬
+**已於 2026-07-08 完成**：lint／64 個測試／build 全綠，主題變數與漸層均已進 dist。
+四層落地：`src/theme/colors.config.js`（單一配色來源 + getTagPalette/getThemeGradient）
+→ `vite.config.js` 的 `generateThemeScssPlugin`（buildStart 生成
+`src/styles/_theme-generated.scss`，已加入 .gitignore/.prettierignore）
+→ 手寫層 `src/styles/_theme.scss`（糖果漸層：dialog/drawer 標題列＋el-steps 底線＋
+danger 送出鈕；按鈕 hover 上浮微動效）→ `src/style.scss` 入口依序載入
+（index.js 改為在 element-plus css **之後** import，覆寫才吃得到）。
+
+**與計畫的差異**：
+1. 校徽綠採「加深」而非配黑字：success = `#008000`（白字 5.1:1），保住 EP 按鈕預設白字
+2. danger 選 `#C0392B` 珊瑚紅（白字 5.4:1）；並將 EP 的 `--el-color-error` 家族一併對齊
+   danger（el-alert type="error" 吃的是 error 色系不是 danger）
+3. warning 蜜桃橘另備深化色 `#A05A20`（`onLight`，對 light-9 底 5.0:1）：EP 淺色 alert 的
+   文字色＝語義色本身，蜜桃橘當文字不及格，`.el-alert--warning.is-light` 改吃深化色；
+   warning 按鈕文字也覆寫為深棕 `#4A2B12`（7.1:1）
+4. 「模板零改動」有一處例外：el-tag 的 `color` prop 只設底色，文字色需補 style 綁定，
+   問卷列表 tag 模板微調為 `tag.color.{background,text}` 物件
+5. EP 變數覆寫是整組色階：插件按 theme-chalk 公式（light-N = mix(白, 主色, N×10%)、
+   dark-2 = mix(黑, 主色, 20%)）生成 light-3/5/7/8/9 與 dark-2，hover/plain/disabled 才會跟著換
+
+**待人工驗收**：`npm run dev` 或部署 @HEAD 後人工檢視配色（奶油米底、深藍標題列漸層、
+tag 循環色、warning/danger 按鈕），實機驗證後再部署（比照慣例）。
+
+**原計畫內容**：讓版面配色活潑一些。架構完全照搬
 `/mnt/f/Development/scoringSystem-gas/scoringSystem-cf` 前端的主題系統，只切換配色。
 
 **參考架構（scoringSystem-cf 的四層，已研究過 2026-07-08）**：
@@ -41,11 +64,29 @@
 
 **驗證**：`npm run build` 後人工檢視 dist 配色；`npm run lint` 照舊。
 
-### 4. 重構：App.vue 元件抽取（不引入 Pinia）
+### 4. 重構：App.vue 元件抽取（不引入 Pinia）✅
 
-**動機**：App.vue 目前 1709 行，9 個 dialog/drawer 全部內聯。專案已是 Composition API，
-目標是把內聚度高的區塊抽成獨立元件，App.vue 回歸「狀態編排 + 對話框流程」定位（預估降到
-1100 行上下）。
+**已於 2026-07-08 完成**：App.vue 1709 → 1075 行，lint／64 個測試／build 全綠。
+抽出 ErrorAlert、MultiSelectDrawer（含介面改版）、FileUploadDrawer、TempTransferDrawers、
+StatDialog、LatestDialog；`dateConverter`/`downloadCSV` 下沉 `src/utils/formatters.js`
+（downloadCSV 改收 writeTick 參數）；`selectionMove` 下沉 `src/utils/multiSelect.js`
+（moveItems/moveItem/reorderItem + 14 個單元測試）。
+
+**與計畫的差異**：
+1. `selectionMove` 下沉時修掉原本 `foundIndexs.sort()` 字典序排序 bug（>10 個選項時
+   多選移動會亂序），改數值排序
+2. LatestDialog 的查詢結果原本與登入狀態共用同一個 `requestCount` ref，抽出後改為元件
+   內部 `queryResult`，不再互相污染
+3. `viewStat` 原本會改寫 App 層 `writeTick`（蓋掉登入畫面顯示的寫入時間），統計匯出的
+   時間戳改由 StatDialog 內部 `loadTick` 提供
+4. 元件自管錯誤落實：StatDialog／LatestDialog／FileUploadDrawer 的 RPC 錯誤顯示在元件內
+   ErrorAlert，不再寫 App 的 `scriptError`
+5. 多選介面改版直接以 el-drawer + `defineModel('show')` 實作（未沿用 CommentRankingTransfer
+   的中央全移按鈕；候選點一下即移入、已選區排名徽章＋↑↓✕＋拖曳、maxNum 上限、搜尋框、
+   768px 上下堆疊皆已實作）
+
+**待人工驗收**：手機尺寸 viewport 實測多選的點選／排序／上限／搜尋四個流程；
+實機驗證完整填答流程後再部署（比照 Phase 3 慣例）。
 
 **設計討論記錄（2026-07-08）**：
 - **不引入 Pinia**：元件樹只有兩層、無路由，`useDraft` 式「ref 依賴注入」已足夠；就算
@@ -58,25 +99,20 @@
   時機深度糾纏（SignatureDialog 還有 iPadOS 13 修過的 DOM 時機問題），風險報酬比不划算
 
 **抽取清單（依執行順序）**：
-- [ ] `src/components/ErrorAlert.vue`：重複 9 次的 `<el-alert title="發生錯誤">` 樣板，
+- [x] `src/components/ErrorAlert.vue`：重複的 `<el-alert title="發生錯誤">` 樣板，
       收 `message` prop（最小、立即被後續元件使用）
-- [ ] `src/utils/multiSelect.js` + `tests/multiSelect.test.js`：`selectionMove` 的置頂/
+- [x] `src/utils/multiSelect.js` + `tests/multiSelect.test.js`：`selectionMove` 的置頂/
       置底/上下移純陣列運算下沉為純函數 + 單元測試（index 操作密集最容易藏 bug）
-- [ ] `src/components/MultiSelectDrawer.vue`：multisDialog + `currentMulti` +
-      `multiSelect`/`filterMethod`/`selectionChanged`/`chooseSelection`/`endSelection`
-      （約 160 行）；開啟時收 column，關閉時 emit 選好的值，App 回寫 columnDB + `valField`
-      **⚠ 抽取時一併改版介面，見下方「多選介面改版」**
-- [ ] `src/components/FileUploadDrawer.vue`：fileDialog + `currentFile` +
-      `uploadFile`/`startUpload`/`exceedLimit`（約 140 行）；自己打 `gasRun('saveFile')`，
-      成功 emit `{ columnId, fileID, fileURL }`；`uploadErrors`/`uploadStatus` 轉元件內部狀態
-- [ ] `src/components/TempTransferDrawers.vue`：匯出+匯入兩個 drawer + 隱藏 file input +
-      `exportTemp`/`importTemp` 膠水（約 110 行；核心邏輯已在 useCrypto/tempQueue/
-      tempStorage）；匯入成功 emit 讓 App 更新 `tempFound`
-- [ ] `src/components/StatDialog.vue`、`src/components/LatestDialog.vue`：各約 40 行小對話
-      框，收 sheet prop 自己打 RPC；注意 `viewLatest` 目前經 `defineExpose` 保留供還原，
-      抽出後在新元件維持 expose
-- [ ] `dateConverter` / `downloadCSV` 被多個對話框共用，下沉 utils 純函數（`downloadCSV`
-      改收 `writeTick` 參數；`Papa` 來自 index.html CDN 全域，維持引用全域）
+- [x] `src/components/MultiSelectDrawer.vue`：開啟時收 column，關閉時 emit 選好的值，
+      App 回寫 columnDB + `valField`；抽取時一併改版介面（見下方「多選介面改版」）
+- [x] `src/components/FileUploadDrawer.vue`：自己打 `gasRun('saveFile')`，
+      成功 emit `{ columnId, fileID, fileURL }`；`uploadErrors`/上傳中狀態轉元件內部
+- [x] `src/components/TempTransferDrawers.vue`：匯出+匯入兩個 drawer + 隱藏 file input；
+      App 經 template ref 呼叫 `openExport()`/`openImport()`；匯入成功 emit 更新 `tempFound`
+- [x] `src/components/StatDialog.vue`、`src/components/LatestDialog.vue`：收 sheet prop
+      自己打 RPC、expose `open()`；App 的 `viewLatest` 改為 delegate 並維持 `defineExpose`
+- [x] `dateConverter` / `downloadCSV` 下沉 `src/utils/formatters.js`（`downloadCSV`
+      改收 `writeTick` 參數；`Papa` 維持引用 index.html CDN 全域）
 
 **多選介面改版（取代 el-transfer，解決手機板障礙；2026-07-08 定案方案 A）**：
 
@@ -108,7 +144,13 @@
 - 除多選介面改版外均為純搬移重構，不改任何邏輯；多選題驗收需在手機尺寸
   viewport 實測點選/排序/上限/搜尋四個流程
 
-### 3. 新功能：遠端多方簽名邀請機制
+### 3. 新功能：遠端多方簽名邀請機制 ✅
+
+**已於 2026-07-08 實作完成（未部署）**：詳細規格見 `plan.md` Phase 4、架構說明見
+`struct.md`「遠端多方簽名邀請機制」。lint／181 個測試／build 全綠；兩個競態防線
+（送出時 Lock 內重查列、撤回不信前端認知）都有單元測試覆蓋（tests/inviteRpc.test.js）。
+前置技術修復（簽名圖 base64 內嵌）一併完成。**待實機驗證**（兩台裝置實測完整狀態機、
+邀請信收發、`_invites` 分頁自動建立）後再部署。
 
 **動機**：目前簽名流程假設所有簽名者同時同地、輪流用同一台裝置簽完全部；如果簽名者分散在不同
 地方（例如學生+家長各自在不同地點），現在完全沒辦法處理——簽名只在最終送出時才轉成 PNG 傳給

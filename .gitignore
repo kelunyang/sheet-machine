@@ -10,3 +10,6 @@ appscript/*.css
 appscript/*.map
 .clasp.json
 appscript/.clasp.json
+
+# vite 建置時由 generateThemeScssPlugin 自動生成
+src/styles/_theme-generated.scss

@@ -1,0 +1,94 @@
+/**
+ * 主題視覺層：吃 _theme-generated.scss 的 CSS 變數，不寫死任何色碼
+ *
+ * - 糖果漸層落點：dialog/drawer 標題列、el-steps 步驟條、送出（danger）按鈕
+ * - 按鈕 hover 上浮 1px + 陰影微動效（參考 scoringSystem-cf 的 _buttons.scss）
+ * - 淺色語義色（warning 蜜桃橘）的深字修正
+ */
+
+body {
+  background-color: var(--sm-page-bg);
+}
+
+// ============================================================================
+// 糖果漸層：dialog / drawer 標題列
+// ============================================================================
+
+.el-dialog__header,
+.el-drawer__header {
+  background: var(--sm-primary-gradient);
+  color: var(--sm-primary-text);
+  padding: 14px 20px;
+  margin: 0;
+}
+
+.el-dialog__header .el-dialog__title,
+.el-drawer__header .el-drawer__title {
+  color: var(--sm-primary-text);
+  font-weight: bold;
+}
+
+// 標題列變深色後，右上關閉鈕要跟著轉白
+.el-dialog__headerbtn .el-dialog__close,
+.el-drawer__close-btn .el-drawer__close {
+  color: var(--sm-primary-text);
+}
+
+// ============================================================================
+// el-steps 步驟條：糖果漸層底線收邊
+// ============================================================================
+
+.el-steps {
+  padding: 12px 4px 16px;
+  margin-bottom: 12px;
+  border-bottom: 4px solid transparent;
+  border-image: var(--sm-primary-gradient) 1;
+}
+
+// ============================================================================
+// 按鈕：hover 上浮微動效 + 送出（danger）按鈕糖果漸層
+// ============================================================================
+
+.el-button {
+  transition: all 0.2s ease-in-out;
+
+  &:not(.is-disabled):hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+  }
+
+  &:not(.is-disabled):active {
+    transform: translateY(0);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
+  }
+}
+
+// 主要送出動作（type="danger"）用糖果漸層當視覺重點
+.el-button--danger:not(.is-plain):not(.is-text):not(.is-link):not(.is-disabled) {
+  background: var(--sm-danger-gradient);
+  border-color: var(--el-color-danger);
+
+  &:hover {
+    background: var(--sm-danger-gradient);
+    filter: brightness(1.1);
+  }
+}
+
+// ============================================================================
+// 淺色語義色的文字修正（蜜桃橘底需深棕字）
+// ============================================================================
+
+.el-button--warning {
+  --el-button-text-color: var(--sm-warning-text);
+  --el-button-hover-text-color: var(--sm-warning-text);
+  --el-button-active-text-color: var(--sm-warning-text);
+}
+
+// EP 淺色 alert 的文字色 = 語義色本身，蜜桃橘當文字不及格，換深化版
+.el-alert--warning.is-light {
+  color: var(--sm-warning-on-light);
+
+  .el-alert__title {
+    color: var(--sm-warning-on-light);
+  }
+}

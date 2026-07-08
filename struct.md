@@ -325,6 +325,59 @@ new SignaturePad(canvas, {
 | src/App.vue | authMod() 進入簽名流程、endSignature() 驗證、sendMod() 以 collectSignatures() 取得 PNG dataURL |
 | src/Code.js | 後端簽名上傳處理（writeRecord 內） |
 
+## 遠端多方簽名邀請機制（2026-07 Phase 4）
+
+簽名者分散兩地時，填寫者可對任一簽名格發 email 邀請；受邀者以 token 進入
+read-only 問卷、只簽自己那格（簽名即時存 Drive），填寫者回來檢查後才能正式送出。
+功能與線上暫存綁定：未設定 `draftSheetID` 則整個隱藏。
+
+### 兩種進入方式（權限分流）
+
+- **填寫者**：帳號密碼（或 Gmail）登入 → 完整填寫流程；簽名步驟中每格可發邀請
+- **受邀簽名者**：邀請信的 `?token=xxx` 連結（doGet regex 白名單驗證後注入
+  `window.__SM_INVITE_TOKEN__`）或首屏「我有簽名的驗證碼」手動貼上 →
+  `inviteeLogin(token)` 換發 session JWT → 只能檢視唯讀問卷 + 簽自己那格，
+  session token 帶 `invite` claim，被 `authByToken_` 一律拒絕（不能冒充填寫者）
+
+### `_invites` 分頁（存於 draftSheetID 試算表）
+
+一格一列（active row）模型：upsert key =（referSSID, 主鍵值, 簽名格名稱）。
+欄位 A-K：token（64 字元 hex）、referSSID、recordSSID、primaryValue、signName、
+email、expireAt(ms, = min(發出後7天, dueDate))、status（pending/signed；expired 為
+讀取時衍生不落地）、fileID、createdAt、updatedAt。
+
+### 狀態機
+
+```
+[未邀請] ──發邀請──────────────→ [授權中] ──受邀者簽完──→ [已簽名]
+[授權中] ──重發授權信──────────→ [授權中]（同 email，新 token，舊的失效）
+[授權中] ──更換簽名者Email───→ [授權中]（新 email，新 token，舊的失效）
+[授權中] ──撤回授權，在這個裝置簽名──→ [未邀請]（token 立即失效）
+[已簽名] ──撤回（二段確認 force）──→ [未邀請]（簽名檔進垃圾桶）
+```
+
+### RPC
+
+| RPC | 憑證 | 說明 |
+|------|------|------|
+| `sendInvite(refer, record, token, signName, email)` | 填寫者 JWT | 發=重發=換email 同一支（同列 upsert 新 token）；先強制 `saveDraftForInvite` 上雲 |
+| `revokeInvite(refer, record, token, signName, force)` | 填寫者 JWT | 見 signed 且 !force 不刪、回最新狀態讓前端二段確認 |
+| `listInvites(refer, record, token)` | 填寫者 JWT | 各格狀態；signed 附 base64 內嵌簽名圖 |
+| `inviteeLogin(token)` | 邀請 token | 驗證通過簽發受邀者 session JWT（exp = min(1hr, 邀請到期, dueDate)）+ read-only headers（已送出紀錄疊線上暫存草稿） |
+| `submitInviteSignature(sessionToken, blob)` | 受邀者 session JWT | Lock 內以 claims.invite 重查列後才收簽名（≤2MB PNG） |
+| `renewToken(refer, record, token)` | 兩者共用 | 受邀者路徑續約前重讀邀請列，exp 同樣被封頂 |
+
+### 競態防線（皆有單元測試覆蓋）
+
+1. **撤回 vs 受邀者送出**：兩支 RPC 的寫入路徑都在 ScriptLock 內重讀列後才動作
+2. **誤撤剛簽好的**：revoke 預設 force=false，伺服器見 signed 拒絕並回含內嵌圖的最新狀態
+3. **填寫者送出 vs 受邀者同時簽**：writeRecord 送出當下以 `resolveSignatureSources_`
+   重讀 invites——pending 整筆擋下、剛轉 signed 直接採用列上 fileID
+4. **偽造 fileID**：前端沒有傳 fileID 的通道，resolver 只認 `_invites` 列；
+   簽名圖內嵌一律走 `signatureDataUrl_`（私有函數，絕不做成收 fileID 的 RPC）
+
+送出成功後該使用者的全部邀請列會在 Lock 內清除（token 用畢即焚）。
+
 ## 檔案結構
 
 > 2026-07 Phase 3 拆分：App.vue 由 2600+ 行 Options API 轉為 `<script setup>` + composables。
@@ -335,22 +388,38 @@ sheet-machine/
 ├── src/
 │   ├── App.vue                    # 主元件（script setup）：狀態編排、對話框流程、GAS 呼叫
 │   ├── components/
-│   │   └── FormField.vue          # 單一問卷欄位（各 format 的輸入元件 + 驗證顯示）
+│   │   ├── FormField.vue          # 單一問卷欄位（各 format 的輸入元件 + 驗證顯示）
+│   │   ├── ErrorAlert.vue         # 統一的錯誤提示 alert
+│   │   ├── MultiSelectDrawer.vue  # 多選欄位的卡片式 transfer（手機適配）
+│   │   ├── FileUploadDrawer.vue   # 檔案上傳 drawer（自打 saveFile RPC）
+│   │   ├── TempTransferDrawers.vue # 匯出/匯入暫存檔 drawer
+│   │   ├── StatDialog.vue         # 填答率統計
+│   │   ├── LatestDialog.vue       # 最後填寫者查詢
+│   │   ├── JwtCountdownBar.vue    # 登入時效倒數條（fixed 頂端、<50% 點擊續約）
+│   │   └── InviteeSignDialog.vue  # 受邀簽名者完整流程（read-only 問卷 + 單格簽名）
 │   ├── composables/
 │   │   ├── useCrypto.js           # 匯出檔 AES-256-GCM 加解密（smv2 + 舊格式相容）
 │   │   ├── useGasRpc.js           # google.script.run 的 Promise 包裝（gasRun/plainClone）
-│   │   ├── useDraft.js            # 線上暫存：saveDraft/loadDraft/deleteDraft 前端邏輯
+│   │   ├── useDraft.js            # 線上暫存：save/load/delete + saveDraftForInvite
+│   │   ├── useInvites.js          # 簽名邀請：狀態查詢、發/重發/換email、撤回（含二段確認）
+│   │   ├── useJwtSession.js       # JWT 倒數 tick + 手動續約守衛
 │   │   ├── useSteps.js            # 頂部步驟條狀態機
 │   │   └── useSignatures.js       # 簽名板：SignaturePad 管理、比例檢查、旋轉重建
 │   ├── utils/
 │   │   ├── columnRules.js         # 欄位規則純函數：formatDetector、驗證、提示文字
+│   │   ├── columnPrep.js          # 登入後欄位整理（App.vue 與 InviteeSignDialog 共用）
 │   │   ├── tempQueue.js           # 暫存 queue 純邏輯：組裝、有效性判斷、還原
 │   │   ├── tempStorage.js         # localStorage 暫存存取層
+│   │   ├── multiSelect.js         # 多選已選區排序純函數
+│   │   ├── formatters.js          # dateConverter / downloadCSV
+│   │   ├── jwt.js                 # 前端 JWT 解碼（僅供 UI 倒數，不驗簽）
 │   │   └── markdown.js            # marked + DOMPurify（HTMLConverter）
+│   ├── theme/colors.config.js     # 主題配色單一來源（改色只改這裡）
+│   ├── styles/                    # _theme.scss 手寫層（_theme-generated.scss 為建置時生成）
 │   ├── Code.js                    # Google Apps Script 後端
 │   ├── index.js                   # Vue 進入點
-│   └── style.css                  # 樣式
-├── tests/                         # Vitest 單元測試（純函數 + Code.js chunk 邏輯）
+│   └── style.scss                 # 樣式入口
+├── tests/                         # Vitest 單元測試（純函數 + Code.js 以 stub 全域載入）
 ├── tools/                         # 管理者手動工具（不隨 clasp 部署，見 tools/README.md）
 ├── appscript/                     # clasp 部署目錄
 │   ├── Code.js                    # 複製自 src/
@@ -377,5 +446,11 @@ npm run gpush          # 複製檔案 + clasp push
 
 1. **身分驗證**: 使用 P 類型欄位 + A 類型欄位進行多重驗證
 2. **Google 帳號**: 支援 G 格式直接使用 Google 帳號驗證
-3. **匯出加密**: AES-256-GCM 加密，金鑰 = 主鍵值 + 使用者密碼
-4. **跨裝置匯入**: 需相同主鍵值 + 正確密碼才能解密
+3. **登入 JWT**: 驗證通過後簽發 1 小時 HS256 token，特權 RPC 只帶 token、
+   個資欄位值不再重傳；主鍵值一律由伺服器端判定
+4. **匯出加密**: AES-256-GCM 加密，金鑰 = 主鍵值 + 使用者密碼
+5. **跨裝置匯入**: 需相同主鍵值 + 正確密碼才能解密
+6. **簽名邀請**: 邀請 token 為 64 字元 hex（doGet 注入走 regex 白名單 +
+   JSON.stringify 雙保險）；受邀者 session JWT 帶 invite claim、不能打填寫者側 RPC；
+   簽名送出與撤回都在 ScriptLock 內重讀 `_invites` 列；簽名圖讀取只走伺服器端
+   查出的 fileID（無任意檔案讀取面）

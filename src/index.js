@@ -1,7 +1,8 @@
 import { createApp } from 'vue'
-import './style.css'
 import ElementPlus from 'element-plus'
 import 'element-plus/dist/index.css'
+// 主題覆寫需在 Element Plus 樣式之後載入才吃得到
+import './style.scss'
 import App from './App.vue'
 import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 
