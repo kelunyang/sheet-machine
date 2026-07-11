@@ -11,6 +11,7 @@ const gasGlobals = {
   Session: 'readonly',
   LockService: 'readonly',
   DriveApp: 'readonly',
+  CacheService: 'readonly',
   UrlFetchApp: 'readonly',
   Utilities: 'readonly',
   MailApp: 'readonly',

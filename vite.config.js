@@ -73,7 +73,8 @@ ${Object.entries(THEME_COLORS)
     return lines.join('\n')
   })
   .join('\n')}
-  --sm-page-bg: ${SURFACE_COLORS.page};
+  --sm-alert-bg: ${SURFACE_COLORS.alert.background};
+  --sm-alert-text: ${SURFACE_COLORS.alert.text};
 }
 `
       const outputDir = resolve(__dirname, 'src/styles')
@@ -85,7 +86,55 @@ ${Object.entries(THEME_COLORS)
   }
 }
 
+// 執行期由 CDN 供應的依賴：建置時標成 external（不打進 bundle），
+// 由下方注入的 import map 在瀏覽器端解析到 esm.sh。element-plus 帶 ?external=vue，
+// 讓它 import 裸名 "vue" 由同一份 import map 解析，全站共用單一 vue 實例。
+// @element-plus/icons-vue 未被 src 直接 import（僅 element-plus 內部相依），故不列入、
+// 由 esm.sh 的 element-plus build 自行內含。
+const CDN_IMPORT_MAP = {
+  imports: {
+    vue: 'https://esm.sh/vue@3.5.39',
+    'element-plus': 'https://esm.sh/element-plus@2.14.2?external=vue',
+    lodash: 'https://esm.sh/lodash@4.18.1',
+    dayjs: 'https://esm.sh/dayjs@1.11.21',
+    dompurify: 'https://esm.sh/dompurify@3.4.11',
+    marked: 'https://esm.sh/marked@18.0.5',
+    signature_pad: 'https://esm.sh/signature_pad@5.1.3',
+    uuid: 'https://esm.sh/uuid@14.0.1',
+  },
+}
+
+/**
+ * 建置時把 import map 注入 <head> 最前面（head-prepend），排在 singlefile 內聯的
+ * module script 之前，讓瀏覽器解析裸名 import。apply:'build' → dev 不注入
+ * （dev 由 Vite 從 node_modules 解析，不需 import map）。
+ */
+function cdnImportMapPlugin() {
+  return {
+    name: 'cdn-import-map',
+    apply: 'build',
+    transformIndexHtml: {
+      order: 'pre',
+      handler() {
+        return [
+          {
+            tag: 'script',
+            attrs: { type: 'importmap' },
+            children: JSON.stringify(CDN_IMPORT_MAP, null, 2),
+            injectTo: 'head-prepend',
+          },
+        ]
+      },
+    },
+  }
+}
+
 // https://vitejs.dev/config/
 export default defineConfig({
-  plugins: [generateThemeScssPlugin(), vue(), viteSingleFile()],
+  plugins: [generateThemeScssPlugin(), cdnImportMapPlugin(), vue(), viteSingleFile()],
+  build: {
+    rollupOptions: {
+      external: Object.keys(CDN_IMPORT_MAP.imports),
+    },
+  },
 })

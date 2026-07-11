@@ -96,8 +96,7 @@ export function useSignatures() {
   }
 
   // 簽名對話框開啟後的初始化：等 DOM 定位 → 量尺寸 → 重建每一塊簽名板
-  // onReady：量完尺寸後（進 resize 前）回呼，原本用來切步驟條狀態
-  function initSignaturePads(onReady) {
+  function initSignaturePads() {
     ElMessage('簽名模組準備中，請等待準備完成後再簽名！');
     if (resizeTimer !== undefined) {
       clearTimeout(resizeTimer);
@@ -108,9 +107,6 @@ export function useSignatures() {
       clearTimer = undefined;
     }
     clearTimer = setTimeout(() => {
-      if (onReady) {
-        onReady();
-      }
       let canvas = document.querySelector('canvas.signaturePad');
       signatureWidth.value = canvas.parentElement.clientWidth;
       signatureHeight.value = canvas.parentElement.clientHeight;

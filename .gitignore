@@ -13,3 +13,6 @@ appscript/.clasp.json
 
 # vite 建置時由 generateThemeScssPlugin 自動生成
 src/styles/_theme-generated.scss
+
+# demo/測試用試算表資料，不得進版控
+*.xlsx

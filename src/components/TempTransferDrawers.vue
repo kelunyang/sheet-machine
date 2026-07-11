@@ -6,7 +6,21 @@
     style="display: none"
     @change="onFileSelected"
   />
-  <el-drawer v-model="exportDrawer.show" title="匯出暫存答案" direction="btt" size="100%">
+  <el-drawer v-model="exportDrawer.show" title="匯出暫存答案" direction="btt" size="100%" :with-header="false" body-class="drawer-flow-body">
+    <div class="drawer-flow-title">
+      <span>匯出暫存答案</span>
+      <el-button text circle aria-label="關閉" @click="exportDrawer.show = false">
+        <el-icon><i class="fa-solid fa-xmark"></i></el-icon>
+      </el-button>
+    </div>
+    <JwtCountdownBar
+      v-if="jwtVisible"
+      class="drawer-sticky-top"
+      :remaining-time="remainingTime"
+      :session-percentage="sessionPercentage"
+      :renewing="renewing"
+      @renew="emit('renew')"
+    />
     <el-alert title="注意事項" type="warning" show-icon>
       <template #default>
         <span style="font-size: 1.2em">
@@ -36,7 +50,21 @@
       </el-button>
     </el-space>
   </el-drawer>
-  <el-drawer v-model="importDrawer.show" title="匯入暫存答案" direction="btt" size="100%">
+  <el-drawer v-model="importDrawer.show" title="匯入暫存答案" direction="btt" size="100%" :with-header="false" body-class="drawer-flow-body">
+    <div class="drawer-flow-title">
+      <span>匯入暫存答案</span>
+      <el-button text circle aria-label="關閉" @click="importDrawer.show = false">
+        <el-icon><i class="fa-solid fa-xmark"></i></el-icon>
+      </el-button>
+    </div>
+    <JwtCountdownBar
+      v-if="jwtVisible"
+      class="drawer-sticky-top"
+      :remaining-time="remainingTime"
+      :session-percentage="sessionPercentage"
+      :renewing="renewing"
+      @renew="emit('renew')"
+    />
     <el-alert title="注意事項" type="info" show-icon>
       <template #default>
         <span style="font-size: 1.2em">
@@ -80,6 +108,7 @@ import {
 } from '../utils/tempQueue';
 import { getQueueAnswers, findAnsIndex, replaceAns } from '../utils/tempStorage';
 import { encrypt, decrypt } from '../composables/useCrypto';
+import JwtCountdownBar from './JwtCountdownBar.vue';
 
 const props = defineProps({
   authDb: { type: Array, required: true },
@@ -91,10 +120,15 @@ const props = defineProps({
   sid: { type: String, default: '' },
   // 問卷名稱（匯出檔名用）
   sheetName: { type: String, default: '' },
+  // sticky JWT 倒數條（Phase 9）：狀態由 App 的 useJwtSession 下傳，續約事件上拋
+  jwtVisible: { type: Boolean, default: false },
+  remainingTime: { type: Number, default: 0 },
+  sessionPercentage: { type: Number, default: 0 },
+  renewing: { type: Boolean, default: false },
 });
 
-// 匯入成功時 emit，App 更新 tempFound
-const emit = defineEmits(['imported']);
+// 匯入成功時 emit imported（App 更新 tempFound）；renew = JWT 條點擊續約
+const emit = defineEmits(['imported', 'renew']);
 
 const exportDrawer = reactive({ show: false, password: '' });
 const importDrawer = reactive({ show: false, password: '', file: null });

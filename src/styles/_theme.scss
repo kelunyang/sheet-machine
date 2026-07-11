@@ -6,15 +6,12 @@
  * - 淺色語義色（warning 蜜桃橘）的深字修正
  */
 
-body {
-  background-color: var(--sm-page-bg);
-}
+// 頁面底色維持白（Phase 7：全螢幕 drawer 蓋住 body，底色留白即可）
 
 // ============================================================================
-// 糖果漸層：dialog / drawer 標題列
+// 糖果漸層：drawer 標題列（Phase 7 全站 drawer 化後，el-dialog 選擇器已移除）
 // ============================================================================
 
-.el-dialog__header,
 .el-drawer__header {
   background: var(--sm-primary-gradient);
   color: var(--sm-primary-text);
@@ -22,14 +19,12 @@ body {
   margin: 0;
 }
 
-.el-dialog__header .el-dialog__title,
 .el-drawer__header .el-drawer__title {
   color: var(--sm-primary-text);
   font-weight: bold;
 }
 
 // 標題列變深色後，右上關閉鈕要跟著轉白
-.el-dialog__headerbtn .el-dialog__close,
 .el-drawer__close-btn .el-drawer__close {
   color: var(--sm-primary-text);
 }
@@ -75,7 +70,7 @@ body {
 }
 
 // ============================================================================
-// 淺色語義色的文字修正（蜜桃橘底需深棕字）
+// 淺色語義色的文字修正（蜜桃橘底需深棕字；warning 按鈕已退場，留著防未來誤用）
 // ============================================================================
 
 .el-button--warning {
@@ -84,11 +79,65 @@ body {
   --el-button-active-text-color: var(--sm-warning-text);
 }
 
-// EP 淺色 alert 的文字色 = 語義色本身，蜜桃橘當文字不及格，換深化版
-.el-alert--warning.is-light {
-  color: var(--sm-warning-on-light);
+// ============================================================================
+// el-alert 棕化（Phase 7）：info/warning 提示用奶油米底＋深棕字；
+// success/error（儲存成功/失敗）保留語意色，成功失敗的顏色直覺不犧牲
+// ============================================================================
 
-  .el-alert__title {
-    color: var(--sm-warning-on-light);
+.el-alert--info.is-light,
+.el-alert--warning.is-light {
+  --el-alert-bg-color: var(--sm-alert-bg);
+  background-color: var(--sm-alert-bg);
+  color: var(--sm-alert-text);
+
+  .el-alert__title,
+  .el-alert__description {
+    color: var(--sm-alert-text);
+  }
+}
+
+// ============================================================================
+// drawer 內 sticky 頂欄（Phase 9）：JWT 倒數條／填問卷工具列共用。
+// el-drawer__body 是捲動容器，sticky top:0 釘在捲動容器頂端。主流程 btt drawer
+// 改 with-header=false、標題改成 body 內第一行（.drawer-flow-title）跟內容一起
+// 捲走——body 從視窗頂端開始，捲動時 sticky 條就會一路升到全頁 y=0。
+// 負 margin 吃掉 body 左右 padding 做滿版，捲動時兩側不露出底下內容
+// ============================================================================
+
+.drawer-sticky-top {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  margin-left: calc(-1 * var(--el-drawer-padding-primary, 20px));
+  margin-right: calc(-1 * var(--el-drawer-padding-primary, 20px));
+}
+
+// 主流程（with-header=false）drawer 的 body：padding-top 歸零。瀏覽器把 sticky
+// 的釘住範圍用捲動容器的 padding 內縮（headless Chromium 實測：留 20px
+// padding-top 時 sticky 條永遠停在 y=20 釘不到頂），左右/下 padding 保留。
+// 各 drawer 以 body-class="drawer-flow-body" 掛上，ttb 輔助面板不受影響
+.el-drawer__body.drawer-flow-body {
+  padding-top: 0;
+}
+
+// 取代 el-drawer 原生 header 的標題列：沿用糖果漸層視覺（同上方 .el-drawer__header），
+// 負 margin 吃掉 body 左/右 padding 滿版（body 已無 padding-top，上緣天然貼齊
+// 視窗頂端）；flex 兩端對齊留給需要關閉鈕的 drawer（匯出/匯入暫存）放 ✕
+.drawer-flow-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: var(--sm-primary-gradient);
+  color: var(--sm-primary-text);
+  font-weight: bold;
+  font-size: 1rem;
+  line-height: 1.5;
+  padding: 14px 20px;
+  margin: 0 calc(-1 * var(--el-drawer-padding-primary, 20px)) 16px;
+
+  // 關閉鈕（text button）跟著標題列轉白
+  .el-button {
+    color: var(--sm-primary-text);
   }
 }

@@ -1,27 +1,38 @@
 <template>
-  <JwtCountdownBar
-    v-if="authToken !== ''"
-    :remaining-time="remainingTime"
-    :session-percentage="sessionPercentage"
-    :renewing="renewing"
-    @renew="handleRenewClick"
-  />
-  <el-dialog
+  <el-drawer
     v-model="columnDialog.show"
-    :fullscreen="columnDialog.fullscreen"
-    :show-close="false"
+    direction="btt"
+    size="100%"
+    :with-header="false"
+    body-class="drawer-flow-body"
     :title="'你正在' + viewTip + '問卷：' + currentQuery">
-      <el-steps :active="stepIndicator" finish-status="finish" align-center>
-        <el-step :title="step.title" v-for="(step, index) in availableSteps" :key="index" :status="step.status" />
-      </el-steps>
+      <div class="drawer-flow-title">你正在{{ viewTip }}問卷：{{ currentQuery }}</div>
+      <LifecycleTimeline
+        :start-at="currentSheet ? currentSheet.createdAt : 0"
+        :end-at="currentSheet ? currentSheet.dueDate : 0"
+        start-label="問卷建立"
+        end-label="問卷結束"
+        ended-text="已經無法填寫"
+        quiet
+      />
+      <FormToolbar
+        :show-jwt="authToken !== ''"
+        :remaining-time="remainingTime"
+        :session-percentage="sessionPercentage"
+        :renewing="renewing"
+        :temp-found="tempFound"
+        :draft-enabled="draftEnabled"
+        :draft-saving="draftSaving"
+        :view-only="viewOnly"
+        :has-last-submit="lastSubmit.length > 0"
+        v-model:enable-modify="enableModify"
+        @renew="handleRenewClick"
+        @save-draft="saveDraftOnline()"
+        @export-temp="tempTransfer.openExport()"
+        @import-temp="importTempFromToolbar()"
+        @download-result="downloadResult()"
+      />
       <el-space direction="vertical" fill wrap style="width: 100%">
-        <el-alert title="請注意" type="warning" show-icon v-if="expired <= (10*60)">
-          <template #default>
-            <span style="font-size: 1.5em">
-              問卷{{ expired > 0 ? "即將在" + expired + "秒後過期，屆時將無法送出！" : "已經無法填寫了" }}
-            </span>
-          </template>
-        </el-alert>
         <el-alert title="問卷提示" type="warning" show-icon v-if="alertWords !== ''" v-show="scriptError.message === ''">
           <template #default>
             <span style="font-size: 1.5em" v-html="HTMLConverter(alertWords)"></span>
@@ -38,42 +49,11 @@
             </span>
           </template>
         </el-alert>
-        <el-row :gutter="10" v-if="enableModify" style="margin-top: 10px;">
-          <el-col :span="draftEnabled ? 8 : 12">
-            <el-button
-              style="width: 100%"
-              size="large"
-              type="success"
-              :disabled="!tempFound"
-              @click="tempTransfer.openExport()">
-              匯出暫存答案
-            </el-button>
-          </el-col>
-          <el-col :span="draftEnabled ? 8 : 12">
-            <el-button
-              style="width: 100%"
-              size="large"
-              type="warning"
-              @click="tempTransfer.openImport()">
-              匯入暫存答案
-            </el-button>
-          </el-col>
-          <el-col v-if="draftEnabled" :span="8">
-            <el-button
-              style="width: 100%"
-              size="large"
-              type="primary"
-              :disabled="!tempFound"
-              :loading="draftSaving"
-              @click="saveDraftOnline()">
-              線上暫存
-            </el-button>
-          </el-col>
-        </el-row>
-        <el-switch v-if="!viewOnly" class="ma1" size="large" active-text="我要修改問卷" v-model="enableModify"></el-switch>
+        <FieldTimeline v-if="!viewOnly" :columns="columnDB" />
         <FormField
           v-for="dataColumn in columnDB"
           :key="dataColumn.tid"
+          :id="'formfield-' + dataColumn.tid"
           :column="dataColumn"
           :column-db="columnDB"
           :enable-modify="enableModify"
@@ -81,76 +61,91 @@
           @upload-file="uploadFile"
           @multi-select="multiSelect"
         />
-        <el-button v-if="!viewOnly" class="ma1 pa2 xs12" size="large" type="danger" v-on:click="authMod()" :disabled="checkData()">
-          {{ !checkData() ? "送出修改" : "請確認必填欄位都已填，並且不可以有格式錯誤（紅字）才可以送出喔！" }}
-        </el-button>
-        <el-button v-if="tempFound" class="ma1 pa2 xs12" size="large" type="primary" v-on:click="clearTemp()">清除未送出的暫存答案（會重新載入問卷）</el-button>
-        <el-button v-else class="ma1 pa2 xs12" size="large" type="danger" v-on:click="endView()">
-          檢視完畢
-        </el-button>
-        <el-button v-if="lastSubmit.length > 0" class="ma1 pa2 xs12" size="large" type="primary" v-on:click="downloadResult()">下載你上次填寫的結果</el-button>
       </el-space>
-  </el-dialog>
-  <el-dialog
-    :show-close="false"
+      <template #footer>
+        <div class="formFooter">
+          <div class="formFooter__hint" v-if="!viewOnly && !enableModify">
+            問卷目前唯讀，想修改請點上方「目前唯讀，點我修改」按鈕解鎖
+          </div>
+          <div class="formFooter__hint" v-else-if="!viewOnly && checkData()">
+            請確認必填欄位都已填，並且不可以有格式錯誤（紅字）才可以送出喔！
+          </div>
+          <div class="formFooter__buttons">
+            <el-button v-if="tempFound" size="large" type="danger" v-on:click="clearTemp()">清除暫存答案（會重新載入問卷）</el-button>
+            <el-button v-else size="large" type="info" v-on:click="endView()">檢視完畢</el-button>
+            <el-button v-if="!viewOnly" size="large" type="primary" v-on:click="authMod()" :disabled="!enableModify || checkData()" :loading="submitChecking">{{ submitButtonText }}</el-button>
+          </div>
+        </div>
+      </template>
+  </el-drawer>
+  <el-drawer
+    :with-header="false"
+    body-class="drawer-flow-body"
     v-model="sheetsDialog.show"
-    :fullscreen="sheetsDialog.fullscreen"
+    direction="btt"
+    size="100%"
     title="可供檢視／填答的表單">
+    <div class="drawer-flow-title">可供檢視／填答的表單</div>
+    <JwtCountdownBar
+      v-if="authToken !== ''"
+      class="drawer-sticky-top"
+      :remaining-time="remainingTime"
+      :session-percentage="sessionPercentage"
+      :renewing="renewing"
+      @renew="handleRenewClick"
+    />
     <ErrorAlert :message="scriptError.message" />
     <el-space direction="vertical" fill wrap style="width: 100%">
+      <el-alert
+        title="重要公告"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="ma1 xs12"
+        v-if="announcement !== ''">
+        <div class="breakword" v-html="HTMLConverter(announcement)"></div>
+      </el-alert>
       <div class="xs12" style="font-size: 1em; color: #666; text-align: center;" v-if="sheets.length === 0">無資料</div>
-      <el-table :data="sheets" stripe style="width: 100%" v-else>
-        <el-table-column prop="dueDate" label="表單名稱" sortable>
-          <template #default="scope">
-            <el-tag
-              v-for="tag in scope.row.tags"
-              :key="tag.id"
-              :color="tag.color.background"
-              :style="{ margin: '1px', color: tag.color.text, borderColor: tag.color.background }"
-              effect="dark"
-            >
-              {{ tag.name }}
-            </el-tag>
-            <span style="font-weight: bold">{{ scope.row.name }}</span><br/>
-            <span v-if="scope.row.writeAllowed">填寫至：{{scope.row.dueDate === 0 ? "不開放" : dateConverter(scope.row.dueDate) }}</span><br/>
-            <span v-if="scope.row.writeAllowed">檢視至：{{ dateConverter(scope.row.viewDate) }}</span>
-            <span v-if="!scope.row.writeAllowed">本問卷暫時關閉</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="">
-          <template #default="scope">
-            <div class="buttonBlock">
-            <el-button class="ma1 pa2" size="large" type="primary" v-on:click="openSheet(scope.row.id)" :disabled="!scope.row.writeAllowed">{{ viewCheck(scope.row) ? "檢視" : "填寫&檢視" }}表單</el-button>
-            </div>
-          </template>
-        </el-table-column>
-      </el-table>
-      <el-divider>我有簽名的驗證碼（我只是簽名者之一）</el-divider>
-      <el-input
-        v-model="inviteCodeInput"
-        size="large"
-        placeholder="貼上邀請信中的驗證碼，即可檢視問卷並簽名"
-        clearable
-      >
-        <template #append>
-          <el-button v-on:click="openInviteeByCode()">進入簽名</el-button>
-        </template>
-      </el-input>
-      <div class="footerText">Developer: <a class="cleanLink" href="mailto:kelunyang@outlook.com">Kelunyang</a>@LKSH 2023 <a style="color:#CCC" target="_blank" href="https://github.com/kelunyang/sheet-machine" >GITHUB</a></div>
+      <SheetCard
+        v-for="sheet in sheets"
+        :key="sheet.id"
+        :sheet="sheet"
+        @open="openSheet(sheet.id)"
+      />
+      <el-button class="ma1 pa2 xs12" size="large" type="info" v-on:click="inviteCodeDialog.show = true">
+        我有簽名邀請碼（我只是簽名者之一）
+      </el-button>
+      <AppFooter />
     </el-space>
-  </el-dialog>
-  <el-dialog
-    :show-close="false"
+  </el-drawer>
+  <el-drawer
+    :with-header="false"
+    body-class="drawer-flow-body"
     v-model="signatureDialog.show"
-    :fullscreen="signatureDialog.fullscreen"
+    direction="btt"
+    size="100%"
     :title="'簽名確認（本表單共需' + allSignNames.length + '組簽名）'">
-    <el-steps :active="stepIndicator" finish-status="finish" align-center>
-      <el-step :title="step.title" v-for="(step, index) in availableSteps" :key="index" :status="step.status" />
-    </el-steps>
+    <div class="drawer-flow-title">簽名確認（本表單共需{{ allSignNames.length }}組簽名）</div>
+    <SignatureToolbar
+      :show-jwt="authToken !== ''"
+      :remaining-time="remainingTime"
+      :session-percentage="sessionPercentage"
+      :renewing="renewing"
+      :signature-count="signatures.length"
+      :current-index="currentSignature"
+      :can-invite="draftEnabled && !viewOnly"
+      :invite-busy="inviteBusy"
+      :has-invites="hasInviteCards"
+      @renew="handleRenewClick"
+      @next="nextSignature()"
+      @clear="clearSignature()"
+      @invite="inviteSlot(signatureTip)"
+      @refresh="refreshInviteStates()"
+    />
     <el-alert title="簽名不得為空" type="error" show-icon v-if="emptySignatures.length > 0">
       <template #default>
         <span style="font-size: 1.5em">
-          {{ emptySignatures.join("、") }}的簽名不得留空，否則無法繼續提交問卷！（你忘記按「簽下一個」？）
+          {{ emptySignatures.join("、") }}的簽名不得留空，否則無法繼續提交問卷！（你忘記按上方的「下一個簽名」？）
         </span>
       </template>
     </el-alert>
@@ -174,33 +169,52 @@
       <template v-for="name in allSignNames" :key="'invite-' + name">
         <el-card v-if="inviteStateFor(name).status !== 'none'" shadow="never">
           <template #header>
-            <span style="font-weight: bold; font-size: 1.2em">「{{ name }}」的簽名</span>
-            <el-tag
-              style="margin-left: 8px"
-              :type="inviteStateFor(name).status === 'signed' ? 'success' : inviteStateFor(name).status === 'expired' ? 'danger' : 'warning'">
-              {{ inviteStateFor(name).status === 'signed' ? '已簽名' : inviteStateFor(name).status === 'expired' ? '邀請已過期' : '授權中' }}
-            </el-tag>
+            <div class="inviteCardHeader">
+              <div class="inviteCardHeader__title">
+                <span style="font-weight: bold; font-size: 1.2em">「{{ name }}」的簽名</span>
+                <el-tag
+                  :type="inviteStateFor(name).status === 'signed' ? 'success' : inviteStateFor(name).status === 'expired' ? 'danger' : 'warning'">
+                  {{ inviteStateFor(name).status === 'signed' ? '已簽名' : inviteStateFor(name).status === 'expired' ? '邀請已過期' : '授權中' }}
+                </el-tag>
+              </div>
+              <!-- 已簽名格只有 2 顆操作，攤平不做單項 dropdown；pending/expired 攤平主行動、其餘收進「更多 ▾」 -->
+              <div class="inviteCardHeader__actions" v-if="inviteStateFor(name).status === 'signed'">
+                <el-button size="large" type="primary" :loading="inviteBusy" v-on:click="resendSlot(name)">
+                  簽名有問題？作廢舊簽名重發
+                </el-button>
+                <el-button size="large" type="danger" :loading="inviteBusy" v-on:click="revokeSlot(name)">
+                  撤回這個簽名，在本機重簽
+                </el-button>
+              </div>
+              <div class="inviteCardHeader__actions" v-else>
+                <el-button size="large" type="primary" :loading="inviteBusy" v-on:click="resendSlot(name)">
+                  重發授權信
+                </el-button>
+                <el-dropdown trigger="click" @command="(command) => onInviteCommand(command, name)">
+                  <el-button size="large" type="info" :loading="inviteBusy">
+                    更多<el-icon class="el-icon--right"><i class="fa-solid fa-chevron-down"></i></el-icon>
+                  </el-button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item command="change">更換簽名者Email</el-dropdown-item>
+                      <el-dropdown-item command="revoke" divided>撤回授權，在這個裝置簽名</el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
+              </div>
+            </div>
           </template>
           <div v-if="inviteStateFor(name).status === 'signed'">
             <img :src="inviteStateFor(name).image" :alt="name + '的遠端簽名'" class="savedSignatureImg" />
-            <div class="captionWord">已由受邀者（{{ inviteStateFor(name).email }}）遠端簽署完成</div>
-            <el-button class="ma1" size="large" type="danger" :loading="inviteBusy" v-on:click="revokeSlot(name)">
-              撤回這個簽名，在這個裝置重簽
-            </el-button>
+            <div class="captionWord">已由受邀者（{{ inviteStateFor(name).email }}）遠端簽署完成，這一格會直接使用這個簽名送出</div>
           </div>
           <div v-else>
             <div class="captionWord">
-              已邀請 {{ inviteStateFor(name).email }}（{{ inviteStateFor(name).status === 'expired' ? '已於' : '有效至' }}{{ dateConverter(inviteStateFor(name).expireAt) }}{{ inviteStateFor(name).status === 'expired' ? '過期' : '' }}），等待對方簽名中；對方簽完之前你無法送出問卷
+              已邀請 {{ inviteStateFor(name).email }}（{{ inviteStateFor(name).status === 'expired' ? '已於' : '有效至' }}{{ dateConverter(inviteStateFor(name).expireAt) }}{{ inviteStateFor(name).status === 'expired' ? '過期' : '' }}），等待對方簽名中；對方簽完之前你無法送出問卷。對方簽好後，請你按最上方的「更新邀請狀態」載入
             </div>
-            <el-button class="ma1" size="large" type="primary" :loading="inviteBusy" v-on:click="resendSlot(name)">重發授權信</el-button>
-            <el-button class="ma1" size="large" type="warning" :loading="inviteBusy" v-on:click="changeSlotEmail(name)">更換簽名者Email</el-button>
-            <el-button class="ma1" size="large" type="danger" :loading="inviteBusy" v-on:click="revokeSlot(name)">撤回授權，在這個裝置簽名</el-button>
           </div>
         </el-card>
       </template>
-      <el-button v-if="hasInviteCards" class="ma1 pa1 xs12" size="large" type="info" :loading="inviteBusy" v-on:click="refreshInviteStates()">
-        重新整理邀請狀態（受邀者簽完了嗎？）
-      </el-button>
       <template v-if="signatures.length > 0">
         <el-alert :title="'你正在簽第' + (currentSignature + 1) + '組簽名，本機共' + signatures.length + '組'" type="warning" show-icon>
           <template #default>
@@ -221,29 +235,37 @@
             <canvas class="signaturePad" :width="signatureWidth" :height="signatureHeight" />
           </el-carousel-item>
         </el-carousel>
-        <el-button v-if="signatures.length > 1" class="ma1 pa1 xs12" size="large" type="primary" v-on:click="nextSignature()">簽下一組（共{{ signatures.length }}組），到最後一個時會回到第一個</el-button>
-        <el-button class="ma1 pa1 xs12" size="large" type="success" v-on:click="clearSignature()">清除{{ signatureTip }}的簽名</el-button>
-        <el-button v-if="draftEnabled && !viewOnly" class="ma1 pa1 xs12" size="large" type="warning" :loading="inviteBusy" v-on:click="inviteSlot(signatureTip)">
-          「{{ signatureTip }}」不在現場？用Email邀請他遠端簽名
-        </el-button>
       </template>
       <el-alert v-else-if="pendingInviteNames.length === 0 && allSignNames.length > 0" title="全部簽名已完成" type="success" show-icon>
         <template #default>
           <span style="font-size: 1.5em">所有簽名格都已完成（含遠端簽名），請按下方按鈕繼續</span>
         </template>
       </el-alert>
-      <el-button class="ma1 pa2 xs12" size="large" type="danger" v-on:click="endSignature()" :disabled="signatureSubmitStatus.isDisabled">{{ signatureSubmitStatus.message }}</el-button>
-      <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="reverseBody()">剛剛輸入的有誤，回去修改</el-button>
     </el-space>
-  </el-dialog>
-  <el-dialog
-    :show-close="false"
+    <template #footer>
+      <div class="formFooter">
+        <div class="formFooter__buttons">
+          <el-button size="large" type="primary" v-on:click="reverseBody()">剛剛輸入的有誤，回去修改</el-button>
+          <el-button size="large" type="danger" v-on:click="endSignature()" :disabled="signatureSubmitStatus.isDisabled">{{ signatureSubmitStatus.message }}</el-button>
+        </div>
+      </div>
+    </template>
+  </el-drawer>
+  <el-drawer
+    :with-header="false"
+    body-class="drawer-flow-body"
     v-model="loginDialog.show"
-    :fullscreen="loginDialog.fullscreen"
+    direction="btt"
+    size="100%"
     :title="'確認身分以' + viewTip + '問卷：'+currentQuery">
-    <el-steps :active="stepIndicator" finish-status="finish" align-center>
-      <el-step :title="step.title" v-for="(step, index) in availableSteps" :key="index" :status="step.status" />
-    </el-steps>
+    <div class="drawer-flow-title">確認身分以{{ viewTip }}問卷：{{ currentQuery }}</div>
+    <LifecycleTimeline
+      :start-at="currentSheet ? currentSheet.createdAt : 0"
+      :end-at="currentSheet ? currentSheet.dueDate : 0"
+      start-label="問卷建立"
+      end-label="問卷結束"
+      ended-text="已經無法填寫"
+    />
     <el-alert title="確認身分中" type="info" show-icon v-if="loginStatus">
       <template #default>
         <span style="font-size: 1.5em">
@@ -255,13 +277,6 @@
       <template #default>
         <span style="font-size: 1.5em">
           {{ googleStatus === '' ? '你還沒登入Google帳號吧？開個新分頁登入之後重新整理本頁就可以了' : '目前登入的Gmail帳號是：' + googleStatus }}
-        </span>
-      </template>
-    </el-alert>
-    <el-alert title="請注意" type="warning" show-icon v-if="expired <= (10*60)">
-      <template #default>
-        <span style="font-size: 1.5em">
-          問卷{{ expired > 0 ? "即將在" + expired + "秒後過期，屆時將無法送出！" : "已經無法填寫了" }}
         </span>
       </template>
     </el-alert>
@@ -321,9 +336,9 @@
       <el-button v-if="saveSuccessed" class="ma1 pa2 xs12" size="large" type="success" v-on:click="downloadResult()">下載你剛剛填寫的結果</el-button>
       <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="viewStat()" v-if="!loginStatus">查看填答率統計 </el-button>
       <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="sendContact()" v-show="!loginStatus" v-if="contactEmail !== ''">Email給問卷負責人</el-button>
-      <div class="footerText">Developer: <a class="cleanLink" href="mailto:kelunyang@outlook.com">Kelunyang</a>@LKSH 2023 <a style="color:#CCC" target="_blank" href="https://github.com/kelunyang/sheet-machine" >GITHUB</a></div>
+      <AppFooter />
     </el-space>
-  </el-dialog>
+  </el-drawer>
   <FileUploadDrawer
     v-model:show="fileDrawer.show"
     :column="fileDrawer.column"
@@ -341,12 +356,9 @@
     v-model="confirmDialog.show"
     title="確定要送出了嗎？"
     direction="ttb"
-    show-close="false"
+    :show-close="false"
     size="60%"
   >
-    <el-steps :active="stepIndicator" finish-status="finish" align-center>
-      <el-step :title="step.title" v-for="(step, index) in availableSteps" :key="index" :status="step.status" />
-    </el-steps>
     <el-alert title="上傳中" type="info" show-icon v-if="uploadStatus">
       <template #default>
         <span style="font-size: 1.5em">
@@ -373,6 +385,66 @@
       <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="reverseBody()" v-if="!uploadStatus">剛剛輸入的有誤，回去修改</el-button>
     </el-space>
   </el-drawer>
+  <el-drawer
+    v-model="inviteCodeDialog.show"
+    title="我有簽名邀請碼（我只是簽名者之一）"
+    direction="ttb"
+    :show-close="false"
+    size="60%"
+    @close="handleInviteCodeClosed"
+  >
+    <el-space direction="vertical" fill wrap style="width: 100%">
+      <template v-if="!inviteOtpStep">
+        <el-input
+          v-model="inviteCodeInput"
+          size="large"
+          placeholder="貼上邀請信中的邀請碼；系統會再寄一組 6 位數驗證碼到受邀信箱"
+          clearable
+        />
+        <el-button class="ma1 pa2 xs12" size="large" type="primary" :loading="inviteChecking" v-on:click="confirmInviteCode()">確認邀請碼</el-button>
+      </template>
+      <template v-else>
+        <el-alert title="驗證碼已寄出" type="info" show-icon :closable="false">
+          <template #default>
+            <span style="font-size: 1.5em">
+              系統已寄一組 6 位數驗證碼到 {{ inviteMaskedEmail }}（10 分鐘內有效）。
+              請查收信箱（含垃圾信件匣），輸入驗證碼後即可檢視問卷並簽名。
+            </span>
+          </template>
+        </el-alert>
+        <PinCodeInput
+          ref="invitePinRef"
+          v-model="inviteOtpInput"
+          :length="6"
+          :pin-group-size="3"
+          input-mode="numeric"
+          :disabled="inviteVerifying"
+          @complete="verifyInviteOtp()"
+        />
+        <el-button
+          class="ma1 pa2 xs12"
+          size="large"
+          type="primary"
+          :loading="inviteVerifying"
+          :disabled="!/^\d{6}$/.test(inviteOtpInput.trim())"
+          v-on:click="verifyInviteOtp()"
+        >
+          送出驗證碼
+        </el-button>
+        <el-button
+          class="ma1 pa2 xs12"
+          size="large"
+          type="info"
+          :loading="inviteResending"
+          :disabled="inviteResendCooldown > 0"
+          v-on:click="sendInviteOtp(true)"
+        >
+          {{ inviteResendCooldown > 0 ? '重寄驗證碼（' + inviteResendCooldown + ' 秒後可重寄）' : '重寄驗證碼' }}
+        </el-button>
+      </template>
+      <el-button class="ma1 pa2 xs12" size="large" type="info" v-on:click="inviteCodeDialog.show = false">取消</el-button>
+    </el-space>
+  </el-drawer>
   <TempTransferDrawers
     ref="tempTransfer"
     :auth-db="authDB"
@@ -380,21 +452,36 @@
     :uid="currentUID"
     :sid="currentSID"
     :sheet-name="currentQuery"
+    :jwt-visible="authToken !== ''"
+    :remaining-time="remainingTime"
+    :session-percentage="sessionPercentage"
+    :renewing="renewing"
     @imported="tempFound = true"
+    @renew="handleRenewClick"
   />
   <LatestDialog ref="latestDialogRef" :sheet="currentSheet" :pkey-name="pkeyName" />
   <StatDialog ref="statDialogRef" :sheet="currentSheet" :sheet-name="currentQuery" />
   <InviteeSignDialog ref="inviteeDialogRef" @closed="handleInviteeClosed" />
+  <ConfirmDrawer />
+  <LoadingGame v-if="loadingGameVisible" />
 </template>
 
 <script setup>
 import { ref, reactive, computed, watch, onMounted, nextTick } from 'vue';
-import { ElMessage, ElMessageBox } from 'element-plus';
+import { ElMessage } from 'element-plus';
+import { drawerPrompt } from './composables/useConfirmDrawer';
 import dayjs from 'dayjs';
 import { v4 as uuidv4 } from 'uuid';
 import _ from 'lodash';
 import { getTagPalette } from './theme/colors.config.js';
 import FormField from './components/FormField.vue';
+import FormToolbar from './components/FormToolbar.vue';
+import SignatureToolbar from './components/SignatureToolbar.vue';
+import AppFooter from './components/AppFooter.vue';
+import SheetCard from './components/SheetCard.vue';
+import FieldTimeline from './components/FieldTimeline.vue';
+import LifecycleTimeline from './components/LifecycleTimeline.vue';
+import ConfirmDrawer from './components/ConfirmDrawer.vue';
 import ErrorAlert from './components/ErrorAlert.vue';
 import MultiSelectDrawer from './components/MultiSelectDrawer.vue';
 import FileUploadDrawer from './components/FileUploadDrawer.vue';
@@ -403,6 +490,8 @@ import LatestDialog from './components/LatestDialog.vue';
 import StatDialog from './components/StatDialog.vue';
 import JwtCountdownBar from './components/JwtCountdownBar.vue';
 import InviteeSignDialog from './components/InviteeSignDialog.vue';
+import PinCodeInput from './components/PinCodeInput.vue';
+import LoadingGame from './components/LoadingGame.vue';
 import { dateConverter, downloadCSV } from './utils/formatters';
 import { htmlConverter } from './utils/markdown';
 import {
@@ -416,11 +505,11 @@ import { prepareColumnsForDisplay } from './utils/columnPrep';
 import { buildTempQueue, hasFilledData } from './utils/tempQueue';
 import { upsertQueue, clearQueue, clearSubmitted, loadOrCreateAns } from './utils/tempStorage';
 import { gasRun, plainClone } from './composables/useGasRpc';
-import { useSteps } from './composables/useSteps';
 import { useSignatures } from './composables/useSignatures';
 import { useDraft } from './composables/useDraft';
 import { useInvites } from './composables/useInvites';
 import { useJwtSession } from './composables/useJwtSession';
+import { useLoadingGame, beginLoading } from './composables/useLoadingGame';
 
 // ===== 基本狀態 =====
 const tempFound = ref(false);
@@ -453,6 +542,8 @@ const authDB = ref([]);
 const authToken = ref('');
 const enableModify = ref(false);
 const sheets = ref([]);
+// 問卷列表頁重要公告（Markdown 原文，後端 getAnnouncement 供應，空字串＝不顯示）
+const announcement = ref('');
 const tagPalette = getTagPalette();
 const requestCount = ref({ pkey: '', modified: false, length: 0, lastTick: 0 });
 
@@ -466,11 +557,15 @@ const emailObj = reactive({
 });
 
 // 對話框開關
-const sheetsDialog = reactive({ show: true, fullscreen: true });
-const loginDialog = reactive({ show: false, fullscreen: true });
-const columnDialog = reactive({ show: false, fullscreen: true });
-const signatureDialog = reactive({ show: false, fullscreen: true });
-const confirmDialog = reactive({ show: false, fullscreen: true });
+// Phase 7：主流程全部改用 btt 100% el-drawer，fullscreen 欄位隨 el-dialog 一起退場
+// 送出修改後、進簽名步驟前的邀請狀態查詢中（按鈕 loading，drawer 保持開啟）
+const submitChecking = ref(false);
+const sheetsDialog = reactive({ show: true });
+const loginDialog = reactive({ show: false });
+const columnDialog = reactive({ show: false });
+const signatureDialog = reactive({ show: false });
+const confirmDialog = reactive({ show: false });
+const inviteCodeDialog = reactive({ show: false });
 const multiDrawer = reactive({ show: false, column: null });
 const fileDrawer = reactive({ show: false, column: null });
 
@@ -481,11 +576,23 @@ const statDialogRef = ref(null); // StatDialog
 const signaturePad = ref(null); // el-carousel
 const inviteeDialogRef = ref(null); // InviteeSignDialog
 
-// 受邀簽名者入口：首屏手動貼驗證碼（邀請信也提供 ?token= 連結直接進入）
+// 受邀簽名者入口：首屏手動貼邀請碼（?token= 直連入口保留，但邀請信不再附連結
+// ——GAS 網址會觸發 outlook.com 等的釣魚過濾，連結由填寫者自行分享）。
+// 邀請碼確認與 email OTP 驗證都在 inviteCodeDialog 同一個 drawer 內完成，
+// OTP 通過才開 InviteeSignDialog（開啟時問卷內容已就緒）
 const inviteCodeInput = ref('');
+const inviteOtpStep = ref(false); // OTP 已寄出，drawer 切到驗證碼輸入
+const inviteOtpInput = ref('');
+const invitePinRef = ref(null); // PinCodeInput（清空重試時 reset + 聚焦第一格）
+const inviteMaskedEmail = ref('');
+const inviteChecking = ref(false); // 確認邀請碼＋寄 OTP 中
+const inviteVerifying = ref(false); // inviteeLogin 驗證中
+const inviteResending = ref(false); // 重寄 OTP 中
+const inviteResendCooldown = ref(0);
+let inviteCooldownTimer = null;
+let enteringInvitee = false; // OTP 通過的轉場旗標：drawer @close 時不要導回列表
 
 // ===== composables =====
-const { stepIndicator, availableSteps, changeStep, viewStep } = useSteps();
 const {
   signatures,
   currentSignature,
@@ -511,7 +618,6 @@ const {
   saveDraftOnline,
   saveDraftForInvite,
   checkOnlineDraft,
-  deleteDraftOnline,
 } = useDraft({
   sheets,
   currentSID,
@@ -527,6 +633,8 @@ const { remainingTime, sessionPercentage, renewing, handleRenewClick } = useJwtS
   onRenew: renewAuthToken,
   onExpired: handleTokenExpired,
 });
+// 8-bit loading game（Phase 8）：RPC 等待時浮出遊戲卡，visible 由 beginLoading 計數器驅動
+const { loadingGameVisible } = useLoadingGame();
 const {
   inviteStates,
   inviteBusy,
@@ -578,6 +686,12 @@ const hasInviteCards = computed(() => {
   return _.some(allSignNames.value, (name) => inviteStateFor(name).status !== 'none');
 });
 
+// 填寫 drawer footer 主按鈕：有簽名格的表在按鈕文案預告下一步是簽名（Phase 13，
+// el-steps 退役後「後面還有簽名」的預告搬到這裡）
+const submitButtonText = computed(() => {
+  return allSignNames.value.length > 0 ? '完成填寫，前往簽名' : '送出修改';
+});
+
 // 還在等受邀者簽的格（含過期）：送出前必須清空——重發、等對方簽完、或撤回改本機簽
 const pendingInviteNames = computed(() => {
   return _.filter(allSignNames.value, (name) => {
@@ -601,6 +715,12 @@ watch(
   },
   { deep: true }
 );
+
+// 匯入會回寫欄位值，從工具列匯入時自動解鎖成修改模式，匯入完使用者才看得到值進了欄位
+function importTempFromToolbar() {
+  enableModify.value = true;
+  tempTransfer.value.openImport();
+}
 
 function clearTemp() {
   let primaryKey = findPrimaryKey(authDB.value);
@@ -641,12 +761,6 @@ function checkSend() {
   }
 }
 
-function viewCheck(sheet) {
-  let now = dayjs().valueOf();
-  if (sheet.dueDate <= now) return true;
-  return false;
-}
-
 function valField(column) {
   validateColumn(column, columnDB.value);
 }
@@ -681,9 +795,14 @@ function downloadResult() {
 
 // ===== 問卷列表 =====
 async function loadSheet() {
-  ElMessage('問卷列表載入中，請稍後');
+  // loading 進度交給遊戲卡的 label 顯示，不再另發 toast
+  const endLoading = beginLoading('問卷列表載入中');
   try {
-    const list = await gasRun('getQList');
+    const [list, announce] = await Promise.all([
+      gasRun('getQList'),
+      gasRun('getAnnouncement'),
+    ]);
+    announcement.value = typeof announce === 'string' ? announce : '';
     scriptError.value.message = '';
     for (let i = 0; i < list.length; i++) {
       let tags = list[i].name.match(/\[[^\]]+\]/g);
@@ -707,8 +826,31 @@ async function loadSheet() {
     authToken.value = '';
     resetSignatures();
     sheetsDialog.show = true;
+    consumeSheetDeepLink(list);
   } catch (err) {
     scriptError.value = err;
+  } finally {
+    endLoading();
+  }
+}
+
+// ===== 問卷深連結（?sheet=<referSSID>，由後端 doGet 驗證格式後注入）=====
+// 一次性旗標：onMounted 填入，首次載入列表後比對消費
+let pendingSheetRefer = '';
+
+function consumeSheetDeepLink(list) {
+  if (pendingSheetRefer === '') {
+    return;
+  }
+  const refer = pendingSheetRefer;
+  pendingSheetRefer = '';
+  const match = _.find(list, (item) => item.refer === refer);
+  if (match === undefined) {
+    ElMessage.warning('找不到連結指定的問卷（可能已下架或連結有誤），請從列表選擇');
+  } else if (!match.writeAllowed) {
+    ElMessage.warning('連結指定的問卷目前關閉中，有問題請洽管理員');
+  } else {
+    openSheet(match.id);
   }
 }
 
@@ -734,23 +876,9 @@ async function openSheet(sid) {
       writeAllowed.value = sheet[0].writeAllowed;
       contactEmail.value = sheet[0].email;
       addSignatures(sheet[0].signatures);
-      if (expired.value <= 0) {
-        viewStep('輸入資料', false);
-        if (now < viewDate.value) {
-          viewOnly.value = true;
-          enableModify.value = false;
-          viewStep('檢視資料', true);
-          viewStep('最後確認', false);
-        }
-      } else {
-        viewStep('輸入資料', true);
-        viewStep('檢視資料', false);
-        viewStep('最後確認', true);
-      }
-      if (signatures.length > 0) {
-        viewStep('簽名確認', true);
-      } else {
-        viewStep('簽名確認', false);
+      if (expired.value <= 0 && now < viewDate.value) {
+        viewOnly.value = true;
+        enableModify.value = false;
       }
       for (let i = 0; i < headers.length; i++) {
         headers[i].tid = uuidv4();
@@ -772,9 +900,6 @@ async function openSheet(sid) {
       writeTick.value = 0;
       loginDialog.show = true;
       sheetsDialog.show = false;
-      nextTick(() => {
-        changeStep('身分確認', 'process', 'wait', 'wait');
-      });
     } catch (err) {
       scriptError.value = err;
     }
@@ -792,6 +917,10 @@ function viewStat() {
 }
 
 // ===== 驗證與流程控制 =====
+// 送出鈕的 disable 故意只看已寫入的 status、不對 value 做即時驗證：
+// el-input 系的 change 要 blur/Enter 才觸發、檔案上傳與郵遞區號的值是程式塞入不走 change，
+// Element Plus 給不了可靠的即時驗證時機。所以流程是「按一次送出→authMod 預檢全標紅
+// →自動捲到第一個錯→按鈕才 disable」，不要改成對 value 即時檢測。
 function checkData() {
   let ignoreCDB = _.filter(columnDB.value, (column) => {
     return !/C|G/.test(column.type);
@@ -824,12 +953,12 @@ function reverseBody() {
   confirmDialog.show = false;
   signatureDialog.show = false;
   columnDialog.show = true;
-  nextTick(() => {
-    changeStep('輸入資料', 'process', 'success', 'wait');
-  });
 }
 
 async function authMod() {
+  if (submitChecking.value) {
+    return;
+  }
   let ignoreCDB = _.filter(columnDB.value, (column) => {
     return !/C|G/.test(column.type);
   });
@@ -837,34 +966,49 @@ async function authMod() {
     valField(ignoreCDB[i]);
   }
   if (!checkData()) {
-    columnDialog.show = false;
     if (allSignNames.value.length === 0) {
+      columnDialog.show = false;
       confirmDialog.show = true;
-      nextTick(() => {
-        changeStep('最後確認', 'process', 'success', 'success');
-      });
     } else {
       enableSignature.value = true;
       emptySignatures.value = [];
       // 有啟用線上暫存才有邀請功能：進簽名步驟前先抓各格邀請狀態，
-      // 已邀請的格不建 canvas（rebuildSignatureUI 只放未邀請的格）
+      // 已邀請的格不建 canvas（rebuildSignatureUI 只放未邀請的格）。
+      // RPC 要在填寫 drawer 還開著時等完（按鈕轉 loading）——先關 drawer 再等，
+      // 使用者會盯著兩個 drawer 都關閉的空白畫面好幾秒
       if (draftEnabled.value && !viewOnly.value) {
-        await refreshInvites();
+        submitChecking.value = true;
+        const endLoading = beginLoading('查詢簽名邀請狀態中');
+        try {
+          await refreshInvites();
+        } finally {
+          submitChecking.value = false;
+          endLoading();
+        }
       }
+      columnDialog.show = false;
       rebuildSignatureUI(false);
       signatureDialog.show = true;
       nextTick(() => {
         if (signatures.length > 0) {
-          initSignaturePads(() => {
-            changeStep('簽名確認', 'process', 'success', 'wait');
-          });
-        } else {
-          changeStep('簽名確認', 'process', 'success', 'wait');
+          initSignaturePads();
         }
       });
     }
   } else {
-    ElMessage('資料送出前預格式檢查失敗，請檢查每個欄位下的錯誤訊息');
+    // ignoreCDB 從 columnDB 過濾而來，順序即畫面順序，第一個 status 非空的就是最上方的錯誤欄位
+    let errorColumns = _.filter(ignoreCDB, (column) => {
+      return column.status !== '';
+    });
+    ElMessage.error(
+      '你有' + errorColumns.length + '個欄位格式有誤，自動滑到第一個錯誤的欄位，請仔細檢查'
+    );
+    if (errorColumns.length > 0) {
+      let target = document.getElementById('formfield-' + errorColumns[0].tid);
+      if (target) {
+        target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }
   }
 }
 
@@ -892,11 +1036,9 @@ function rebuildSignatureUI(reinit) {
 async function inviteSlot(signName) {
   let email;
   try {
-    const answer = await ElMessageBox.prompt(
-      '受邀者會收到含連結與驗證碼的 Email，可在自己的裝置檢視唯讀問卷並簽署「' +
-        signName +
-        '」。發出邀請後這一格就不能在本機簽，且要等對方簽完你才能送出問卷；' +
-        '發出邀請會重建簽名板，其他格已畫的簽名需要重簽。',
+    const answer = await drawerPrompt(
+      '受邀者會收到含邀請碼的 Email（信裡不附網址，請自行把本表單網址告知對方）。' +
+        '發出後這一格改由對方簽，你要等對方簽完才能送出；且會重建簽名板，其他已畫的簽名需重簽。',
       '邀請他人遠端簽「' + signName + '」',
       {
         confirmButtonText: '寄出邀請信',
@@ -904,6 +1046,7 @@ async function inviteSlot(signName) {
         inputPlaceholder: '受邀者的 Email',
         inputPattern: /^\S+@\S+\.\S+$/,
         inputErrorMessage: 'Email 格式錯誤',
+        size: '60%',
       }
     );
     email = answer.value;
@@ -917,15 +1060,17 @@ async function inviteSlot(signName) {
 }
 
 async function resendSlot(signName) {
-  // 同 email 重發：換新 token、舊連結立即失效；狀態仍是授權中，簽名板不用重建
+  // 同 email 重發：換新 token、舊邀請碼立即失效。pending 格直接重發；
+  // signed 格（簽名有問題請對方重簽）會在 useInvites 內二段確認後作廢舊簽名。
+  // 兩種來源狀態都不在本機 canvas 清單裡，簽名板不用重建
   await sendInviteRpc(signName, inviteStateFor(signName).email);
 }
 
 async function changeSlotEmail(signName) {
   let email;
   try {
-    const answer = await ElMessageBox.prompt(
-      '輸入新的受邀者 Email；舊的邀請連結與驗證碼會立即失效',
+    const answer = await drawerPrompt(
+      '輸入新的受邀者 Email；舊的邀請碼會立即失效',
       '更換「' + signName + '」的簽名者',
       {
         confirmButtonText: '寄出新邀請信',
@@ -950,6 +1095,16 @@ async function revokeSlot(signName) {
   }
 }
 
+// 邀請卡 header「更多 ▾」dropdown 的 command 分發（pending/expired 才有此 dropdown，
+// 主行動「重發授權信」已攤平成獨立按鈕，這裡只處理次要的換 email／撤回）
+function onInviteCommand(command, signName) {
+  if (command === 'change') {
+    changeSlotEmail(signName);
+  } else if (command === 'revoke') {
+    revokeSlot(signName);
+  }
+}
+
 async function refreshInviteStates() {
   await refreshInvites();
   rebuildSignatureUI(true);
@@ -962,29 +1117,16 @@ function endSignature() {
         pendingInviteNames.value.join('、') +
         '」還在等待受邀者簽名，等對方簽完（按「重新整理邀請狀態」確認）或撤回授權改在本機簽，才能繼續送出'
     );
-    nextTick(() => {
-      changeStep('簽名確認', 'error', 'success', 'wait');
-    });
     return;
   }
   if (signatures.length === 0) {
     // 全部簽名格都已由受邀者遠端完成
     confirmDialog.show = true;
-    nextTick(() => {
-      changeStep('最後確認', 'process', 'success', 'wait');
-    });
     return;
   }
   emptySignatures.value = findEmptySignatures();
   if (emptySignatures.value.length === 0) {
     confirmDialog.show = true;
-    nextTick(() => {
-      changeStep('最後確認', 'process', 'success', 'wait');
-    });
-  } else {
-    nextTick(() => {
-      changeStep('簽名確認', 'error', 'success', 'wait');
-    });
   }
 }
 
@@ -996,9 +1138,6 @@ function endView() {
   }
   columnDialog.show = false;
   loginDialog.show = true;
-  nextTick(() => {
-    changeStep('身分確認', 'process', 'wait', 'wait');
-  });
 }
 
 // ===== 後端互動 =====
@@ -1061,9 +1200,6 @@ async function loginGmail(column) {
     loginStatus.value = false;
     googleStatus.value = undefined;
     scriptError.value = err;
-    nextTick(() => {
-      changeStep('身分確認', 'error', 'wait', 'wait');
-    });
   }
 }
 
@@ -1074,6 +1210,7 @@ async function loginView() {
     });
     loginStatus.value = true;
     if (sheet.length > 0) {
+      const endLoading = beginLoading('確認身分中');
       try {
         const sheetConfig = await gasRun(
           'readRecord',
@@ -1085,9 +1222,6 @@ async function loginView() {
         if (!sheetConfig) {
           scriptError.value.message = sheet[0].loginfailTip;
           loginStatus.value = false;
-          nextTick(() => {
-            changeStep('身分確認', 'error', 'wait', 'wait');
-          });
         } else {
           // 登入成功：改持有 token，清掉認證欄位值（身分證等個資不再駐留記憶體）。
           // 主鍵欄位值保留——它是 localStorage 暫存的 key，也本來就會存在瀏覽器
@@ -1138,21 +1272,13 @@ async function loginView() {
           if (draftEnabled.value && !viewOnly.value) {
             checkOnlineDraft(sheet[0]);
           }
-          nextTick(() => {
-            if (viewOnly.value) {
-              changeStep('檢視資料', 'process', 'success', 'wait');
-            } else {
-              changeStep('輸入資料', 'process', 'success', 'wait');
-            }
-          });
         }
       } catch (err) {
         loginStatus.value = false;
         googleStatus.value = undefined;
         scriptError.value = err;
-        nextTick(() => {
-          changeStep('身分確認', 'error', 'wait', 'wait');
-        });
+      } finally {
+        endLoading();
       }
     }
   }
@@ -1170,9 +1296,6 @@ function handleTokenExpired() {
   loginStatus.value = false;
   scriptError.value.message =
     '登入已逾時，請重新驗證身分。你已填的內容都還在，重新登入後會自動載回（簽名需重簽）';
-  nextTick(() => {
-    changeStep('身分確認', 'error', 'wait', 'wait');
-  });
 }
 
 // 點倒數條手動續約：拿仍有效的 token 跟後端換一顆新的（重新計時 1 小時）
@@ -1211,6 +1334,7 @@ async function sendMod() {
     if (currentSheet.length > 0) {
       let signatureBlobs = collectSignatures();
       uploadStatus.value = true;
+      const endLoading = beginLoading('資料上傳中');
       try {
         const report = await gasRun(
           'writeRecord',
@@ -1241,8 +1365,8 @@ async function sendMod() {
           if (primaryKey !== undefined) {
             clearSubmitted(primaryKey.value, currentUID.value);
           }
-          // 正式送出成功後清掉雲端暫存（失敗不阻斷流程）；要在 token 清空前呼叫
-          deleteDraftOnline(currentSheet[0]);
+          // 純 append 模型（Phase 17）：雲端草稿永不刪除，送出後重新登入仍會跳暫存提示
+          // （文案已註明「線上暫存不代表最終結果」），由使用者自行選擇忽略
           columnDB.value = [];
           authDB.value = [];
           authToken.value = '';
@@ -1252,16 +1376,13 @@ async function sendMod() {
         loginDialog.show = true;
         nextTick(() => {
           uploadStatus.value = false;
-          if (saveSuccessed.value) {
-            changeStep('最後確認', 'success', 'success', 'success');
-          } else {
-            changeStep('最後確認', 'error', 'success', 'success');
-          }
         });
       } catch (err) {
         uploadingSheet.value = false;
         scriptError.value = err;
         uploadStatus.value = false;
+      } finally {
+        endLoading();
       }
     }
   }
@@ -1293,20 +1414,138 @@ function applyFileUpload({ columnId, fileID, fileURL }) {
   }
 }
 
-// ===== 受邀簽名者入口 =====
-function openInviteeByCode() {
-  let code = inviteCodeInput.value.toString().trim().toLowerCase();
-  if (!/^[a-f0-9]{64}$/.test(code)) {
-    ElMessage.error('驗證碼格式不對——應該是邀請信裡的一長串英數字，請完整複製後貼上');
+// ===== 受邀簽名者入口（邀請碼 + email OTP 二段驗證）=====
+const INVALID_INVITE_MESSAGE =
+  '這個邀請碼無效，或邀請已過期／被撤回。請聯絡填寫者重新發送邀請，或確認你完整複製了邀請碼';
+
+function startInviteCooldown(seconds) {
+  stopInviteCooldown();
+  inviteResendCooldown.value = Math.max(0, Math.ceil(seconds));
+  if (inviteResendCooldown.value === 0) {
     return;
   }
-  sheetsDialog.show = false;
-  inviteeDialogRef.value.open(code);
+  inviteCooldownTimer = setInterval(() => {
+    inviteResendCooldown.value -= 1;
+    if (inviteResendCooldown.value <= 0) {
+      stopInviteCooldown();
+    }
+  }, 1000);
+}
+
+function stopInviteCooldown() {
+  if (inviteCooldownTimer !== null) {
+    clearInterval(inviteCooldownTimer);
+    inviteCooldownTimer = null;
+  }
+  inviteResendCooldown.value = 0;
+}
+
+// 邀請碼 → 寄一次性驗證碼。首次確認與「重寄驗證碼」共用；後端有 60 秒節流兜底，
+// 剛寄過（例如 ?token= 直連後 reload）回 cooldownSeconds，沿用上一組驗證碼繼續倒數
+async function sendInviteOtp(isResend) {
+  const busy = isResend ? inviteResending : inviteChecking;
+  if (busy.value || (isResend && inviteResendCooldown.value > 0)) {
+    return;
+  }
+  const code = inviteCodeInput.value.toString().trim().toLowerCase();
+  busy.value = true;
+  try {
+    const result = await gasRun('requestInviteOtp', code);
+    if (!result) {
+      inviteOtpStep.value = false;
+      ElMessage.error(INVALID_INVITE_MESSAGE);
+      return;
+    }
+    if (result.success) {
+      inviteMaskedEmail.value = result.maskedEmail;
+      inviteOtpStep.value = true;
+      startInviteCooldown(60);
+      if (isResend) {
+        ElMessage.success('驗證碼已重寄');
+      }
+    } else if (typeof result.cooldownSeconds === 'number') {
+      inviteMaskedEmail.value = result.maskedEmail || inviteMaskedEmail.value;
+      inviteOtpStep.value = true;
+      startInviteCooldown(result.cooldownSeconds);
+    } else {
+      inviteOtpStep.value = false;
+      ElMessage.error(result.message || '驗證碼寄送失敗，請稍後再試');
+    }
+  } catch (err) {
+    ElMessage.error(err && err.message ? err.message : '驗證碼寄送失敗，請稍後再試');
+  } finally {
+    busy.value = false;
+  }
+}
+
+function confirmInviteCode() {
+  const code = inviteCodeInput.value.toString().trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(code)) {
+    ElMessage.error('邀請碼格式不對——應該是邀請信裡的一長串英數字，請完整複製後貼上');
+    return;
+  }
+  sendInviteOtp(false);
+}
+
+async function verifyInviteOtp() {
+  if (inviteVerifying.value) {
+    return;
+  }
+  const code = inviteCodeInput.value.toString().trim().toLowerCase();
+  const otp = inviteOtpInput.value.toString().trim();
+  if (!/^\d{6}$/.test(otp)) {
+    ElMessage.error('請輸入 6 位數驗證碼');
+    return;
+  }
+  inviteVerifying.value = true;
+  try {
+    const result = await gasRun('inviteeLogin', code, otp);
+    if (!result) {
+      // 輸入 OTP 期間邀請被撤回/重發（競態走後端現行防線）：退回貼碼步驟
+      inviteOtpStep.value = false;
+      inviteOtpInput.value = '';
+      stopInviteCooldown();
+      ElMessage.error(INVALID_INVITE_MESSAGE);
+      return;
+    }
+    if (result.otpFailed) {
+      ElMessage.error(result.message || '驗證碼錯誤或已逾時，請重新輸入或按重寄');
+      inviteOtpInput.value = '';
+      invitePinRef.value?.clear();
+      return;
+    }
+    // OTP 通過：關掉入口 drawer、開簽名畫面（內容已就緒）
+    enteringInvitee = true;
+    sheetsDialog.show = false;
+    inviteCodeDialog.show = false;
+    inviteeDialogRef.value.open(result);
+  } catch (err) {
+    ElMessage.error(err && err.message ? err.message : '載入簽名邀請失敗，請稍後再試');
+  } finally {
+    inviteVerifying.value = false;
+  }
+}
+
+// 邀請碼 drawer 關閉（取消/ESC/點遮罩/驗證通過轉場）統一收尾；非轉場關閉才導回列表
+// （?token= 直連進入時列表還沒載過，補載）
+function handleInviteCodeClosed() {
+  stopInviteCooldown();
+  inviteOtpStep.value = false;
+  inviteOtpInput.value = '';
+  inviteCodeInput.value = '';
+  if (enteringInvitee) {
+    enteringInvitee = false;
+    return;
+  }
+  if (sheets.value.length === 0) {
+    loadSheet();
+  } else {
+    sheetsDialog.show = true;
+  }
 }
 
 // 受邀者關閉簽名對話框：回問卷列表（邀請連結直接進入時列表還沒載過，補載）
 function handleInviteeClosed() {
-  inviteCodeInput.value = '';
   if (sheets.value.length === 0) {
     loadSheet();
   } else {
@@ -1319,14 +1558,99 @@ onMounted(() => {
   // 邀請連結（?token=xxx，由後端 doGet 驗證格式後注入）：跳過問卷列表直接進簽名模式
   const inviteToken =
     typeof window.__SM_INVITE_TOKEN__ === 'string' ? window.__SM_INVITE_TOKEN__ : '';
+  // 問卷深連結（?sheet=xxx）：邀請 token 優先，深連結留給首次 loadSheet 消費
+  pendingSheetRefer =
+    typeof window.__SM_SHEET_REFER__ === 'string' ? window.__SM_SHEET_REFER__ : '';
   if (inviteToken !== '') {
+    // 洗掉網址列的 ?token=（不論後續成敗）：裸邀請碼不留在瀏覽器歷史（共用電腦）。
+    // GAS 沙盒 iframe 改不了上層網址，要走 google.script.history 專用 API；dev 模式無此物件
+    try {
+      if (typeof google !== 'undefined' && google.script && google.script.history) {
+        google.script.history.replace(null, {}, null);
+      }
+    } catch (err) {
+      console.error('history.replace failed', err);
+    }
+    // 直連與手動貼碼同一條路：邀請碼 drawer 自動填碼並寄 OTP（reload 濫發由後端節流擋）
     sheetsDialog.show = false;
+    inviteCodeInput.value = inviteToken;
+    inviteCodeDialog.show = true;
     nextTick(() => {
-      inviteeDialogRef.value.open(inviteToken);
+      confirmInviteCode();
     });
   } else {
     loadSheet();
   }
   setupOrientationListener();
+  // Vue 已 mount、首屏內容（正常路徑：LoadingGame 已因 loadSheet 的 beginLoading 掛上）就緒後，
+  // 淡出移除 index.html 的靜態載入罩幕，交叉溶接到真正的遊戲，減少空白等待感
+  nextTick(() => {
+    if (typeof window.hideInitialLoading === 'function') {
+      window.hideInitialLoading();
+    }
+  });
 });
 </script>
+
+<style scoped>
+/* 填問卷/簽名確認 drawer 共用的固定 footer：主要動作（送出）靠後、次要動作靠前 */
+.formFooter__hint {
+  color: var(--el-color-danger);
+  font-size: 0.95em;
+  margin-bottom: 8px;
+  text-align: center;
+}
+
+.formFooter__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.formFooter__buttons .el-button {
+  flex: 1 1 auto;
+  margin-left: 0;
+}
+
+/* 簽名邀請卡 header：左邊「誰的簽名」＋狀態 tag，右邊「管理邀請 ▾」dropdown */
+.inviteCardHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.inviteCardHeader__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.inviteCardHeader__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.inviteCardHeader__actions .el-button + .el-button {
+  margin-left: 0;
+}
+
+/* 手機直式：header 動作按鈕撐滿避免擠成一團 */
+@media (max-width: 768px) {
+  .inviteCardHeader__actions {
+    width: 100%;
+  }
+
+  .inviteCardHeader__actions > * {
+    flex: 1 1 auto;
+  }
+
+  .inviteCardHeader__actions :deep(.el-button) {
+    width: 100%;
+  }
+}
+
+</style>

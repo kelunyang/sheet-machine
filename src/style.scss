@@ -2,6 +2,18 @@
 @use './styles/theme-generated';
 @use './styles/theme';
 
+// 全域正文字型：Noto Sans TC（黑體，index.html 走 Google Fonts CDN）。
+// 設 --el-font-family 讓 Element Plus 全部元件吃到，body 兜住非 el 內容；
+// 各 fallback 為系統既有黑體，webfont 未載入時不至於掉成襯線字。
+// monospace 局部樣式（LoadingGame/PinCodeInput）各自宣告，不受此影響。
+:root {
+  --el-font-family: 'Noto Sans TC', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    'PingFang TC', 'Microsoft JhengHei', 'Heiti TC', sans-serif;
+}
+body {
+  font-family: var(--el-font-family);
+}
+
 div.breakword {
   /* These are technically the same, but use both */
   overflow-wrap: break-word;

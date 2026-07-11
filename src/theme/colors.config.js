@@ -74,8 +74,13 @@ export const THEME_COLORS = {
 
 /** 頁面層級色（非語義色） */
 export const SURFACE_COLORS = {
-  // 奶油米當頁面底色，擺脫全白背景（對深藍字 12.3:1）
-  page: '#efe0c8',
+  // 2026-07-10 配色語意重整（plan/plan.md Phase 7）：頁面底色回歸白（反正被全螢幕 drawer 遮住），
+  // 奶油米轉職為 el-alert 專用底色（info/warning 提示），配深棕字（實測對比 9.8:1，AA 合規）
+  alert: {
+    background: '#efe0c8',
+    text: '#4a2b12',
+    contrast: 9.8,
+  },
 };
 
 /**

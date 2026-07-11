@@ -13,6 +13,18 @@ export function formatDetector(formatReg, typeReg, column) {
   return false;
 }
 
+// Phase 15：D 欄位（noneable）是否已宣告「無資料」——按鈕狀態、驗證短路都從這裡導出，
+// 不另存旗標（value 就是唯一事實來源，草稿/暫存/匯入自動正確）
+export function noneDeclared(column) {
+  return column.noneable === true && column.value === '無資料';
+}
+
+// 群組檢查用的有效值：「無資料」哨兵視同空值——群組「不得全空」要的是至少一筆真資料，
+// 宣告無資料不得打穿它（Phase 15 規格明定）
+function groupValue(column) {
+  return noneDeclared(column) ? '' : column.value;
+}
+
 // 從 authDB 找出主鍵欄位（type 含 P），找不到回傳 undefined
 export function findPrimaryKey(authDB) {
   return _.filter(authDB, (item) => {
@@ -200,6 +212,10 @@ export function validateColumn(column, columnDB = []) {
       skipnull = true;
     }
   }
+  // 「無資料」宣告：非空所以過必填，格式檢查比照空值跳過
+  if (noneDeclared(column)) {
+    skipnull = true;
+  }
   let formatCheck = false;
   if (formatDetector('', 'F', column)) {
     if (column.must) {
@@ -222,7 +238,7 @@ export function validateColumn(column, columnDB = []) {
         let sameGroup = _.filter(columnDB, (col) => {
           return col.group === column.group;
         });
-        if (_.every(sameGroup, { value: '' })) {
+        if (_.every(sameGroup, (col) => groupValue(col) === '')) {
           for (let i = 0; i < sameGroup.length; i++) {
             sameGroup[i].status = '群組「' + column.group + '」欄位值不得全為空！';
           }
@@ -235,7 +251,7 @@ export function validateColumn(column, columnDB = []) {
         }
         if (column.uniGroup) {
           let uniqed = _.uniqBy(sameGroup, (item) => {
-            return item.value.toString().trim();
+            return groupValue(item).toString().trim();
           });
           if (sameGroup.length !== uniqed.length) {
             for (let i = 0; i < sameGroup.length; i++) {

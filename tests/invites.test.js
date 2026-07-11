@@ -7,25 +7,37 @@ import _ from 'lodash';
 
 const source = readFileSync(new URL('../src/Code.js', import.meta.url), 'utf8');
 
+import { createHash } from 'node:crypto';
+
 const fakeUtilities = {
   getUuid: () => 'AAAAAAAA-BBBB-4CCC-8DDD-EEEEFFFF0000',
+  DigestAlgorithm: { SHA_256: 'sha256' },
+  computeDigest: (alg, str) =>
+    [...createHash(alg).update(str, 'utf8').digest()].map((b) => (b > 127 ? b - 256 : b)),
+  base64Encode: (data) =>
+    Buffer.from(
+      typeof data === 'string' ? Buffer.from(data, 'utf8') : data.map((b) => b & 0xff)
+    ).toString('base64'),
 };
 
-function loadGasInvites() {
+function loadGasInvites(props = {}) {
   const factory = new Function(
     'LodashGS',
     'PropertiesService',
     'Utilities',
     `${source}\n;return {
-      INVITE_SHEET_NAME, INVITE_TTL_DAYS, INVITE_MAX_SIGNATURE_BYTES,
-      inviteTokenValid_, newInviteToken_, inviteExpireAt_,
+      INVITE_SHEET_NAME, INVITE_TTL_DEFAULT_MINUTES, INVITE_MAX_SIGNATURE_BYTES,
+      INVITE_OTP_TTL_MS, INVITE_OTP_COOLDOWN_MS, INVITE_OTP_MAX_ATTEMPTS,
+      inviteTokenValid_, newInviteToken_, inviteExpireAt_, inviteTtlMs_,
+      inviteOtpValid_, newInviteOtp_, inviteOtpHash_,
       inviteRowOf_, parseInviteRow_, inviteStatusFor_, inviteTransition_,
-      resolveSignatureSources_, inviteRowIndexByCell_, inviteRowIndexByToken_
+      resolveSignatureSources_, INVITE_HEADER, INVITE_SHEET_COLS,
+      inviteCellKey_, latestInvites_, latestInviteForCell_, latestInviteForToken_
     };`
   );
   return factory(
     { load: () => _ },
-    { getScriptProperties: () => ({ getProperty: () => null }) },
+    { getScriptProperties: () => ({ getProperty: (key) => (key in props ? props[key] : null) }) },
     fakeUtilities
   );
 }
@@ -64,27 +76,46 @@ describe('inviteTokenValid_（token 格式白名單）', () => {
   });
 });
 
-describe('inviteExpireAt_（效期 = min(now+7天, dueDate)）', () => {
+describe('inviteExpireAt_（效期 = min(now+ttlMs, dueDate)）', () => {
   const now = 1750000000000;
+  const SEVEN_DAYS = 7 * DAY;
 
-  it('dueDate 在 7 天之後 → 取 now+7 天', () => {
-    expect(gas.inviteExpireAt_(now, now + 30 * DAY, 7)).toBe(now + 7 * DAY);
+  it('dueDate 在效期之後 → 取 now+ttlMs', () => {
+    expect(gas.inviteExpireAt_(now, now + 30 * DAY, SEVEN_DAYS)).toBe(now + 7 * DAY);
   });
 
-  it('dueDate 在 7 天之內 → 取 dueDate', () => {
-    expect(gas.inviteExpireAt_(now, now + 2 * DAY, 7)).toBe(now + 2 * DAY);
+  it('dueDate 在效期之內 → 取 dueDate', () => {
+    expect(gas.inviteExpireAt_(now, now + 2 * DAY, SEVEN_DAYS)).toBe(now + 2 * DAY);
   });
 
-  it('dueDate 剛好在第 7 天（邊界）→ 兩者相等', () => {
-    expect(gas.inviteExpireAt_(now, now + 7 * DAY, 7)).toBe(now + 7 * DAY);
-  });
-
-  it('INVITE_TTL_DAYS 定案為 7 天', () => {
-    expect(gas.INVITE_TTL_DAYS).toBe(7);
+  it('dueDate 剛好在效期邊界 → 兩者相等', () => {
+    expect(gas.inviteExpireAt_(now, now + 7 * DAY, SEVEN_DAYS)).toBe(now + 7 * DAY);
   });
 });
 
-describe('inviteRowOf_ / parseInviteRow_（物件⇄11 欄列互轉）', () => {
+describe('inviteTtlMs_（邀請效期＝ScriptProperties inviteTtlMinutes 分鐘，預設 7 天）', () => {
+  const MIN = 60 * 1000;
+
+  it('未設定 → 退回預設 INVITE_TTL_DEFAULT_MINUTES（7 天＝10080 分）', () => {
+    expect(gas.INVITE_TTL_DEFAULT_MINUTES).toBe(7 * 24 * 60);
+    expect(gas.inviteTtlMs_()).toBe(gas.INVITE_TTL_DEFAULT_MINUTES * MIN);
+  });
+
+  it('設定正整數分鐘 → 換算成毫秒', () => {
+    expect(loadGasInvites({ inviteTtlMinutes: '30' }).inviteTtlMs_()).toBe(30 * MIN);
+    expect(loadGasInvites({ inviteTtlMinutes: '1440' }).inviteTtlMs_()).toBe(1440 * MIN);
+  });
+
+  it('0／負數／非數字／空字串 → 退回預設', () => {
+    const def = gas.INVITE_TTL_DEFAULT_MINUTES * MIN;
+    expect(loadGasInvites({ inviteTtlMinutes: '0' }).inviteTtlMs_()).toBe(def);
+    expect(loadGasInvites({ inviteTtlMinutes: '-5' }).inviteTtlMs_()).toBe(def);
+    expect(loadGasInvites({ inviteTtlMinutes: 'abc' }).inviteTtlMs_()).toBe(def);
+    expect(loadGasInvites({ inviteTtlMinutes: '' }).inviteTtlMs_()).toBe(def);
+  });
+});
+
+describe('inviteRowOf_ / parseInviteRow_（物件⇄14 欄列互轉）', () => {
   const invite = {
     token: 'f'.repeat(64),
     referSSID: 'REFER_SHEET_ID',
@@ -97,6 +128,9 @@ describe('inviteRowOf_ / parseInviteRow_（物件⇄11 欄列互轉）', () => {
     fileID: '',
     createdAt: 1749000000000,
     updatedAt: 1749500000000,
+    otpHash: 'aGFzaA==',
+    otpExpireAt: 1750000300000,
+    otpAttempts: 2,
   };
 
   it('roundtrip 後原樣取回（數字欄位維持 number）', () => {
@@ -108,8 +142,71 @@ describe('inviteRowOf_ / parseInviteRow_（物件⇄11 欄列互轉）', () => {
     expect(gas.parseInviteRow_(row)).toEqual(invite);
   });
 
-  it('列有 11 欄（A-K）', () => {
-    expect(gas.inviteRowOf_(invite).length).toBe(11);
+  it('列有 14 欄（A-N）', () => {
+    expect(gas.inviteRowOf_(invite).length).toBe(14);
+  });
+
+  it('向下相容：11 欄舊列（A-K）parse 不炸，OTP 三欄視為無有效 OTP', () => {
+    const oldRow = gas.inviteRowOf_(invite).slice(0, 11);
+    const parsed = gas.parseInviteRow_(oldRow);
+    expect(parsed.otpHash).toBe('');
+    expect(parsed.otpExpireAt).toBe(0);
+    expect(parsed.otpAttempts).toBe(0);
+    expect(parsed.token).toBe(invite.token);
+  });
+
+  it('向下相容：14 欄但 OTP 欄是空字串（Sheet 空儲存格）→ 同樣視為無有效 OTP', () => {
+    const row = [...gas.inviteRowOf_(invite).slice(0, 11), '', '', ''];
+    const parsed = gas.parseInviteRow_(row);
+    expect(parsed.otpHash).toBe('');
+    expect(parsed.otpExpireAt).toBe(0);
+    expect(parsed.otpAttempts).toBe(0);
+  });
+
+  it('物件缺 OTP 欄位 → inviteRowOf_ 以無 OTP 補齊', () => {
+    const bare = { ...invite };
+    delete bare.otpHash;
+    delete bare.otpExpireAt;
+    delete bare.otpAttempts;
+    const row = gas.inviteRowOf_(bare);
+    expect(row.length).toBe(14);
+    expect(row[11]).toBe('');
+    expect(row[12]).toBe(0);
+    expect(row[13]).toBe(0);
+  });
+});
+
+describe('email OTP 純函數', () => {
+  it('inviteOtpValid_：6 位數字才合法', () => {
+    expect(gas.inviteOtpValid_('012345')).toBe(true);
+    expect(gas.inviteOtpValid_('000000')).toBe(true);
+    expect(gas.inviteOtpValid_('12345')).toBe(false);
+    expect(gas.inviteOtpValid_('1234567')).toBe(false);
+    expect(gas.inviteOtpValid_('12a456')).toBe(false);
+    expect(gas.inviteOtpValid_(123456)).toBe(false);
+    expect(gas.inviteOtpValid_(null)).toBe(false);
+    expect(gas.inviteOtpValid_(undefined)).toBe(false);
+  });
+
+  it('newInviteOtp_ 生成的 OTP 一定通過白名單（含補零）', () => {
+    const otp = gas.newInviteOtp_();
+    expect(gas.inviteOtpValid_(otp)).toBe(true);
+  });
+
+  it('inviteOtpHash_：同輸入同 hash、不同 OTP 或不同邀請碼（salt）都不同', () => {
+    const token = 'a'.repeat(64);
+    const h = gas.inviteOtpHash_('123456', token);
+    expect(h).toBe(gas.inviteOtpHash_('123456', token));
+    expect(h).not.toBe(gas.inviteOtpHash_('123457', token));
+    expect(h).not.toBe(gas.inviteOtpHash_('123456', 'b'.repeat(64)));
+    // 列上存的是 hash，不含明碼
+    expect(h).not.toContain('123456');
+  });
+
+  it('OTP 參數定案：10 分鐘效期、60 秒重寄節流、連錯 5 次作廢', () => {
+    expect(gas.INVITE_OTP_TTL_MS).toBe(10 * 60 * 1000);
+    expect(gas.INVITE_OTP_COOLDOWN_MS).toBe(60 * 1000);
+    expect(gas.INVITE_OTP_MAX_ATTEMPTS).toBe(5);
   });
 });
 
@@ -147,7 +244,7 @@ describe('inviteTransition_（狀態機全矩陣）', () => {
     ['expired', 'send', true], // 過期後重發
     ['expired', 'revoke', true], // 過期列可清掉改本機簽
     ['expired', 'sign', false], // 過期 token 不能簽
-    ['signed', 'send', false], // 已簽名的格不可再邀
+    ['signed', 'send', false], // 已簽名的格不可直接再邀（作廢重發走 force，RPC 層二段確認）
     ['signed', 'revoke', false], // 撤回已簽名需 force（RPC 層二段確認）
     ['signed', 'sign', false], // 不能重複簽
   ];
@@ -264,8 +361,11 @@ describe('doGet token 注入閘門', () => {
 
   function runDoGet(e) {
     let injected = null;
+    // 刻意不提供 createTemplateFromFile：bundle 內含 <? 序列（marked 的 regex），
+    // template.evaluate() 會把它當 scriptlet 編譯而 SyntaxError，doGet 只准用
+    // createHtmlOutputFromFile 取原始內容（實機炸過，2026-07-10）
     const fakeHtmlService = {
-      createTemplateFromFile: () => ({ evaluate: () => ({ getContent: () => PAGE }) }),
+      createHtmlOutputFromFile: () => ({ getContent: () => PAGE }),
       createHtmlOutput: (content) => {
         injected = content;
         const output = {
@@ -313,37 +413,60 @@ describe('doGet token 注入閘門', () => {
   });
 });
 
-describe('inviteRowIndexByCell_ / inviteRowIndexByToken_（找列）', () => {
-  const row = (token, refer, pkey, signName) => [token, refer, 'REC', pkey, signName];
+describe('latestInvites_ / latestInviteForCell_ / latestInviteForToken_（純 append 快照：取每格最新列）', () => {
   function fakeSheet(rows) {
     return {
       getLastRow: () => rows.length,
       getRange: (r, c, numRows, numCols) => ({
-        getValues: () => rows.map((x) => x.slice(0, numCols)),
+        getValues: () => rows.slice(r - 1, r - 1 + numRows).map((x) => x.slice(c - 1, c - 1 + numCols)),
       }),
     };
   }
+  function snap({ token, refer = 'REFER_A', pkey = '測試生甲', signName = '家長', status = 'pending' }) {
+    return gas.inviteRowOf_({
+      token, referSSID: refer, recordSSID: 'REC', primaryValue: pkey, signName,
+      email: 'p@example.com', expireAt: 9000000000000, status, fileID: '',
+      createdAt: 1, updatedAt: 1, otpHash: '', otpExpireAt: 0, otpAttempts: 0,
+    });
+  }
 
-  it('以（referSSID, 主鍵值, 簽名格名稱）三鍵找列，回 1-based 列號', () => {
-    const sheet = fakeSheet([
-      row('t1', 'REFER_A', '測試生甲', '學生'),
-      row('t2', 'REFER_A', '測試生甲', '家長'),
-      row('t3', 'REFER_A', '測試生乙', '家長'),
-    ]);
-    expect(gas.inviteRowIndexByCell_(sheet, 'REFER_A', '測試生甲', '家長')).toBe(2);
-    expect(gas.inviteRowIndexByCell_(sheet, 'REFER_A', '測試生丙', '家長')).toBe(-1);
-    expect(gas.inviteRowIndexByCell_(sheet, 'REFER_B', '測試生甲', '家長')).toBe(-1);
+  it('同格多筆 → 取最新（最後 append 的那列）、同格合併成一筆', () => {
+    const sheet = fakeSheet([snap({ token: 't1', status: 'pending' }), snap({ token: 't2', status: 'signed' })]);
+    const latest = gas.latestInviteForCell_(sheet, 'REFER_A', '測試生甲', '家長');
+    expect(latest.token).toBe('t2');
+    expect(latest.status).toBe('signed');
+    expect(gas.latestInvites_(sheet).length).toBe(1);
   });
 
-  it('以 token 找列', () => {
-    const sheet = fakeSheet([row('t1', 'R', 'u', 's'), row('t2', 'R', 'u', 's2')]);
-    expect(gas.inviteRowIndexByToken_(sheet, 't2')).toBe(2);
-    expect(gas.inviteRowIndexByToken_(sheet, 'tx')).toBe(-1);
+  it('不同格 → 各自保留最新', () => {
+    const sheet = fakeSheet([snap({ token: 't1', signName: '學生' }), snap({ token: 't2', signName: '家長' })]);
+    expect(gas.latestInvites_(sheet).length).toBe(2);
+    expect(gas.latestInviteForCell_(sheet, 'REFER_A', '測試生甲', '學生').token).toBe('t1');
   });
 
-  it('空分頁回 -1', () => {
-    const sheet = { getLastRow: () => 0, getRange: () => ({ getValues: () => [] }) };
-    expect(gas.inviteRowIndexByCell_(sheet, 'R', 'u', 's')).toBe(-1);
-    expect(gas.inviteRowIndexByToken_(sheet, 't')).toBe(-1);
+  it('latestInviteForToken_：token 在最新列 → 命中；不存在 → null', () => {
+    const sheet = fakeSheet([snap({ token: 't1' })]);
+    expect(gas.latestInviteForToken_(sheet, 't1').token).toBe('t1');
+    expect(gas.latestInviteForToken_(sheet, 'nope')).toBeNull();
+  });
+
+  it('superseded：舊 token 被同格更新列取代 → 回 null（correctness 關鍵）', () => {
+    const sheet = fakeSheet([snap({ token: 'old' }), snap({ token: 'new' })]);
+    expect(gas.latestInviteForToken_(sheet, 'new').token).toBe('new');
+    expect(gas.latestInviteForToken_(sheet, 'old')).toBeNull();
+  });
+
+  it('跳過第 1 列表頭；只有表頭 → 空', () => {
+    const sheet = fakeSheet([gas.INVITE_HEADER, snap({ token: 't1' })]);
+    expect(gas.latestInvites_(sheet).length).toBe(1);
+    expect(gas.latestInviteForToken_(sheet, 't1').token).toBe('t1');
+    expect(gas.latestInvites_(fakeSheet([gas.INVITE_HEADER])).length).toBe(0);
+  });
+
+  it('空分頁 → 空', () => {
+    const sheet = fakeSheet([]);
+    expect(gas.latestInvites_(sheet)).toEqual([]);
+    expect(gas.latestInviteForCell_(sheet, 'R', 'u', 's')).toBeNull();
+    expect(gas.latestInviteForToken_(sheet, 't')).toBeNull();
   });
 });

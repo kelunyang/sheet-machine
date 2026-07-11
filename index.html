@@ -3,9 +3,268 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Element Plus 樣式走 jsDelivr CDN：與 element-plus JS（import map 指向 esm.sh）配對的版本。
+         放在 head 前段，讓 Vite 內聯的主題覆寫層（style.scss）排在其後、覆寫得到。 -->
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/element-plus@2.14.2/dist/index.css"
+    />
+    <!-- FontAwesome 6（免費 solid+brands）走 cdnjs CDN：全站 UI 圖示來源。
+         vite-plugin-singlefile 不 inline 遠端 URL，原樣留在 dist/index.html，於 GAS 沙盒 iframe 執行期載入。 -->
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"
+      integrity="sha512-Evv84Mr4kqVGRNSgIGL/F/aIDqQb7xQ2vcrdIwxfjThSH8CSR7PBEakCr51Ck+w+/U6swU2Im1vVX0SVk9ABhg=="
+      crossorigin="anonymous"
+      referrerpolicy="no-referrer"
+    />
+    <!-- Noto Sans TC（黑體）走 Google Fonts CDN：全站正文字型來源。
+         CJK 字型完整檔數 MB，無法內聯進單檔，故比照 FontAwesome 走 CDN；
+         Google Fonts 以 unicode-range 分片，只載入頁面實際用到的字。
+         vite-plugin-singlefile 不 inline 遠端 URL，原樣留在 dist/index.html，於 GAS 沙盒 iframe 執行期載入。 -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap"
+    />
+    <!-- 首屏靜態載入動畫（零依賴、inline）：蓋住「HTML 到達 → 從 CDN 下載 vue/element-plus…
+         → Vue mount」這段空白（CDN 化後變長）。校園跑酷主題 emoji 沿隨機波形路徑隨假進度
+         逐個浮現（呼應 LoadingGame 遊戲世界）；Vue mount 後 App.vue 呼叫 window.hideInitialLoading
+         交叉淡出，交棒給真正的 LoadingGame.vue。
+         註：emoji 為載入動畫專用（使用者指定），是 CLAUDE.md 禁 emoji 規則的明訂例外；
+         emoji 是系統原生字符、不依賴 CDN，第一幀就畫得出來（不像 FontAwesome 要等 CDN）。 -->
+    <style>
+      #initial-loading {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        background: #f7f3ec;
+        z-index: 99999;
+        transition: opacity 0.35s ease-out;
+        font-family: 'Noto Sans TC', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+          'PingFang TC', 'Microsoft JhengHei', sans-serif;
+      }
+      #initial-loading .il-title {
+        color: #020180;
+        font-size: 18px;
+        font-weight: 700;
+        letter-spacing: 3px;
+        margin-bottom: 28px;
+      }
+      #pixel-wave {
+        position: relative;
+        width: 360px;
+        max-width: 86vw;
+        height: 110px;
+        animation: il-wave-osc 3s ease-in-out infinite;
+      }
+      @keyframes il-wave-osc {
+        0%,
+        100% {
+          transform: translateY(0);
+        }
+        50% {
+          transform: translateY(7px);
+        }
+      }
+      #initial-loading .il-block {
+        position: absolute;
+        font-size: 26px;
+        line-height: 1;
+        opacity: 0;
+        transform: scale(0) rotate(-8deg);
+        transition:
+          opacity 0.4s ease-out,
+          transform 0.4s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+        user-select: none;
+        pointer-events: none;
+      }
+      #initial-loading .il-block.visible {
+        opacity: 1;
+        transform: scale(1) rotate(0);
+      }
+      #initial-loading .il-text {
+        color: #5b5b5d;
+        font-size: 13px;
+        letter-spacing: 1px;
+        margin-top: 24px;
+      }
+      /* JS 未跑（或 SVG 路徑失敗）時的保底：幾個 emoji 排排脈動 */
+      .il-fallback {
+        display: flex;
+        gap: 8px;
+      }
+      #pixel-wave.il-ready .il-fallback {
+        display: none;
+      }
+      .il-fallback span {
+        font-size: 24px;
+        line-height: 1;
+        animation: il-pulse 1.2s ease-in-out infinite;
+      }
+      .il-fallback span:nth-child(2) {
+        animation-delay: 0.2s;
+      }
+      .il-fallback span:nth-child(3) {
+        animation-delay: 0.4s;
+      }
+      @keyframes il-pulse {
+        0%,
+        100% {
+          opacity: 1;
+          transform: translateY(0);
+        }
+        50% {
+          opacity: 0.4;
+          transform: translateY(-6px);
+        }
+      }
+    </style>
   </head>
   <body>
+    <!-- 首屏靜態載入罩幕（見 head 的說明）：Vue mount 前唯一能顯示的東西 -->
+    <div id="initial-loading">
+      <div class="il-title">載入中</div>
+      <div id="pixel-wave">
+        <div class="il-fallback"><span>🎒</span><span>📚</span><span>✏️</span></div>
+      </div>
+      <div class="il-text" id="il-text">啟動中…</div>
+    </div>
     <div id="app"></div>
+    <script>
+      // emoji 波形載入動畫（抄 scoringSystem-cf 的 emoji wave，改用校園跑酷主題 emoji）。
+      // 純 vanilla、零依賴，於 HTML 解析當下就跑，蓋住 Vue/CDN 尚未就緒的空白。
+      (function () {
+        // 校園跑酷主題 emoji（呼應 LoadingGame：書包/外套是遊戲撿的道具，
+        // 圖書館/科學館天文台/籃球場是背景，藍鵲是障礙；📝✏️ 對應本 app 的問卷/簽名）
+        var EMOJI = ['🎒', '🧥', '📚', '📝', '✏️', '🎓', '🏫', '🏀', '🔭', '🐦', '🌳', '⭐'];
+        var BLOCK_COUNT = 16;
+        var container = document.getElementById('pixel-wave');
+        var blocks = [];
+        var done = false;
+
+        // 隨機波形路徑（quadratic bezier），沿路徑等距擺 emoji
+        function wavePath(w, h, segments) {
+          var pts = [{ x: 0, y: h / 2 }];
+          var seg = w / segments;
+          for (var i = 1; i <= segments; i++) {
+            pts.push({ x: i * seg, y: h * 0.15 + Math.random() * h * 0.7 });
+          }
+          var d = 'M' + pts[0].x + ',' + pts[0].y;
+          for (var j = 1; j < pts.length; j++) {
+            var cx = (pts[j - 1].x + pts[j].x) / 2;
+            var cy = h * 0.15 + Math.random() * h * 0.7;
+            d += ' Q' + cx + ',' + cy + ' ' + pts[j].x + ',' + pts[j].y;
+          }
+          return d;
+        }
+
+        function initWave() {
+          if (!container || !document.createElementNS) return;
+          var w = Math.min(360, (window.innerWidth || 360) - 48);
+          var h = 110;
+          try {
+            var svgNS = 'http://www.w3.org/2000/svg';
+            var svg = document.createElementNS(svgNS, 'svg');
+            svg.setAttribute('width', w);
+            svg.setAttribute('height', h);
+            svg.style.position = 'absolute';
+            svg.style.visibility = 'hidden';
+            var path = document.createElementNS(svgNS, 'path');
+            path.setAttribute('d', wavePath(w, h, 8));
+            svg.appendChild(path);
+            container.appendChild(svg);
+            if (typeof path.getPointAtLength !== 'function') return; // 太舊的瀏覽器→留保底方塊
+            var len = path.getTotalLength();
+            var pool = EMOJI.slice().sort(function () {
+              return Math.random() - 0.5;
+            });
+            for (var i = 0; i < BLOCK_COUNT; i++) {
+              var pct = i / (BLOCK_COUNT - 1);
+              var p = path.getPointAtLength(len * pct);
+              var el = document.createElement('span');
+              el.className = 'il-block';
+              el.style.left = p.x - 13 + 'px';
+              el.style.top = p.y - 15 + 'px';
+              el.textContent = pool[i % pool.length];
+              container.appendChild(el);
+              blocks.push(el);
+            }
+            container.classList.add('il-ready'); // 有方塊了→收起保底脈動
+          } catch (e) {
+            /* 出錯就留 CSS 保底 */
+          }
+        }
+
+        var textEl = document.getElementById('il-text');
+        function setProgress(percent) {
+          if (done) return;
+          var pct = Math.max(0, Math.min(100, percent));
+          var visible = Math.floor(pct / (100 / BLOCK_COUNT));
+          for (var i = 0; i < blocks.length; i++) {
+            if (i < visible && blocks[i].className.indexOf('visible') === -1) {
+              (function (b, idx) {
+                setTimeout(function () {
+                  b.className = 'il-block visible';
+                }, idx * 25);
+              })(blocks[i], i);
+            }
+          }
+          if (textEl) {
+            textEl.textContent =
+              pct < 25
+                ? '啟動中…'
+                : pct < 60
+                  ? '載入元件…'
+                  : pct < 90
+                    ? '準備遊戲…'
+                    : pct < 100
+                      ? '即將完成…'
+                      : '完成';
+          }
+        }
+
+        initWave();
+        setTimeout(function () {
+          setProgress(12);
+        }, 100);
+        setTimeout(function () {
+          setProgress(28);
+        }, 350);
+        document.addEventListener('DOMContentLoaded', function () {
+          setProgress(50);
+        });
+
+        // index.js（vendor 從 CDN 載完、module 開跑）呼叫→衝到 80%
+        window.appLoadingProgress = function () {
+          setProgress(80);
+        };
+        // App.vue mount 後、LoadingGame 已接手→補滿並淡出移除罩幕
+        window.hideInitialLoading = function () {
+          if (done) return;
+          done = true;
+          setProgress(100);
+          var el = document.getElementById('initial-loading');
+          if (!el) return;
+          setTimeout(function () {
+            el.style.opacity = '0';
+            setTimeout(function () {
+              if (el.parentNode) el.parentNode.removeChild(el);
+            }, 350);
+          }, 200);
+        };
+        // 保底：萬一 app 掛掉沒人呼叫 hide，25 秒後強制移除罩幕，不把使用者困住
+        setTimeout(function () {
+          if (!done && typeof window.hideInitialLoading === 'function') {
+            window.hideInitialLoading();
+          }
+        }, 25000);
+      })();
+    </script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js" integrity="sha512-dfX5uYVXzyU8+KHqj8bjo7UkOdg18PaOtpa48djpNbZHwExddghZ+ZmzWT06R5v6NSk3ZUfsH6FNEDepLx9hPQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
     <script type="module" src="/src/index.js"></script>
   </body>

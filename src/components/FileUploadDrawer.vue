@@ -62,6 +62,7 @@ import { ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import _ from 'lodash';
 import { gasRun } from '../composables/useGasRpc';
+import { beginLoading } from '../composables/useLoadingGame';
 import ErrorAlert from './ErrorAlert.vue';
 
 const show = defineModel('show', { type: Boolean, default: false });
@@ -134,8 +135,9 @@ function startUpload() {
     };
     if (new RegExp(mimeType.value, 'i').test(file.type)) {
       if (file.size <= maxSize.value * 1000000) {
-        ElMessage('檔案上傳中！');
+        // loading 進度交給遊戲卡的 label 顯示，不再另發 toast
         uploading.value = true;
+        const endLoading = beginLoading('檔案上傳中');
         try {
           const report = await gasRun(
             'saveFile',
@@ -167,6 +169,8 @@ function startUpload() {
         } catch (err) {
           uploadErrors.value = err && err.message ? err.message : '上傳失敗，請稍後再試';
           uploading.value = false;
+        } finally {
+          endLoading();
         }
       } else {
         uploadErrors.value = '檔案超過大小限制！';

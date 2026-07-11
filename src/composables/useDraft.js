@@ -1,5 +1,6 @@
 import { ref } from 'vue';
-import { ElMessage, ElMessageBox } from 'element-plus';
+import { ElMessage } from 'element-plus';
+import { drawerConfirm } from './useConfirmDrawer';
 import dayjs from 'dayjs';
 import _ from 'lodash';
 import { gasRun } from './useGasRpc';
@@ -61,7 +62,9 @@ export function useDraft({
         JSON.stringify(payload)
       );
       if (result && result.success) {
-        ElMessage.success('已線上暫存！換裝置用同一組身分登入即可還原（簽名需重簽）');
+        ElMessage.success(
+          '已線上暫存！換裝置用同一組身分登入即可還原（簽名需重簽）。暫存會被系統定期清理，請勿當作長期保存'
+        );
       } else if (result && result.tokenExpired) {
         onTokenExpired();
       } else {
@@ -135,10 +138,12 @@ export function useDraft({
     if (!importData.data || !importData.data.queue || importData.data.queue.length === 0) {
       return;
     }
-    ElMessageBox.confirm(
+    drawerConfirm(
       '雲端有你在 ' +
         dayjs(draft.updatedAt).format('YYYY/MM/DD HH:mm') +
-        ' 的線上暫存，要載入嗎？載入會覆蓋目前畫面上已填的內容（簽名一律需要重簽）',
+        ' 的線上暫存，要載入嗎？載入會覆蓋目前畫面上已填的內容（簽名一律需要重簽）。' +
+        '提醒：線上暫存不代表最終結果，正式結果以已送出的紀錄為準；' +
+        '暫存會被系統定期清理，請勿當作長期保存',
       '發現線上暫存',
       { confirmButtonText: '載入雲端暫存', cancelButtonText: '不用，維持現狀', type: 'info' }
     )
@@ -165,15 +170,8 @@ export function useDraft({
     ElMessage.success('已還原 ' + importedQueue.length + ' 個欄位的雲端暫存');
   }
 
-  // 正式送出成功後清掉雲端暫存（失敗不阻斷流程）；要在 authToken 清空前呼叫
-  function deleteDraftOnline(currentSheet) {
-    if (!draftEnabled.value) {
-      return;
-    }
-    gasRun('deleteDraft', currentSheet.refer, authToken.value).catch((err) => {
-      console.error('deleteDraft failed', err);
-    });
-  }
+  // 純 append 模型（Phase 17）：草稿永不刪除，送出後由使用者自行忽略雲端暫存提示，
+  // 故無 deleteDraftOnline——系統永遠抓該主鍵最新一列，舊版自動 superseded。
 
   return {
     draftEnabled,
@@ -181,6 +179,5 @@ export function useDraft({
     saveDraftOnline,
     saveDraftForInvite,
     checkOnlineDraft,
-    deleteDraftOnline,
   };
 }

@@ -1,8 +1,9 @@
 <template>
-  <el-dialog
+  <el-drawer
     :show-close="false"
     v-model="dialog.show"
-    :fullscreen="dialog.fullscreen"
+    direction="ttb"
+    size="60%"
     title="最後一位填寫者以及你是否填過"
   >
     <el-space direction="vertical" fill wrap style="width: 100%">
@@ -40,7 +41,7 @@
         >關閉對話框</el-button
       >
     </el-space>
-  </el-dialog>
+  </el-drawer>
 </template>
 
 <script setup>
@@ -57,7 +58,7 @@ const props = defineProps({
   pkeyName: { type: String, default: '' },
 });
 
-const dialog = reactive({ show: false, fullscreen: true });
+const dialog = reactive({ show: false });
 const lastSender = ref({ tick: 0, modified: true, pkey: '' });
 const queryResult = ref({ pkey: '', modified: false, length: 0, lastTick: 0 });
 const requestedUser = ref('');

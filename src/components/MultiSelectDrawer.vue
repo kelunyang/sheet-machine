@@ -37,7 +37,7 @@
               @click="moveToSelected(item)"
             >
               <div class="item-label">{{ item }}</div>
-              <div class="move-icon">→</div>
+              <div class="move-icon"><el-icon><i class="fa-solid fa-chevron-right"></i></el-icon></div>
             </div>
             <div v-if="filteredAvailable.length === 0" key="empty-available" class="empty-tip">
               {{ availableItems.length === 0 ? '所有選項都已選擇' : '沒有符合搜尋的選項' }}
@@ -72,7 +72,7 @@
                   title="上移"
                   @click.stop="moveSelected(index, 'up')"
                 >
-                  ↑
+                  <el-icon><i class="fa-solid fa-chevron-up"></i></el-icon>
                 </button>
                 <button
                   type="button"
@@ -80,7 +80,7 @@
                   title="下移"
                   @click.stop="moveSelected(index, 'down')"
                 >
-                  ↓
+                  <el-icon><i class="fa-solid fa-chevron-down"></i></el-icon>
                 </button>
                 <button
                   type="button"
@@ -88,7 +88,7 @@
                   title="移出已選"
                   @click.stop="removeSelected(index)"
                 >
-                  ✕
+                  <el-icon><i class="fa-solid fa-xmark"></i></el-icon>
                 </button>
               </div>
             </div>

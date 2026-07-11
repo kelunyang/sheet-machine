@@ -10,7 +10,7 @@
       class="jwt-countdown__fill"
       :style="{ width: sessionPercentage + '%', background: fillColor }"
     ></div>
-    <div class="jwt-countdown__label" :style="{ color: labelColor }">{{ label }}</div>
+    <div class="jwt-countdown__label">{{ label }}</div>
   </div>
 </template>
 
@@ -20,7 +20,8 @@ import { getThemeColorConfig } from '../theme/colors.config.js';
 import { formatRemainingTime } from '../utils/jwt';
 
 // 登入有效時間倒數條（scoringSystem-cf topbar 圓形計時器的直線版）：
-// fixed 疊在全螢幕 dialog/drawer 之上；>50% 純顯示，<=50% 進入警告態可點擊續約。
+// Phase 9 起為嵌入式元件——由外層容器決定位置（各主 drawer body 頂部配 .drawer-sticky-top
+// 主 drawer 已 with-header=false、標題在 body 內捲走，捲動時本條升到視窗最頂 y=0）；>50% 純顯示，<=50% 警告態可點擊續約。
 const WARNING_PERCENTAGE = 50;
 const DANGER_REMAINING_MS = 5 * 60 * 1000;
 
@@ -42,10 +43,9 @@ const state = computed(() => {
   return 'success';
 });
 
-const fillColor = computed(() => getThemeColorConfig(state.value).background);
-
-// 警告態的字落在未填滿的淺色軌道上，蜜桃橘要用深化版才夠對比
-const labelColor = computed(() => {
+// Phase 7：label 固定純白，軌道與填充全用深色——warning 不能用淺蜜桃橘（白字 1.9:1
+// 不及格），改用深化棕 onLight（白字實測 5.0:1）；綠 5.1:1、紅 5.4:1、軌道石墨灰 6.8:1
+const fillColor = computed(() => {
   const config = getThemeColorConfig(state.value);
   return state.value === 'warning' ? config.onLight : config.background;
 });
@@ -67,14 +67,11 @@ function onClick() {
 
 <style scoped>
 .jwt-countdown {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
+  position: relative;
+  width: 100%;
   height: 26px;
-  /* Element Plus 彈窗 z-index 從 2000 起跳逐次遞增，取夠高的值確保蓋在全螢幕 dialog 上 */
-  z-index: 5000;
-  background: rgba(0, 0, 0, 0.14);
+  /* 深色軌道：白色 label 的對比前提（石墨灰對白字 6.8:1） */
+  background: var(--el-color-info);
   overflow: hidden;
   user-select: none;
 }
@@ -96,9 +93,7 @@ function onClick() {
   justify-content: center;
   font-size: 14px;
   font-weight: 700;
-  text-shadow:
-    0 0 3px #fff,
-    0 0 5px #fff;
+  color: #fff;
   pointer-events: none;
 }
 

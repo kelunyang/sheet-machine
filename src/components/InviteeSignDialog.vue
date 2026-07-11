@@ -1,25 +1,32 @@
 <template>
-  <JwtCountdownBar
-    v-if="sessionToken !== ''"
-    :remaining-time="remainingTime"
-    :session-percentage="sessionPercentage"
-    :renewing="renewing"
-    @renew="handleRenewClick"
-  />
-  <el-dialog
+  <el-drawer
     v-model="show"
-    fullscreen
-    :show-close="false"
+    direction="btt"
+    size="100%"
+    :with-header="false"
+    body-class="drawer-flow-body"
     :title="'簽名邀請' + (sheetName !== '' ? '：' + sheetName : '')"
   >
+    <div class="drawer-flow-title">簽名邀請{{ sheetName !== '' ? '：' + sheetName : '' }}</div>
+    <JwtCountdownBar
+      v-if="sessionToken !== ''"
+      class="drawer-sticky-top"
+      :remaining-time="remainingTime"
+      :session-percentage="sessionPercentage"
+      :renewing="renewing"
+      @renew="handleRenewClick"
+    />
     <el-space direction="vertical" fill wrap style="width: 100%">
       <ErrorAlert :message="errorMessage" />
-      <el-alert title="驗證中" type="info" show-icon v-if="loading">
-        <template #default>
-          <span style="font-size: 1.5em">正在確認你的簽名邀請，請稍候</span>
-        </template>
-      </el-alert>
       <template v-if="loaded">
+        <LifecycleTimeline
+          :start-at="inviteCreatedAt"
+          :end-at="expireAt"
+          start-label="邀請發出"
+          end-label="邀請到期"
+          ended-text="邀請已過期"
+          quiet
+        />
         <el-alert title="簽名者模式" type="warning" show-icon>
           <template #default>
             <span style="font-size: 1.5em">
@@ -93,17 +100,11 @@
           </el-button>
         </template>
       </template>
-      <el-button
-        class="ma1 pa2 xs12"
-        size="large"
-        type="primary"
-        v-if="!loading"
-        v-on:click="closeDialog()"
-      >
+      <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="closeDialog()">
         {{ loaded && !signed ? '不簽了，回問卷列表' : '關閉，回問卷列表' }}
       </el-button>
     </el-space>
-  </el-dialog>
+  </el-drawer>
 </template>
 
 <script setup>
@@ -113,6 +114,7 @@ import _ from 'lodash';
 import FormField from './FormField.vue';
 import ErrorAlert from './ErrorAlert.vue';
 import JwtCountdownBar from './JwtCountdownBar.vue';
+import LifecycleTimeline from './LifecycleTimeline.vue';
 import { gasRun } from '../composables/useGasRpc';
 import { useSignatures } from '../composables/useSignatures';
 import { useJwtSession } from '../composables/useJwtSession';
@@ -120,13 +122,13 @@ import { prepareColumnsForDisplay } from '../utils/columnPrep';
 import { dateConverter } from '../utils/formatters';
 import { htmlConverter } from '../utils/markdown';
 
-// 受邀簽名者的完整流程（獨立於填寫者主流程）：open(邀請token) → inviteeLogin 換 session JWT →
-// read-only 問卷 + 單格簽名板 → submitInviteSignature（帶 session token，後端 Lock 內重查邀請列）。
+// 受邀簽名者的簽名畫面：邀請碼＋email OTP 二段驗證在 App.vue 的邀請碼 drawer 完成，
+// 這裡以 open(inviteeLogin 的回傳值) 接手——開啟時內容已就緒，顯示 read-only 問卷 +
+// 單格簽名板 → submitInviteSignature（帶 session token，後端 Lock 內重查邀請列）。
 // 自建一份 useSignatures 實例：受邀模式下主畫面所有對話框都不開，canvas selector 不會相撞。
 const emit = defineEmits(['closed']);
 
 const show = ref(false);
-const loading = ref(false);
 const loaded = ref(false);
 const submitting = ref(false);
 const errorMessage = ref('');
@@ -135,6 +137,7 @@ const comment = ref('');
 const signName = ref('');
 const maskedPkey = ref('');
 const expireAt = ref(0);
+const inviteCreatedAt = ref(0);
 const signed = ref(false);
 const myImage = ref('');
 const sessionToken = ref('');
@@ -165,45 +168,35 @@ const { remainingTime, sessionPercentage, renewing, handleRenewClick } = useJwtS
   onExpired: handleSessionExpired,
 });
 
-async function open(inviteToken) {
+// result = inviteeLogin 通過 OTP 後的回傳值（App.vue 的邀請碼 drawer 驗完才呼叫）。
+// initSignaturePads 內建 3 秒延遲才量尺寸，足以蓋過 drawer 開啟動畫（iPadOS 13 時機修復）
+function open(result) {
   show.value = true;
-  loading.value = true;
-  loaded.value = false;
   errorMessage.value = '';
-  try {
-    const result = await gasRun('inviteeLogin', inviteToken);
-    loading.value = false;
-    if (!result) {
-      errorMessage.value =
-        '這個驗證碼無效，或邀請已過期／被撤回。請聯絡填寫者重新發送邀請，或確認你完整複製了驗證碼';
-      return;
-    }
-    sheetName.value = result.sheetName;
-    comment.value = result.comment;
-    signName.value = result.signName;
-    maskedPkey.value = result.maskedPkey;
-    expireAt.value = result.expireAt;
-    signed.value = result.alreadySigned;
-    myImage.value = result.myImage || '';
-    sessionToken.value = result.sessionToken || '';
-    currentRefer.value = result.refer;
-    currentRecord.value = result.record;
-    let columns = _.filter(result.headers, (column) => {
-      return /F|C|G/.test(column.type);
+  sheetName.value = result.sheetName;
+  comment.value = result.comment;
+  signName.value = result.signName;
+  maskedPkey.value = result.maskedPkey;
+  expireAt.value = result.expireAt;
+  // 舊後端沒回這個欄位時退化為 0，時間軸整個不顯示
+  inviteCreatedAt.value = result.inviteCreatedAt || 0;
+  signed.value = result.alreadySigned;
+  myImage.value = result.myImage || '';
+  sessionToken.value = result.sessionToken || '';
+  currentRefer.value = result.refer;
+  currentRecord.value = result.record;
+  let columns = _.filter(result.headers, (column) => {
+    return /F|C|G/.test(column.type);
+  });
+  columnDB.value = prepareColumnsForDisplay(columns, []);
+  loaded.value = true;
+  if (!signed.value) {
+    resetSignatures();
+    addSignatures([signName.value]);
+    enableSignature.value = true;
+    nextTick(() => {
+      initSignaturePads();
     });
-    columnDB.value = prepareColumnsForDisplay(columns, []);
-    loaded.value = true;
-    if (!signed.value) {
-      resetSignatures();
-      addSignatures([signName.value]);
-      enableSignature.value = true;
-      nextTick(() => {
-        initSignaturePads();
-      });
-    }
-  } catch (err) {
-    loading.value = false;
-    errorMessage.value = err && err.message ? err.message : '載入簽名邀請失敗，請稍後再試';
   }
 }
 defineExpose({ open });
@@ -238,7 +231,7 @@ async function submitSignature() {
   }
 }
 
-// 點倒數條續約：後端會重讀邀請列，被撤回/重發/已簽就不給續
+// 點倒數條續約：後端會重讀邀請列，被撤回/重發/已簽就不給續（續約不需重跑 OTP）
 async function renewSession() {
   if (sessionToken.value === '' || currentRefer.value === '') {
     return false;
@@ -268,11 +261,11 @@ async function renewSession() {
   }
 }
 
-// session 過期：受邀者沒有帳號密碼可重登，只能重新用邀請連結/驗證碼進入
+// session 過期：受邀者沒有帳號密碼可重登，只能重新貼邀請碼走一次 OTP 流程
 function handleSessionExpired() {
   sessionToken.value = '';
   loaded.value = false;
-  errorMessage.value = '簽名時間已逾時，請重新點開邀請信中的連結（或重新貼上驗證碼）再簽一次';
+  errorMessage.value = '簽名時間已逾時，請重新貼上邀請碼進入，系統會再寄一組驗證碼';
 }
 
 function closeDialog() {

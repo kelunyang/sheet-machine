@@ -3,13 +3,21 @@ const appProperties = PropertiesService.getScriptProperties();
 
 function doGet(e) {
   try {
-    let template = HtmlService.createTemplateFromFile('index');
-    let content = template.evaluate().getContent();
+    // 一定要用 createHtmlOutputFromFile（不走 template 引擎）：bundle 內含 <? 序列
+    // （marked 的 regex），createTemplateFromFile().evaluate() 會把它當 scriptlet
+    // 編譯直接 SyntaxError；注入一律走下面的字串 replace，不用 scriptlet
+    let content = HtmlService.createHtmlOutputFromFile('index').getContent();
     // 簽名邀請連結 ?token=xxx：regex 白名單（64 字元 hex）+ JSON.stringify 雙保險防注入，
     // 不合法的 token 一律當作沒帶、不注入任何東西
     let inviteToken = e !== undefined && e.parameter !== undefined ? e.parameter.token : undefined;
     if(inviteTokenValid_(inviteToken)) {
       content = content.replace('<head>', '<head><script>window.__SM_INVITE_TOKEN__=' + JSON.stringify(inviteToken) + ';</script>');
+    }
+    // 問卷深連結 ?sheet=<referSSID>：同樣 regex 白名單 + JSON.stringify 雙保險，
+    // doGet 只驗格式不查清單，存在性由前端載完列表後比對
+    let sheetParam = e !== undefined && e.parameter !== undefined ? e.parameter.sheet : undefined;
+    if(sheetParamValid_(sheetParam)) {
+      content = content.replace('<head>', '<head><script>window.__SM_SHEET_REFER__=' + JSON.stringify(sheetParam) + ';</script>');
     }
     let htmlOutput = HtmlService.createHtmlOutput(content)
       .setTitle(appProperties.getProperty('systemTitle'));
@@ -144,9 +152,8 @@ function renewToken(referSSID, recordSSID, token) {
     if(claims.invite !== undefined) {
       if(!inviteTokenValid_(claims.invite)) { return { tokenExpired: true }; }
       let sheet = inviteSheet_();
-      let rowIndex = inviteRowIndexByToken_(sheet, claims.invite);
-      if(rowIndex === -1) { return { renewed: false, message: "邀請已被撤回或重發，無法延長" }; }
-      let invite = parseInviteRow_(sheet.getRange(rowIndex, 1, 1, 11).getValues()[0]);
+      let invite = latestInviteForToken_(sheet, claims.invite);
+      if(invite === null) { return { renewed: false, message: "邀請已被撤回或重發，無法延長" }; }
       if(inviteStatusFor_(invite, now) !== 'pending') { return { renewed: false, message: "邀請已失效，無法延長" }; }
       return { renewed: true, token: issueInviteSession_(invite, now, dueDate) };
     }
@@ -156,6 +163,33 @@ function renewToken(referSSID, recordSSID, token) {
 
 function getQList() {
   return logged_('getQList', () => getQList_());
+}
+
+// 問卷列表頁的重要公告（Markdown）：ScriptProperties 的 announcement 有設才回內容，
+// 沒設回空字串，前端據此決定要不要顯示公告 el-alert（內容過 marked+DOMPurify 渲染）。
+function getAnnouncement() {
+  let msg = appProperties.getProperty('announcement');
+  return msg === null ? "" : msg.toString().trim();
+}
+
+// 問卷結構表（refer，B 欄的試算表 ID）的 Drive 建立時間（ms）：前端生命週期時間軸
+// 的起點。注意 N 欄的 sheetID 只是問卷識別字串（前端暫存 key），不是 Drive ID。
+// 建立時間永不變，CacheService 快取到期（上限 6 小時）重讀一次即可；
+// 單表失敗回 0（前端時間軸退化隱藏），不能讓一張表壞掉拖垮整個 getQList
+function sheetCreatedAt_(referSSID) {
+  if(referSSID === "") { return 0; }
+  let cacheKey = "createdAt_" + referSSID;
+  try {
+    let cache = CacheService.getScriptCache();
+    let cached = cache.get(cacheKey);
+    if(cached !== null) { return parseInt(cached); }
+    let ms = DriveApp.getFileById(referSSID).getDateCreated().getTime();
+    cache.put(cacheKey, String(ms), 21600);
+    return ms;
+  } catch (err) {
+    console.error('sheetCreatedAt_ failed for ' + referSSID + ': ' + (err.stack || err));
+    return 0;
+  }
 }
 
 function getQList_() {
@@ -206,14 +240,20 @@ function getQList_() {
   let draftEnabled = draftEnabled_();
   for(let i=0; i<visible.length; i++) {
     visible[i].draftEnabled = draftEnabled;
+    // 只對過濾後仍可見的表查 Drive 建立時間，減少 Drive 呼叫
+    visible[i].createdAt = sheetCreatedAt_(visible[i].refer);
   }
   return visible;
 }
 
 // ===== 線上暫存 =====
-// 暫存試算表：ScriptProperties 的 draftSheetID 指定，一份問卷一個分頁（分頁名 = referSSID）
-// 分頁結構：A 欄主鍵、B 欄更新時間(ms)、C 欄之後為 JSON 切塊（單一儲存格上限 50000 字元）
+// 暫存試算表：ScriptProperties 的 draftSheetID 指定，一份問卷一個分頁（分頁名 = referSSID）。
+// 純 append 快照日誌（Phase 17）：每次暫存 appendRow 一筆快照，永不 setValues/clearContent/deleteRow；
+// 「當前草稿」＝該主鍵最新一列（append 保序，後列勝出＝舊版 superseded 自動失效，無刪除/消耗概念）。
+// 分頁結構：第 1 列人類可讀表頭 DRAFT_HEADER（凍結、對 reader 惰性）；資料列 A 欄主鍵、
+// B 欄更新時間(ms)、C 欄之後為 payload（gz:base64 單格化，超長才切塊，單一儲存格上限 50000 字元）。
 const DRAFT_CHUNK_SIZE = 45000;
+const DRAFT_HEADER = ['primaryKey 主鍵', 'updatedAt 存檔(ms)', 'payload 草稿(gz:base64，超長切塊)'];
 
 // 把 payload 字串切成單一儲存格放得下的塊（空字串回傳空陣列）
 function chunkPayload_(payloadStr) {
@@ -222,6 +262,65 @@ function chunkPayload_(payloadStr) {
     chunks.push(payloadStr.substring(i, i + DRAFT_CHUNK_SIZE));
   }
   return chunks;
+}
+
+// payload gzip+base64 單格化：'gz:' 是自描述版本記號（非舊資料相容）。JSON 壓縮通常 3~6 倍、
+// base64 回胖 4/3，淨縮 2~4 倍——一般草稿穩進單格；50000 字/格是 Sheets 硬限制，仍超長由 chunkPayload_ 切塊。
+function encodeDraftPayload_(str) {
+  return 'gz:' + Utilities.base64Encode(Utilities.gzip(Utilities.newBlob(str)).getBytes());
+}
+
+// 反解：'gz:' 前綴 → base64Decode → ungzip；無前綴原樣回傳（不做舊格式相容，僅防呆）
+// newBlob 第二參數 'application/x-gzip' 不可省：經 base64 往返重建的 blob content type 會遺失，
+// 真機 Utilities.ungzip 對 null content type 會丟「Blob object must have non-null content type」
+function decodeDraftPayload_(str) {
+  if(str.slice(0, 3) === 'gz:') {
+    return Utilities.ungzip(
+      Utilities.newBlob(Utilities.base64Decode(str.slice(3)), 'application/x-gzip')
+    ).getDataAsString();
+  }
+  return str;
+}
+
+// 解析一筆草稿列 → {key, updatedAt, payload=C 起串接（含變長 chunk）}；純函數，不碰 GAS 全域
+function parseDraftRow_(row) {
+  let payload = "";
+  for(let i=2; i<row.length; i++) {
+    payload += row[i].toString();
+  }
+  return { key: row[0].toString(), updatedAt: parseInt(row[1].toString(), 10), payload: payload };
+}
+
+// 同主鍵取最新一列（後列勝出＝舊版 superseded），無則 null；
+// 表頭列首欄為字面字串、永不等於真實主鍵值，天然不匹配、不需特判
+function latestDraftRowForKey_(rows, key) {
+  let found = null;
+  for(let i=0; i<rows.length; i++) {
+    if(rows[i][0].toString() === key) { found = rows[i]; }
+  }
+  return found;
+}
+
+// 草稿分頁壓縮（Phase 18 離線重建用）：每主鍵留最新一列（後列勝出，superseded 舊版只進備份），
+// 跳過表頭列與無主鍵的空列；變長 chunk 列以 '' 補齊成矩形（parseDraftRow_ 容忍尾端空格）。
+// 純函數不碰 GAS 全域，可 vitest
+function compactDraftRows_(rows) {
+  let byKey = {};
+  let order = [];
+  for(let i=0; i<rows.length; i++) {
+    if(i === 0 && rows[0][0].toString() === DRAFT_HEADER[0]) { continue; } // 跳過表頭列
+    let key = rows[i][0].toString();
+    if(key === "") { continue; }
+    if(!(key in byKey)) { order.push(key); }
+    byKey[key] = rows[i];
+  }
+  let width = 0;
+  order.forEach((key) => { width = Math.max(width, byKey[key].length); });
+  return order.map((key) => {
+    let row = byKey[key].slice();
+    while(row.length < width) { row.push(""); }
+    return row;
+  });
 }
 
 function draftEnabled_() {
@@ -253,19 +352,12 @@ function draftSheet_(referSSID) {
   let draftSS = SpreadsheetApp.openById(appProperties.getProperty('draftSheetID'));
   let sheet = draftSS.getSheetByName(referSSID);
   if(sheet === null) {
+    // 新分頁：直接帶人類可讀表頭 + 凍結首列（比照 inviteSheet_），對 reader 惰性
     sheet = draftSS.insertSheet(referSSID);
+    sheet.appendRow(DRAFT_HEADER);
+    sheet.setFrozenRows(1);
   }
   return sheet;
-}
-
-function draftRowIndex_(sheet, key) {
-  let lastRow = sheet.getLastRow();
-  if(lastRow === 0) { return -1; }
-  let keys = sheet.getRange(1, 1, lastRow, 1).getValues();
-  for(let i=0; i<keys.length; i++) {
-    if(keys[i][0].toString() === key) { return i + 1; }
-  }
-  return -1;
 }
 
 function saveDraft(referSSID, token, payload) {
@@ -275,19 +367,14 @@ function saveDraft(referSSID, token, payload) {
     let claims = authByToken_(referSSID, token);
     if(claims === false) { return { success: false, tokenExpired: true, message: "登入已逾時，請重新驗證身分" }; }
     let key = claims.pkey;
-    let chunks = chunkPayload_(payload.toString());
+    let chunks = chunkPayload_(encodeDraftPayload_(payload.toString()));
     let updatedAt = (new Date()).getTime();
     let lock = LockService.getScriptLock();
     lock.waitLock(10000);
     try {
       let sheet = draftSheet_(referSSID);
-      let rowIndex = draftRowIndex_(sheet, key);
-      if(rowIndex === -1) { rowIndex = sheet.getLastRow() + 1; }
-      // 先清整列，避免新資料切塊數比舊資料少時殘留舊塊
-      if(sheet.getLastColumn() > 0) {
-        sheet.getRange(rowIndex, 1, 1, sheet.getLastColumn()).clearContent();
-      }
-      sheet.getRange(rowIndex, 1, 1, 2 + chunks.length).setValues([[key, updatedAt].concat(chunks)]);
+      // 純 append 快照日誌：永不 setValues/clearContent/deleteRow；舊版因非最新列自動失效（superseded）
+      sheet.appendRow([key, updatedAt].concat(chunks));
       return { success: true, updatedAt: updatedAt };
     } finally {
       lock.releaseLock();
@@ -306,66 +393,100 @@ function loadDraft(referSSID, token) {
 }
 
 // 以主鍵值撈暫存 payload（loadDraft 與受邀者 inviteeLogin 共用；呼叫端負責身分驗證）
+// 讀全表 → 取該主鍵最新一列（後列勝出）→ C 起串接 → decode，介面不變
 function draftPayloadByKey_(referSSID, key) {
   let sheet = draftSheet_(referSSID);
-  let rowIndex = draftRowIndex_(sheet, key);
-  if(rowIndex === -1) { return null; }
-  let row = sheet.getRange(rowIndex, 1, 1, sheet.getLastColumn()).getValues()[0];
-  let payloadStr = "";
-  for(let i=2; i<row.length; i++) {
-    payloadStr += row[i].toString();
-  }
-  if(payloadStr === "") { return null; }
-  return { updatedAt: parseInt(row[1].toString()), payload: payloadStr };
-}
-
-function deleteDraft(referSSID, token) {
-  return logged_('deleteDraft', () => {
-    if(!draftEnabled_()) { return false; }
-    let claims = authByToken_(referSSID, token);
-    if(claims === false) { return false; }
-    let key = claims.pkey;
-    let lock = LockService.getScriptLock();
-    lock.waitLock(10000);
-    try {
-      let sheet = draftSheet_(referSSID);
-      let rowIndex = draftRowIndex_(sheet, key);
-      if(rowIndex !== -1) {
-        sheet.deleteRow(rowIndex);
-      }
-      return true;
-    } finally {
-      lock.releaseLock();
-    }
-  });
+  let lastRow = sheet.getLastRow();
+  let lastCol = sheet.getLastColumn();
+  if(lastRow < 1 || lastCol < 1) { return null; }
+  let rows = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+  let row = latestDraftRowForKey_(rows, key);
+  if(row === null) { return null; }
+  let parsed = parseDraftRow_(row);
+  if(parsed.payload === "") { return null; }
+  return { updatedAt: parsed.updatedAt, payload: decodeDraftPayload_(parsed.payload) };
 }
 
 // ===== 遠端多方簽名邀請 =====
 // 填寫者對任一簽名格發 email 邀請，受邀者以 token 進入 read-only 問卷、只簽自己那格。
 // token 與各格狀態存 draftSheetID 暫存試算表的 _invites 分頁（功能與線上暫存綁定）。
-// 一格一列（active row）模型：upsert key =（referSSID, 主鍵值, 簽名格名稱）；
-// 重發/換 email = 同列覆寫新 token（舊 token 自動失效）；撤回 = 刪列；未邀請 = 無列。
-// 分頁欄位（A-K）：token, referSSID, recordSSID, primaryValue, signName, email,
-// expireAt(ms), status(pending/signed), fileID, createdAt(ms), updatedAt(ms)
+// 純 append 快照模型（Phase 16）：每個動作 append 一筆完整 14 欄快照，永不 setValues/deleteRow。
+// 「當前狀態」＝每格（key=referSSID+主鍵值+簽名格名稱）最新一列；重發/換 email = append 新 token 快照
+// （舊 token 因非最新列自動失效＝superseded）；撤回/消耗 = append revoked/consumed 終態快照；未邀請 = 無列。
+// 失效（expired/superseded/終態）一律讀取端判定（latestInvites_/inviteStatusFor_）。
+// 分頁欄位（A-N）：token, referSSID, recordSSID, primaryValue, signName, email,
+// expireAt(ms), status(pending/signed/revoked/consumed), fileID, createdAt(ms), updatedAt(ms),
+// otpHash, otpExpireAt(ms), otpAttempts —— L-N 三欄是 email OTP 二段驗證的暫時狀態，
+// 舊的 11 欄列（A-K）讀到空值一律視為「無有效 OTP」，不做資料搬遷
+// 第 1 列放人類可讀表頭（見 INVITE_HEADER）並凍結，方便人工檢視；此列對所有 reader 惰性——
+// col A/B/D 是字面字串（'token …'/'referSSID …'/'primaryValue …'），永不等於真實邀請碼/
+// referSSID/主鍵值，一律被既有 key 過濾掉，故加表頭不必改任何掃描邏輯。
 const INVITE_SHEET_NAME = '_invites';
-const INVITE_TTL_DAYS = 7;
+// _invites 表頭（14 欄，欄序對齊 inviteRowOf_）；首欄字串同時當「已有表頭」marker
+const INVITE_HEADER = [
+  'token 邀請碼', 'referSSID 問卷表ID', 'recordSSID 紀錄表ID', 'primaryValue 填寫者主鍵',
+  'signName 簽名格', 'email 受邀信箱', 'expireAt 到期(ms)', 'status 狀態', 'fileID 簽名檔ID',
+  'createdAt 建立(ms)', 'updatedAt 更新(ms)', 'otpHash 驗證碼雜湊', 'otpExpireAt 驗證碼到期(ms)',
+  'otpAttempts 錯誤次數'
+];
+const INVITE_SHEET_COLS = 14;
+// 邀請信有效期預設 7 天（分鐘為單位，10080）；管理者可用 ScriptProperties 的
+// inviteTtlMinutes（分鐘）覆寫，未設或非正整數即退回此預設
+const INVITE_TTL_DEFAULT_MINUTES = 7 * 24 * 60;
 const INVITE_MAX_SIGNATURE_BYTES = 2 * 1024 * 1024;
+// email OTP：受邀者貼邀請碼後，系統即時寄 6 位數一次性驗證碼到邀請列登記信箱，
+// 證明「現在持有該信箱」——裸邀請碼外流（瀏覽器歷史/截圖/轉寄）撿到的人收不到 OTP 就進不來
+const INVITE_OTP_TTL_MS = 10 * 60 * 1000;
+const INVITE_OTP_COOLDOWN_MS = 60 * 1000;
+const INVITE_OTP_MAX_ATTEMPTS = 5;
 
 // 64 字元 hex 白名單：doGet 注入與所有 token 查詢的第一道閘門
 function inviteTokenValid_(token) {
   return typeof token === "string" && /^[a-f0-9]{64}$/.test(token);
 }
 
+// Drive 檔案 ID 格式白名單：?sheet= 深連結的 doGet 注入閘門（實際約 44 字元，範圍放寬）
+function sheetParamValid_(id) {
+  return typeof id === "string" && /^[A-Za-z0-9_-]{20,100}$/.test(id);
+}
+
 function newInviteToken_() {
   return (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, "").toLowerCase();
 }
 
-// 邀請效期：min(發出後 ttlDays 天, 問卷 dueDate)
-function inviteExpireAt_(nowMs, dueDateMs, ttlDays) {
-  return Math.min(nowMs + ttlDays * 24 * 60 * 60 * 1000, dueDateMs);
+// 6 位數字 OTP 白名單：inviteeLogin 第二參數的第一道閘門
+function inviteOtpValid_(otp) {
+  return typeof otp === "string" && /^\d{6}$/.test(otp);
 }
 
-// 邀請物件 ⇄ 分頁列（11 欄）互轉
+// 取 uuid 前 12 位 hex 轉十進位再取 6 位（16^12 對 10^6 的模數偏差可忽略），不足補零
+function newInviteOtp_() {
+  let n = parseInt(Utilities.getUuid().replace(/-/g, "").slice(0, 12), 16) % 1000000;
+  return String(n).padStart(6, "0");
+}
+
+// 列上只存 hash 不存明碼：SHA-256(otp + 邀請碼)，邀請碼當 salt——
+// 拿到 _invites 分頁讀取權的人也無法直接讀出可用的 OTP
+function inviteOtpHash_(otp, inviteToken) {
+  return Utilities.base64Encode(
+    Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, otp + inviteToken)
+  );
+}
+
+// 邀請信有效期（毫秒）：讀 ScriptProperties 的 inviteTtlMinutes（分鐘，管理者自訂），
+// 未設或非正整數退回預設（INVITE_TTL_DEFAULT_MINUTES）。全系統時間一律 ms（見 CLAUDE.md）
+function inviteTtlMs_() {
+  let minutes = parseInt((appProperties.getProperty('inviteTtlMinutes') || '').toString().trim(), 10);
+  if(isNaN(minutes) || minutes <= 0) { minutes = INVITE_TTL_DEFAULT_MINUTES; }
+  return minutes * 60 * 1000;
+}
+
+// 邀請效期：min(發出後 ttlMs, 問卷 dueDate)——不讓邀請活過問卷截止
+function inviteExpireAt_(nowMs, dueDateMs, ttlMs) {
+  return Math.min(nowMs + ttlMs, dueDateMs);
+}
+
+// 邀請物件 ⇄ 分頁列（14 欄）互轉；OTP 三欄缺漏時以「無有效 OTP」補齊（舊 11 欄列向下相容）
 function inviteRowOf_(invite) {
   return [
     invite.token,
@@ -378,11 +499,16 @@ function inviteRowOf_(invite) {
     invite.status,
     invite.fileID,
     invite.createdAt,
-    invite.updatedAt
+    invite.updatedAt,
+    invite.otpHash === undefined ? "" : invite.otpHash,
+    invite.otpExpireAt === undefined ? 0 : invite.otpExpireAt,
+    invite.otpAttempts === undefined ? 0 : invite.otpAttempts
   ];
 }
 
 function parseInviteRow_(row) {
+  let otpExpireAt = row[12] === undefined || row[12].toString() === "" ? 0 : parseInt(row[12].toString());
+  let otpAttempts = row[13] === undefined || row[13].toString() === "" ? 0 : parseInt(row[13].toString());
   return {
     token: row[0].toString(),
     referSSID: row[1].toString(),
@@ -394,25 +520,32 @@ function parseInviteRow_(row) {
     status: row[7].toString(),
     fileID: row[8].toString(),
     createdAt: parseInt(row[9].toString()),
-    updatedAt: parseInt(row[10].toString())
+    updatedAt: parseInt(row[10].toString()),
+    otpHash: row[11] === undefined ? "" : row[11].toString(),
+    otpExpireAt: otpExpireAt,
+    otpAttempts: otpAttempts
   };
 }
 
-// 讀取時衍生狀態（expired 不落地）：無列=none；signed 永遠算 signed（簽完不因時間失效）
+// 讀取時衍生狀態：無列=none；revoked/consumed 是 append 快照的落地終態（純 append 模型，
+// 撤回/消耗不刪列改 append 終態列，見 Phase 16）；signed 永遠算 signed（簽完不因時間失效）；
+// 其餘看 expireAt 推導 expired（不落地）
 function inviteStatusFor_(invite, nowMs) {
   if(invite === null || invite === undefined) { return 'none'; }
+  if(invite.status === 'revoked' || invite.status === 'consumed') { return invite.status; }
   if(invite.status === 'signed') { return 'signed'; }
   if(nowMs >= invite.expireAt) { return 'expired'; }
   return 'pending';
 }
 
-// 狀態機矩陣：send=發/重發/換email（signed 格不可再邀）、revoke=撤回（signed 需 force，
-// 由 RPC 層另行裁決）、sign=受邀者送出簽名（過期即不可簽）
+// 狀態機矩陣：send=發/重發/換email（signed 需 force：作廢舊簽名重發，由 RPC 層二段確認）、
+// revoke=撤回（signed 需 force，由 RPC 層另行裁決）、sign=受邀者送出簽名（過期即不可簽）。
+// revoked/consumed 為終態：可重新發邀請（send=true），但不能再撤回/簽名
 function inviteTransition_(currentStatus, action) {
   let allowed = {
-    send:   { none: true,  pending: true, expired: true,  signed: false },
-    revoke: { none: false, pending: true, expired: true,  signed: false },
-    sign:   { none: false, pending: true, expired: false, signed: false }
+    send:   { none: true,  pending: true, expired: true,  signed: false, revoked: true,  consumed: true },
+    revoke: { none: false, pending: true, expired: true,  signed: false, revoked: false, consumed: false },
+    sign:   { none: false, pending: true, expired: false, signed: false, revoked: false, consumed: false }
   };
   if(!(action in allowed)) { return false; }
   return allowed[action][currentStatus] === true;
@@ -451,47 +584,241 @@ function inviteSheet_() {
   let draftSS = SpreadsheetApp.openById(appProperties.getProperty('draftSheetID'));
   let sheet = draftSS.getSheetByName(INVITE_SHEET_NAME);
   if(sheet === null) {
+    // 新表：直接帶人類可讀表頭 + 凍結首列（無既有資料，零風險）。
+    // 既有的舊表（資料從第 1 列開始、無表頭）不在此自動補，改由手動 initInviteHeader() 一次性處理
     sheet = draftSS.insertSheet(INVITE_SHEET_NAME);
+    sheet.appendRow(INVITE_HEADER);
+    sheet.setFrozenRows(1);
   }
   return sheet;
 }
 
-function inviteRowIndexByToken_(sheet, token) {
-  let lastRow = sheet.getLastRow();
-  if(lastRow === 0) { return -1; }
-  let tokens = sheet.getRange(1, 1, lastRow, 1).getValues();
-  for(let i=0; i<tokens.length; i++) {
-    if(tokens[i][0].toString() === token) { return i + 1; }
-  }
-  return -1;
+// 第 1 列是否已是表頭（marker = 首欄字面字串，真實邀請碼為 64-hex 永不相等）
+function inviteHeaderPresent_(sheet) {
+  if(sheet.getLastRow() < 1) { return false; }
+  return sheet.getRange(1, 1, 1, 1).getValues()[0][0].toString() === INVITE_HEADER[0];
 }
 
-// 以 upsert key（referSSID, 主鍵值, 簽名格名稱）找列
-function inviteRowIndexByCell_(sheet, referSSID, primaryValue, signName) {
-  let lastRow = sheet.getLastRow();
-  if(lastRow === 0) { return -1; }
-  let rows = sheet.getRange(1, 1, lastRow, 5).getValues();
-  for(let i=0; i<rows.length; i++) {
-    if(rows[i][1].toString() === referSSID && rows[i][3].toString() === primaryValue && rows[i][4].toString() === signName) {
-      return i + 1;
+// 一次性維護：替既有 _invites 補上人類可讀表頭（新表由 inviteSheet_ 建立時已自帶）。
+// 從 Apps Script 編輯器手動執行一次即可，**請在系統無人使用時跑**——既有資料從第 1 列開始，
+// 補表頭需 insertRowBefore(1) 把資料整列下移（不刪、不覆寫任何資料），若同時有人寫入，位移會
+// 導致寫錯列，故用 ScriptLock 保護並要求離峰手動執行。冪等：已有表頭則不動。
+function initInviteHeader() {
+  let lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    let sheet = inviteSheet_();
+    if(inviteHeaderPresent_(sheet)) { return '已有表頭，未變更'; }
+    if(sheet.getLastRow() === 0) {
+      sheet.appendRow(INVITE_HEADER);
+    } else {
+      sheet.insertRowBefore(1);
+      sheet.getRange(1, 1, 1, INVITE_HEADER.length).setValues([INVITE_HEADER]);
     }
+    sheet.setFrozenRows(1);
+    return '已補上表頭';
+  } finally {
+    lock.releaseLock();
   }
-  return -1;
 }
 
-// 某填寫者在某問卷的全部邀請列（已 parse 成物件）
-function invitesForUser_(referSSID, primaryValue) {
-  let sheet = inviteSheet_();
+// ===== 純 append 快照模型（Phase 16）=====
+// _invites 是 append-only 日誌：發/重發/寄OTP/OTP錯誤累加/簽名/撤回/消耗，每個動作都 append 一筆
+// 完整 14 欄快照，**永不 setValues、永不 deleteRow**。「當前狀態」＝每格（referSSID|主鍵值|簽名格）
+// 最新一列（append 保序，後列覆蓋同格前列）；失效（expired/superseded/終態）一律讀取端判定。
+
+// 每格識別鍵：JSON 陣列編碼，分隔無歧義（避免欄位值內含分隔字元誤合併）；僅記憶體分組用，不落地
+function inviteCellKey_(referSSID, primaryValue, signName) {
+  return JSON.stringify([referSSID, primaryValue, signName]);
+}
+
+// 掃全表回「每格最新快照」的 parse 後物件清單。跳過第 1 列表頭（若有）；後出現的列覆蓋同格先前的列
+function latestInvites_(sheet) {
   let lastRow = sheet.getLastRow();
   if(lastRow === 0) { return []; }
-  let rows = sheet.getRange(1, 1, lastRow, 11).getValues();
-  let invites = [];
+  let rows = sheet.getRange(1, 1, lastRow, INVITE_SHEET_COLS).getValues();
+  let byCell = {};
   for(let i=0; i<rows.length; i++) {
-    if(rows[i][1].toString() === referSSID && rows[i][3].toString() === primaryValue) {
-      invites.push(parseInviteRow_(rows[i]));
+    if(i === 0 && rows[0][0].toString() === INVITE_HEADER[0]) { continue; } // 跳過表頭列
+    let invite = parseInviteRow_(rows[i]);
+    byCell[inviteCellKey_(invite.referSSID, invite.primaryValue, invite.signName)] = invite;
+  }
+  return Object.keys(byCell).map((k) => byCell[k]);
+}
+
+// 某格最新快照（無則 null）
+function latestInviteForCell_(sheet, referSSID, primaryValue, signName) {
+  let key = inviteCellKey_(referSSID, primaryValue, signName);
+  let all = latestInvites_(sheet);
+  for(let i=0; i<all.length; i++) {
+    if(inviteCellKey_(all[i].referSSID, all[i].primaryValue, all[i].signName) === key) {
+      return all[i];
     }
   }
-  return invites;
+  return null;
+}
+
+// 以邀請碼找「該格最新快照」；若此 token 只出現在被同格更新列取代的舊快照（重發後的舊碼）→
+// 它不會是任何一格的最新列 → 回 null（superseded 失效，correctness 關鍵）
+function latestInviteForToken_(sheet, token) {
+  let all = latestInvites_(sheet);
+  for(let i=0; i<all.length; i++) {
+    if(all[i].token === token) { return all[i]; }
+  }
+  return null;
+}
+
+// 某填寫者在某問卷的「每格最新快照」（純 append 模型：取每格最新列，非全部歷史列）
+function invitesForUser_(referSSID, primaryValue) {
+  let sheet = inviteSheet_();
+  return latestInvites_(sheet).filter((inv) => {
+    return inv.referSSID === referSSID && inv.primaryValue === primaryValue;
+  });
+}
+
+// ===== 暫存試算表定期重建（Phase 18）=====
+// Phase 16/17 純 append 化後的「量大離線壓縮」具體化：建新暫存試算表（草稿分頁留每主鍵最新列、
+// _invites 留每格最新快照、認不得的分頁原樣複製），舊表改名搬進備份資料夾（不可變備份、
+// 稽核軌跡零丟失、不線上刪列），最後翻 ScriptProperties 的 draftSheetID 原子換手——
+// draftSheet_/inviteSheet_ 每次呼叫都即時 getProperty 再 openById，換手後所有 RPC 自動吃新表。
+// 必須放本檔（web app 專案）、不可放 tools/：LockService/ScriptProperties 都是 per-project，
+// tools/ 是問卷列表 container-bound 專案，拿的鎖擋不住本專案的寫入、也讀不到 draftSheetID。
+// 觸發：管理者在 Apps Script 編輯器手動掛時間觸發器指向 rebuildDraftSpreadsheet
+// （程式不自建 trigger），亦可手動執行；**建議離峰**——重建全程持 ScriptLock，期間寫入
+// 等鎖 10 秒逾時會拋錯（前端顯示可重試錯誤）。失敗殘局皆無害、可重跑：翻 property 前掛＝
+// 新表成孤兒檔、舊表照常；翻後搬移前掛＝系統已在新表、舊表原地待人工搬。
+
+// _invites 壓縮（Phase 18 離線重建用）：每格（referSSID+主鍵值+簽名格）留最新一列**原樣快照**——
+// 零語意判讀：終態（revoked/consumed）、過期、attempts 滿的列只要是該格最新列就照抄保留，
+// 不趁機丟，完整歷史在備份檔。跳過表頭列。純函數不碰 GAS 全域，可 vitest
+function compactInviteRows_(rows) {
+  let byCell = {};
+  let order = [];
+  for(let i=0; i<rows.length; i++) {
+    if(i === 0 && rows[0][0].toString() === INVITE_HEADER[0]) { continue; } // 跳過表頭列
+    let key = inviteCellKey_(rows[i][1].toString(), rows[i][3].toString(), rows[i][4].toString());
+    if(!(key in byCell)) { order.push(key); }
+    byCell[key] = rows[i];
+  }
+  return order.map((key) => byCell[key]);
+}
+
+// 門檻：ScriptProperties 的 draftRebuildMinRows（正整數），全表資料列數低於門檻就跳過重建
+// （避免低流量期每次觸發都堆一個幾乎沒縮的備份檔）；未設或非正整數＝0＝永遠重建
+function draftRebuildMinRows_() {
+  let n = parseInt((appProperties.getProperty('draftRebuildMinRows') || '').toString().trim(), 10);
+  return (isNaN(n) || n <= 0) ? 0 : n;
+}
+
+// 手動維運進入點：GAS 編輯器執行函數不顯示 return 值，故在此把結果 console.log 進執行紀錄，
+// 讓管理者手動跑時看得到走了哪條路徑（門檻跳過、未設 folder、重建完成…）。實體邏輯在 _ 版
+function rebuildDraftSpreadsheet() {
+  let result = rebuildDraftSpreadsheet_();
+  console.log(result);
+  return result;
+}
+
+function rebuildDraftSpreadsheet_() {
+  let lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    // 前置檢查：任一不過直接 return，不動任何東西（fail-safe：沒有備份目的地就不重建）
+    if(!draftEnabled_()) { return '線上暫存未啟用，未重建'; }
+    let folderID = (appProperties.getProperty('draftBackupFolderID') || '').toString().trim();
+    if(folderID === '') { return '未設定 draftBackupFolderID（備份資料夾），未重建'; }
+    let backupFolder;
+    try {
+      backupFolder = DriveApp.getFolderById(folderID);
+      backupFolder.getName(); // 確認真的開得起來（無效 ID 可能到第一次操作才拋錯）
+    } catch(err) {
+      return 'draftBackupFolderID 開啟失敗（' + err + '），未重建';
+    }
+    let oldSS = SpreadsheetApp.openById(appProperties.getProperty('draftSheetID'));
+    let sheets = oldSS.getSheets();
+    // 門檻檢查（getLastRow 便宜，不必讀全表）：資料列數＝各分頁列數扣表頭列
+    let minRows = draftRebuildMinRows_();
+    if(minRows > 0) {
+      let totalDataRows = 0;
+      sheets.forEach((sheet) => {
+        let lastRow = sheet.getLastRow();
+        if(lastRow === 0) { return; }
+        let first = sheet.getRange(1, 1, 1, 1).getValues()[0][0].toString();
+        totalDataRows += lastRow - ((first === DRAFT_HEADER[0] || first === INVITE_HEADER[0]) ? 1 : 0);
+      });
+      if(totalDataRows < minRows) {
+        return '未達門檻（資料 ' + totalDataRows + ' 列 < draftRebuildMinRows ' + minRows + '），未重建';
+      }
+    }
+    // 建新表：未上線檔案，bulk setValues 合法——「一律 append」保護的是線上表（Phase 16 已明文
+    // 允許離線重建整張表）。預設空白分頁先改暫名避免與來源分頁同名相撞，最後刪掉
+    // （空佔位分頁、非資料列，不違反禁刪列）
+    let now = (new Date()).getTime();
+    let newSS = SpreadsheetApp.create(oldSS.getName());
+    let placeholder = newSS.getSheets()[0];
+    placeholder.setName('__rebuild_' + now);
+    let expected = [];
+    let summary = [];
+    sheets.forEach((sheet) => {
+      let name = sheet.getName();
+      let lastRow = sheet.getLastRow();
+      let lastCol = sheet.getLastColumn();
+      let values = (lastRow > 0 && lastCol > 0) ? sheet.getRange(1, 1, lastRow, lastCol).getValues() : [];
+      let frozen = false;
+      let outRows;
+      if(name === INVITE_SHEET_NAME) {
+        outRows = [INVITE_HEADER].concat(compactInviteRows_(values));
+        frozen = true;
+      } else if(values.length > 0 && values[0][0].toString() === DRAFT_HEADER[0]) {
+        outRows = [DRAFT_HEADER].concat(compactDraftRows_(values));
+        frozen = true;
+      } else {
+        outRows = values; // 認不得的分頁原樣整份複製（fail-safe，不解讀未知格式）
+      }
+      let newSheet = newSS.insertSheet(name);
+      if(outRows.length > 0) {
+        // 表頭與變長資料列補 '' 對齊成矩形（setValues 需要等寬）
+        let width = 0;
+        outRows.forEach((row) => { width = Math.max(width, row.length); });
+        let rect = outRows.map((row) => {
+          let padded = row.slice();
+          while(padded.length < width) { padded.push(""); }
+          return padded;
+        });
+        newSheet.getRange(1, 1, rect.length, width).setValues(rect);
+      }
+      if(frozen) { newSheet.setFrozenRows(1); }
+      expected.push({ name: name, rows: outRows.length });
+      summary.push(name + ' ' + values.length + '→' + outRows.length + ' 列');
+    });
+    newSS.deleteSheet(placeholder);
+    SpreadsheetApp.flush();
+    // sanity check：重新開啟新表逐分頁比對列數，不合就不翻 property（新表留存供人工檢查）
+    let verifySS = SpreadsheetApp.openById(newSS.getId());
+    for(let i=0; i<expected.length; i++) {
+      let verifySheet = verifySS.getSheetByName(expected[i].name);
+      if(verifySheet === null || verifySheet.getLastRow() !== expected[i].rows) {
+        return 'sanity check 失敗（分頁 ' + expected[i].name + '）：draftSheetID 未變更，新表 ' +
+          newSS.getId() + ' 留存供人工檢查';
+      }
+    }
+    // 原子換手生效點：翻 property 後所有 RPC 自動吃新表（寫入點皆鎖內 open，等本鎖釋放後進新表）
+    let oldID = oldSS.getId();
+    appProperties.setProperty('draftSheetID', newSS.getId());
+    // 新表搬到舊表原父資料夾（Drive 整潔）；舊表改名帶時間戳搬進備份資料夾
+    // （moveTo 不改 file ID，換手前已 open 的無鎖 reader 照讀）
+    let oldFile = DriveApp.getFileById(oldID);
+    let newFile = DriveApp.getFileById(newSS.getId());
+    let parents = oldFile.getParents();
+    if(parents.hasNext()) { newFile.moveTo(parents.next()); }
+    oldFile.setName(oldFile.getName() + '｜備份 ' +
+      Utilities.formatDate(new Date(now), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm') +
+      '（' + now + '）');
+    oldFile.moveTo(backupFolder);
+    return '重建完成：' + sheets.length + ' 個分頁（' + summary.join('、') + '）；新表 ' +
+      newSS.getId() + '；舊表已改名搬入備份資料夾';
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 // 清單分頁裡（referSSID, recordSSID）對應的那一列（A:O）；找不到回 null
@@ -544,8 +871,10 @@ function buildReadonlyHeaders_(referSSID, primaryValue) {
   return headers;
 }
 
-// 發邀請＝重發＝換 Email 同一支：對（本人, 簽名格）列 upsert 新 token（舊 token 自動失效）
-function sendInvite(referSSID, recordSSID, token, signName, email) {
+// 發邀請＝重發＝換 Email 同一支：對（本人, 簽名格）append 新 token 快照（舊 token 因非該格最新列自動失效）。
+// signed 的格預設拒絕（回最新狀態讓前端二段確認），force=true 才作廢舊簽名檔重發——
+// 簽名必須出自受邀者本人，「簽得不滿意」的救濟是請對方重簽，不是填寫者本機代簽
+function sendInvite(referSSID, recordSSID, token, signName, email, force) {
   return logged_('sendInvite', () => {
     if(!draftEnabled_()) { return { success: false, message: "線上暫存未啟用，無法使用簽名邀請" }; }
     let claims = authByToken_(referSSID, token);
@@ -565,17 +894,35 @@ function sendInvite(referSSID, recordSSID, token, signName, email) {
       return { success: false, message: "今日系統 Email 配額已用完，請明天再發邀請" };
     }
     let inviteToken = newInviteToken_();
-    let expireAt = inviteExpireAt_(now, dueDate, INVITE_TTL_DAYS);
+    let expireAt = inviteExpireAt_(now, dueDate, inviteTtlMs_());
     let lock = LockService.getScriptLock();
     lock.waitLock(10000);
     try {
       let sheet = inviteSheet_();
-      let rowIndex = inviteRowIndexByCell_(sheet, referSSID, claims.pkey, signName);
+      let existing = latestInviteForCell_(sheet, referSSID, claims.pkey, signName);
       let createdAt = now;
-      if(rowIndex !== -1) {
-        let existing = parseInviteRow_(sheet.getRange(rowIndex, 1, 1, 11).getValues()[0]);
-        if(!inviteTransition_(inviteStatusFor_(existing, now), 'send')) {
-          return { success: false, status: 'signed', message: "這一格已經完成簽名，不能再發邀請；若要重簽請先撤回" };
+      if(existing !== null) {
+        let existingStatus = inviteStatusFor_(existing, now);
+        if(existingStatus === 'signed') {
+          if(force !== true) {
+            return {
+              success: false,
+              status: 'signed',
+              invite: {
+                signName: existing.signName,
+                email: existing.email,
+                expireAt: existing.expireAt,
+                status: 'signed',
+                image: signatureDataUrl_(existing.fileID)
+              },
+              message: "這一格已經完成簽名！重發邀請會作廢對方目前的簽名。"
+            };
+          }
+          if(existing.fileID !== "") {
+            DriveApp.getFileById(existing.fileID).setTrashed(true);
+          }
+        } else if(!inviteTransition_(existingStatus, 'send')) {
+          return { success: false, message: "這一格目前的狀態不能發邀請" };
         }
         createdAt = existing.createdAt;
       }
@@ -590,25 +937,29 @@ function sendInvite(referSSID, recordSSID, token, signName, email) {
         status: 'pending',
         fileID: '',
         createdAt: createdAt,
-        updatedAt: now
+        updatedAt: now,
+        // OTP 三欄是「新邀請」這筆新事實的初始空值（新 token 還沒寄過 OTP，hash 也綁不上舊 token）；
+        // 不是清空舊資料——舊快照原樣留在表上，只是因非最新列而失效（superseded）
+        otpHash: '',
+        otpExpireAt: 0,
+        otpAttempts: 0
       };
-      if(rowIndex === -1) {
-        sheet.appendRow(inviteRowOf_(invite));
-      } else {
-        sheet.getRange(rowIndex, 1, 1, 11).setValues([inviteRowOf_(invite)]);
-      }
+      sheet.appendRow(inviteRowOf_(invite)); // 純 append：一律新增快照，永不覆寫舊列
     } finally {
       lock.releaseLock();
     }
-    // 寄邀請信（在鎖外，寄信慢）；信含連結 + 純文字驗證碼 + 到期時間
+    // 寄邀請信（在鎖外，寄信慢）；信只含純文字邀請碼 + 到期時間，
+    // 刻意不放 script.google.com 連結——GAS 網址是釣魚重災區，outlook.com 等會無聲丟棄整封信；
+    // 網站網址請受邀者向填寫者索取（?token= 直連入口仍保留，可由填寫者自行分享）
     let formTitle = listRow[0].toString().trim();
     let replyEmail = listRow[12].toString().trim();
     let systemTitle = appProperties.getProperty('systemTitle');
-    let link = ScriptApp.getService().getUrl() + '?token=' + inviteToken;
     MailApp.sendEmail(email, replyEmail, systemTitle + "簽名邀請：" + formTitle,
       "您好：\n" + maskString(claims.pkey) + " 邀請您在表單「" + formTitle + "」中簽署「" + signName + "」欄位。\n\n" +
-      "請點擊以下連結進入簽名頁面：\n" + link + "\n\n" +
-      "或開啟表單網站後選擇「我有簽名的驗證碼」，貼上這組驗證碼：\n" + inviteToken + "\n\n" +
+      "為了郵件安全，本信不附網址。請向邀請您的填寫者索取表單網站網址，\n" +
+      "開啟網站後選擇「我有簽名邀請碼」，貼上這組邀請碼：\n" + inviteToken + "\n\n" +
+      "貼上邀請碼後，系統會再寄一組 6 位數的一次性驗證碼到這個信箱，\n" +
+      "輸入驗證碼即可檢視問卷並簽名。\n\n" +
       "本邀請有效期限至：" + (new Date(expireAt)).toLocaleString() + "\n" +
       "您只能檢視問卷內容並簽署自己的欄位；如對填答內容有異議，請直接聯絡填寫者。\n" +
       "任何問題，請回信至：" + replyEmail);
@@ -630,9 +981,8 @@ function revokeInvite(referSSID, recordSSID, token, signName, force) {
     lock.waitLock(10000);
     try {
       let sheet = inviteSheet_();
-      let rowIndex = inviteRowIndexByCell_(sheet, referSSID, claims.pkey, signName);
-      if(rowIndex === -1) { return { success: true, status: 'none' }; }
-      let invite = parseInviteRow_(sheet.getRange(rowIndex, 1, 1, 11).getValues()[0]);
+      let invite = latestInviteForCell_(sheet, referSSID, claims.pkey, signName);
+      if(invite === null) { return { success: true, status: 'none' }; }
       let status = inviteStatusFor_(invite, now);
       if(status === 'signed' && force !== true) {
         return {
@@ -648,10 +998,17 @@ function revokeInvite(referSSID, recordSSID, token, signName, force) {
           message: "這一格剛完成簽名！確定要撤銷已簽好的簽名、改在這個裝置重簽嗎？"
         };
       }
+      if(status === 'revoked' || status === 'consumed') {
+        return { success: true, status: 'none' }; // 已是終態，無需再 append
+      }
       if(status === 'signed' && invite.fileID !== "") {
         DriveApp.getFileById(invite.fileID).setTrashed(true);
       }
-      sheet.deleteRow(rowIndex);
+      // 純 append：不刪列、也不清空任何欄位——append 一筆「原狀態忠實快照 + status=revoked」，
+      // fileID/email/OTP 全保留供稽核（fileID 指向的簽名檔雖已 trash，但終態列沒有 reader 會去讀它）
+      invite.status = 'revoked';
+      invite.updatedAt = now;
+      sheet.appendRow(inviteRowOf_(invite));
       return { success: true, status: 'none' };
     } finally {
       lock.releaseLock();
@@ -670,6 +1027,8 @@ function listInvites(referSSID, recordSSID, token) {
     let invites = [];
     for(let i=0; i<rows.length; i++) {
       let status = inviteStatusFor_(rows[i], now);
+      // revoked/consumed 是終態快照，對填寫者等同「未邀請」，不列出（與舊 deleteRow 行為一致）
+      if(status === 'revoked' || status === 'consumed') { continue; }
       let item = {
         signName: rows[i].signName,
         email: rows[i].email,
@@ -685,36 +1044,128 @@ function listInvites(referSSID, recordSSID, token) {
   });
 }
 
-// 受邀者以邀請 token 進入：token 即憑證（不走 authRecord），驗證通過即簽發 session JWT，
-// 之後受邀者的 RPC 只帶 session token。任何不合法情況一律回 false（不透露原因）
-function inviteeLogin(token) {
+// requestInviteOtp 與 inviteeLogin 的共用前段：邀請碼格式白名單 → 查列 →
+// 表單未過期未關閉 → 邀請未過期（signed 放行：受邀者可回來查看自己的簽名）。
+// 任何不合法情況回 null（呼叫端一律回 false 不透露原因）
+function resolveActiveInvite_(token) {
+  if(!inviteTokenValid_(token)) { return null; }
+  let sheet = inviteSheet_();
+  let invite = latestInviteForToken_(sheet, token);
+  if(invite === null) { return null; } // 找不到，或已被重發取代（superseded）
+  let listRow = listRowFor_(invite.referSSID, invite.recordSSID);
+  if(listRow === null) { return null; }
+  let now = (new Date()).getTime();
+  let dueDate = parseInt(listRow[3].toString());
+  if(now > dueDate) { return null; }
+  if(listRow[14].toString().trim() === "否") { return null; }
+  let status = inviteStatusFor_(invite, now);
+  if(status === 'expired' || status === 'revoked' || status === 'consumed') { return null; }
+  return { invite: invite, listRow: listRow, dueDate: dueDate, now: now, status: status };
+}
+
+// 受邀者登入第一步：驗邀請碼並即時寄 6 位數一次性驗證碼（OTP）到邀請列登記的信箱。
+// RPC 不收 email 參數（絕不信前端）；列上只存 hash。邀請碼不合法一律回 false 不透露原因
+function requestInviteOtp(inviteToken) {
+  return logged_('requestInviteOtp', () => {
+    if(!draftEnabled_()) { return false; }
+    let resolved = resolveActiveInvite_(inviteToken);
+    if(resolved === null) { return false; }
+    // 節流：上一組 OTP 寄出（= otpExpireAt - TTL）後 60 秒內不重寄，擋 reload 濫發
+    let sentAt = resolved.invite.otpExpireAt - INVITE_OTP_TTL_MS;
+    if(resolved.invite.otpExpireAt !== 0 && resolved.now < sentAt + INVITE_OTP_COOLDOWN_MS) {
+      return {
+        success: false,
+        cooldownSeconds: Math.ceil((sentAt + INVITE_OTP_COOLDOWN_MS - resolved.now) / 1000),
+        maskedEmail: maskEmail_(resolved.invite.email)
+      };
+    }
+    if(MailApp.getRemainingDailyQuota() <= 0) {
+      return { success: false, message: "今日系統 Email 額度已用盡，請稍後再試或聯絡填寫者" };
+    }
+    let otp = newInviteOtp_();
+    let lock = LockService.getScriptLock();
+    lock.waitLock(10000);
+    try {
+      let sheet = inviteSheet_();
+      let invite = latestInviteForToken_(sheet, inviteToken);
+      if(invite === null) { return false; } // 剛被填寫者撤回/重發（superseded）
+      invite.otpHash = inviteOtpHash_(otp, inviteToken);
+      invite.otpExpireAt = resolved.now + INVITE_OTP_TTL_MS;
+      invite.otpAttempts = 0;
+      invite.updatedAt = resolved.now;
+      sheet.appendRow(inviteRowOf_(invite)); // 純 append：新增帶 OTP 的快照
+    } finally {
+      lock.releaseLock();
+    }
+    // 寄 OTP 信（鎖外，寄信慢）：純文字、刻意無任何網址（釣魚過濾會無聲丟信）
+    let formTitle = resolved.listRow[0].toString().trim();
+    let replyEmail = resolved.listRow[12].toString().trim();
+    let systemTitle = appProperties.getProperty('systemTitle');
+    MailApp.sendEmail(resolved.invite.email, replyEmail, systemTitle + "一次性驗證碼",
+      "您好：您正在使用簽名邀請碼進入表單「" + formTitle + "」。\n\n" +
+      "您的一次性驗證碼（10 分鐘內有效）：\n" + otp + "\n\n" +
+      "請回到網站輸入這組 6 位數驗證碼，即可檢視問卷並簽名。\n" +
+      "若非您本人操作，請忽略本信。\n" +
+      "任何問題，請回信至：" + replyEmail);
+    return { success: true, maskedEmail: maskEmail_(resolved.invite.email) };
+  });
+}
+
+// 受邀者登入第二步：邀請碼 + email OTP 雙因子通過才回問卷內容並簽發 session JWT，
+// 之後受邀者的 RPC 只帶 session token。OTP 通過前不回傳任何問卷內容（挑戰與回傳同一支 RPC）。
+// 邀請碼不合法一律回 false 不透露原因；OTP 錯誤回 { otpFailed }——requestInviteOtp 成功
+// 已揭露邀請碼有效，這裡區分不增加洩漏。比對/計次/作廢都在 ScriptLock 內，防並發暴力嘗試
+function inviteeLogin(token, otp) {
   return logged_('inviteeLogin', () => {
     if(!draftEnabled_()) { return false; }
-    if(!inviteTokenValid_(token)) { return false; }
-    let sheet = inviteSheet_();
-    let rowIndex = inviteRowIndexByToken_(sheet, token);
-    if(rowIndex === -1) { return false; }
-    let invite = parseInviteRow_(sheet.getRange(rowIndex, 1, 1, 11).getValues()[0]);
-    let listRow = listRowFor_(invite.referSSID, invite.recordSSID);
-    if(listRow === null) { return false; }
-    let now = (new Date()).getTime();
-    let dueDate = parseInt(listRow[3].toString());
-    if(now > dueDate) { return false; }
-    if(listRow[14].toString().trim() === "否") { return false; }
-    let status = inviteStatusFor_(invite, now);
-    if(status === 'expired') { return false; }
+    let resolved = resolveActiveInvite_(token);
+    if(resolved === null) { return false; }
+    let otpError = { otpFailed: true, message: "驗證碼錯誤或已逾時，請重新輸入或按重寄" };
+    if(!inviteOtpValid_(otp)) { return otpError; }
+    let invite;
+    let lock = LockService.getScriptLock();
+    lock.waitLock(10000);
+    try {
+      let sheet = inviteSheet_();
+      invite = latestInviteForToken_(sheet, token);
+      if(invite === null) { return false; } // 剛被填寫者撤回/重發（superseded）
+      if(invite.otpHash === "" || resolved.now >= invite.otpExpireAt ||
+         invite.otpAttempts >= INVITE_OTP_MAX_ATTEMPTS) {
+        return otpError;
+      }
+      if(inviteOtpHash_(otp, token) !== invite.otpHash) {
+        // 純 append：只記「又錯一次」這個事實，其餘欄位原樣保留。
+        // 連錯滿 INVITE_OTP_MAX_ATTEMPTS 的「作廢」不落地——上方 otpAttempts >= MAX 的
+        // 讀取端判斷就是作廢本身（append 模型：失效一律由程式判讀，不寫空值）
+        invite.otpAttempts = invite.otpAttempts + 1;
+        invite.updatedAt = resolved.now;
+        sheet.appendRow(inviteRowOf_(invite));
+        return otpError;
+      }
+      // 比對成功：單次使用＝「這組 OTP 的效期在被使用那一刻終止」——append 一筆
+      // otpExpireAt 記為使用當下的事實快照（hash/attempts 原樣保留供稽核），
+      // 重放同一組 OTP 走上方既有的 now >= otpExpireAt 判斷自然被拒，不清空任何欄位
+      invite.otpExpireAt = resolved.now;
+      invite.updatedAt = resolved.now;
+      sheet.appendRow(inviteRowOf_(invite));
+    } finally {
+      lock.releaseLock();
+    }
+    let status = inviteStatusFor_(invite, resolved.now);
     let result = {
-      sheetName: listRow[0].toString().trim(),
-      comment: listRow[7].toString().trim(),
+      sheetName: resolved.listRow[0].toString().trim(),
+      comment: resolved.listRow[7].toString().trim(),
       refer: invite.referSSID,
       record: invite.recordSSID,
-      dueDate: dueDate,
+      dueDate: resolved.dueDate,
       signName: invite.signName,
       expireAt: invite.expireAt,
+      // 邀請發出時間：受邀者畫面生命週期時間軸的起點（重發沿用原值，起點不跳動）
+      inviteCreatedAt: invite.createdAt,
       maskedPkey: maskString(invite.primaryValue),
       alreadySigned: status === 'signed',
       headers: buildReadonlyHeaders_(invite.referSSID, invite.primaryValue),
-      sessionToken: issueInviteSession_(invite, now, dueDate)
+      sessionToken: issueInviteSession_(invite, resolved.now, resolved.dueDate)
     };
     if(status === 'signed' && invite.fileID !== "") {
       result.myImage = signatureDataUrl_(invite.fileID);
@@ -731,7 +1182,7 @@ function submitInviteSignature(sessionToken, blobDataURL) {
     let now = (new Date()).getTime();
     let claims = verifyJwt_(sessionToken, getJwtSecret_(), now);
     if(claims === false || typeof claims.invite !== "string") {
-      return { success: false, tokenExpired: true, message: "登入已逾時，請重新用邀請連結（或驗證碼）進入" };
+      return { success: false, tokenExpired: true, message: "登入已逾時，請重新貼上邀請信中的驗證碼進入" };
     }
     if(typeof blobDataURL !== "string" || !/^data:image\/png;base64,/.test(blobDataURL)) {
       return { success: false, message: "簽名格式錯誤，請清除後重簽" };
@@ -749,11 +1200,10 @@ function submitInviteSignature(sessionToken, blobDataURL) {
     lock.waitLock(10000);
     try {
       let sheet = inviteSheet_();
-      let rowIndex = inviteRowIndexByToken_(sheet, claims.invite);
-      if(rowIndex === -1) {
+      let invite = latestInviteForToken_(sheet, claims.invite);
+      if(invite === null) {
         return { success: false, revoked: true, message: "這份邀請已被填寫者撤回或重發，你的簽名沒有送出；請聯絡填寫者重新邀請" };
       }
-      let invite = parseInviteRow_(sheet.getRange(rowIndex, 1, 1, 11).getValues()[0]);
       let listRow = listRowFor_(invite.referSSID, invite.recordSSID);
       if(listRow === null) { return { success: false, message: "找不到這份表單" }; }
       let dueDate = parseInt(listRow[3].toString());
@@ -774,7 +1224,7 @@ function submitInviteSignature(sessionToken, blobDataURL) {
       invite.status = 'signed';
       invite.fileID = writtenFile.getId();
       invite.updatedAt = now;
-      sheet.getRange(rowIndex, 1, 1, 11).setValues([inviteRowOf_(invite)]);
+      sheet.appendRow(inviteRowOf_(invite)); // 純 append：signed 快照
       return { success: true };
     } finally {
       lock.releaseLock();
@@ -906,7 +1356,10 @@ function readRecord_(referSSID, recordSSID, auth) {
                       if(userRecord !== undefined) {
                         if(userRecord[column.pos + 5] != null) {
                           column.lastInput = userRecord[column.pos + 5].toString().replace(/📝/, "");
-                          column.value = column.lastInput;
+                          // 「不提供資料」是 N 欄位留空的落地哨兵：回填時轉回空值，
+                          // 前端不需要認識這個字串（lastInput 保留原字樣供顯示）。
+                          // 「無資料」（D 欄位）刻意原樣回填——按鈕按下狀態由 value 導出
+                          column.value = column.lastInput === "不提供資料" ? "" : column.lastInput;
                         } else {
                           column.lastInput = "";
                         }
@@ -1012,8 +1465,11 @@ function getHeaders(referSSID) {
             format: referArr[3][i].toString().trim(),
             group: referArr[4][i].toString().trim(),
             content: referArr[5][i].toString().trim(),
-            must: referArr[6][i].toString().trim() === "M",
-            nullable: referArr[7][i].toString().trim() === "N",
+            // 第 7/8 列改 regex test（原本精確比對）：既有單字母資料行為不變，
+            // 第 8 列開放組合詞彙 N/D/ND——D＝可宣告「無資料」（Phase 15）
+            must: /M/.test(referArr[6][i].toString().trim()),
+            nullable: /N/.test(referArr[7][i].toString().trim()),
+            noneable: /D/.test(referArr[7][i].toString().trim()),
             pos: i,
             value: ""
           };
@@ -1200,7 +1656,17 @@ function writeRecord_(referSSID, recordSSID, token, record, accept, signatures, 
             }
             if(formatDetector('', 'C|F', column)) {
               if(proceedWrite) {
-                if(data.value !== "不提供資料") {
+                if(column.noneable && data.value === "無資料") {
+                  // Phase 15：D 欄位的「無資料」宣告——哨兵字串原樣寫入紀錄，
+                  // 下游可區分「宣告沒有」與「留白/漏填」；跳過格式檢查、通過必填
+                  column.value = "無資料";
+                } else if(column.nullable && data.value === "不提供資料") {
+                  // N 欄位留空（上方伺服器換上的哨兵）：2026-07-11 起哨兵原樣落地，
+                  // 紀錄不再是空白（readRecord 回填時會轉回空值，前端看不到這個字串）。
+                  // 跳過條件同時限縮到 nullable 欄位——非 N 欄位送這個字串改走下面的
+                  // 格式檢查（原本「任何欄位都能跳過檢查」的逃生門就此關閉，見 issue.md）
+                  column.value = "不提供資料";
+                } else {
                   let errorReason = "";
                   if(formatDetector('F', 'F', column)) {
                     column.value = data.value;
@@ -1455,11 +1921,20 @@ function writeRecord_(referSSID, recordSSID, token, record, accept, signatures, 
                 lock.waitLock(10000);
                 try {
                   let inviteSheet = inviteSheet_();
-                  for(let i=inviteSheet.getLastRow(); i>=1; i--) {
-                    let row = inviteSheet.getRange(i, 1, 1, 4).getValues()[0];
-                    if(row[1].toString() === referSSID && row[3].toString() === primaryData) {
-                      inviteSheet.deleteRow(i);
-                    }
+                  let nowConsume = (new Date()).getTime();
+                  // 純 append：token 用畢即焚——對本人這份問卷每個「非終態」的邀請格 append 一筆
+                  // consumed 終態快照（不刪列、不清空任何欄位：原狀態忠實快照 + status=consumed，
+                  // fileID/email/OTP 全保留供稽核；簽名檔已記進紀錄列不動）
+                  let userInvites = latestInvites_(inviteSheet).filter((inv) => {
+                    return inv.referSSID === referSSID && inv.primaryValue === primaryData;
+                  });
+                  for(let i=0; i<userInvites.length; i++) {
+                    let inv = userInvites[i];
+                    let st = inviteStatusFor_(inv, nowConsume);
+                    if(st === 'revoked' || st === 'consumed') { continue; } // 已終態不重複 append
+                    inv.status = 'consumed';
+                    inv.updatedAt = nowConsume;
+                    inviteSheet.appendRow(inviteRowOf_(inv));
                   }
                 } finally {
                   lock.releaseLock();
@@ -1630,6 +2105,22 @@ function latestSubmits(recordSSID) {
 
 function maskString(str) {
   return str.replace(/(.{1})./g, "$1*");
+}
+
+// email 專用遮罩：只遮 @ 前的本地部分（保留頭尾各一字，中間換成 3 個 *），
+// 網域原樣保留——例：johndoe@gmail.com → j***e@gmail.com。無 @ 或本地過短時退回頭字元 + ***
+function maskEmail_(email) {
+  let str = (email === undefined || email === null) ? "" : email.toString().trim();
+  let at = str.indexOf("@");
+  if(at <= 0) {
+    return str.slice(0, 1) + "***";
+  }
+  let local = str.slice(0, at);
+  let domain = str.slice(at); // 含 @
+  if(local.length <= 2) {
+    return local.slice(0, 1) + "***" + domain;
+  }
+  return local.slice(0, 1) + "***" + local.slice(-1) + domain;
 }
 
 function compareSheets(referSSID, recordSSID) {

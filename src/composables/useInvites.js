@@ -1,11 +1,15 @@
 import { ref } from 'vue';
-import { ElMessage, ElMessageBox } from 'element-plus';
+import { ElMessage } from 'element-plus';
 import { gasRun } from './useGasRpc';
+import { drawerConfirm } from './useConfirmDrawer';
+import { beginLoading } from './useLoadingGame';
 
 // 填寫者側的簽名邀請管理：查詢各格狀態、發（=重發=換Email）邀請、撤回。
 // 狀態真相永遠在後端 _invites 分頁——sendInvite/revokeInvite 成功後都會 refresh；
-// revoke 預設不帶 force，伺服器發現「受邀者剛簽完」會拒絕並回最新狀態，
+// send/revoke 預設都不帶 force，伺服器見這一格已 signed 會拒絕並回最新狀態，
 // 這裡刷新卡片並二段確認後才 force（競態防線 #2 的前端半邊）。
+// signed 格的 force send＝作廢舊簽名重發邀請：簽名必須出自受邀者本人，
+// 「簽得不滿意」的救濟是請對方重簽，不提供填寫者本機代簽。
 export function useInvites({ currentSheet, authToken, saveDraftForInvite, onTokenExpired }) {
   // signName → { status: 'pending'|'expired'|'signed', email, expireAt, image? }；沒 key = 未邀請
   const inviteStates = ref({});
@@ -45,6 +49,8 @@ export function useInvites({ currentSheet, authToken, saveDraftForInvite, onToke
       return false;
     }
     inviteBusy.value = true;
+    // 發邀請＝上雲暫存＋寄信兩支 RPC 串著跑，等最久的掛載點之一，掛 loading 遊戲
+    let endLoading = beginLoading('簽名邀請寄送中');
     try {
       // 先把目前答案上雲（受邀者的 read-only 問卷讀的是線上暫存）
       const drafted = await saveDraftForInvite();
@@ -58,7 +64,8 @@ export function useInvites({ currentSheet, authToken, saveDraftForInvite, onToke
         sheet.record,
         authToken.value,
         signName,
-        email
+        email,
+        false
       );
       if (result && result.success) {
         ElMessage.success('邀請信已寄給 ' + email + '，等待對方簽名');
@@ -69,11 +76,52 @@ export function useInvites({ currentSheet, authToken, saveDraftForInvite, onToke
         onTokenExpired();
         return false;
       }
-      ElMessage.error(result && result.message ? result.message : '發送邀請失敗');
       if (result && result.status === 'signed') {
-        // 競態：這一格其實已經簽完了，刷新讓卡片顯示真實狀態
+        // 這一格已有完成的簽名（主動重發、或發信瞬間對方剛簽完的競態都走這裡）：
+        // 先刷新讓卡片顯示真實狀態，二段確認後才 force 作廢舊簽名重發
         await refreshInvites();
+        // 二段確認等使用者做決定，先收掉遊戲卡別蓋住確認 drawer
+        endLoading();
+        try {
+          await drawerConfirm(
+            '「' +
+              signName +
+              '」已由受邀者（' +
+              result.invite.email +
+              '）完成簽名！重發邀請會作廢對方目前的簽名並寄出新邀請信，對方需要重簽一次。',
+            '這一格已經簽名完成',
+            {
+              confirmButtonText: '作廢舊簽名，重發邀請',
+              cancelButtonText: '保留對方的簽名',
+              type: 'warning',
+            }
+          );
+        } catch {
+          return false;
+        }
+        endLoading = beginLoading('簽名邀請寄送中');
+        const forced = await gasRun(
+          'sendInvite',
+          sheet.refer,
+          sheet.record,
+          authToken.value,
+          signName,
+          email,
+          true
+        );
+        if (forced && forced.tokenExpired) {
+          onTokenExpired();
+          return false;
+        }
+        if (forced && forced.success) {
+          ElMessage.success('已作廢舊簽名，新邀請信已寄給 ' + email + '，等待對方重簽');
+          await refreshInvites();
+          return true;
+        }
+        ElMessage.error(forced && forced.message ? forced.message : '發送邀請失敗');
+        return false;
       }
+      ElMessage.error(result && result.message ? result.message : '發送邀請失敗');
       return false;
     } catch (err) {
       console.error('sendInvite failed', err);
@@ -81,6 +129,7 @@ export function useInvites({ currentSheet, authToken, saveDraftForInvite, onToke
       return false;
     } finally {
       inviteBusy.value = false;
+      endLoading();
     }
   }
 
@@ -115,7 +164,7 @@ export function useInvites({ currentSheet, authToken, saveDraftForInvite, onToke
         // 競態：受邀者剛簽完、你的畫面還沒刷新——先讓卡片顯示簽名，二段確認才真的撤
         await refreshInvites();
         try {
-          await ElMessageBox.confirm(
+          await drawerConfirm(
             '「' +
               signName +
               '」剛剛已由受邀者（' +

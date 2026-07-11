@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { formatDetector, findPrimaryKey, validateColumn, statusDetector } from '../src/utils/columnRules';
+import {
+  formatDetector,
+  findPrimaryKey,
+  validateColumn,
+  statusDetector,
+  noneDeclared,
+} from '../src/utils/columnRules';
 
 function makeColumn(overrides = {}) {
   return {
@@ -182,6 +188,51 @@ describe('validateColumn', () => {
   });
 });
 
+describe('noneable（D 註記「無資料」宣告，Phase 15）', () => {
+  it('noneDeclared：noneable 且值為「無資料」才成立', () => {
+    expect(noneDeclared(makeColumn({ noneable: true, value: '無資料' }))).toBe(true);
+    expect(noneDeclared(makeColumn({ noneable: true, value: '無' }))).toBe(false);
+    expect(noneDeclared(makeColumn({ value: '無資料' }))).toBe(false);
+  });
+
+  it('M+D：必填欄宣告「無資料」通過必填與格式檢查', () => {
+    const col = makeColumn({ format: 'M', must: true, noneable: true, value: '無資料' });
+    validateColumn(col, [col]);
+    expect(col.status).toBe('');
+  });
+
+  it('沒有 D 的欄位填「無資料」照樣被格式檢查擋下', () => {
+    const col = makeColumn({ format: 'M', value: '無資料' });
+    validateColumn(col, [col]);
+    expect(col.status).toBe('這裡應該輸入電話號碼，如0912345678');
+  });
+
+  it('群組全員宣告「無資料」＝視同全空，被「不得全空」擋下', () => {
+    const a = makeColumn({ id: 'a', format: 'M', group: 'g', noneable: true, value: '無資料' });
+    const b = makeColumn({ id: 'b', format: 'M', group: 'g', noneable: true, value: '無資料' });
+    validateColumn(a, [a, b]);
+    expect(a.status).toContain('不得全為空');
+    expect(b.status).toContain('不得全為空');
+  });
+
+  it('群組一人真資料＋一人「無資料」：通過', () => {
+    const a = makeColumn({ id: 'a', format: 'M', group: 'g', noneable: true, value: '0912345678' });
+    const b = makeColumn({ id: 'b', format: 'M', group: 'g', noneable: true, value: '無資料' });
+    validateColumn(a, [a, b]);
+    validateColumn(b, [a, b]);
+    expect(a.status).toBe('');
+    expect(b.status).toBe('');
+  });
+
+  it('uniGroup：「無資料」視同空值，不與其他成員的真實值判為重複', () => {
+    const a = makeColumn({ id: 'a', group: 'g', uniGroup: true, noneable: true, value: '無資料' });
+    const b = makeColumn({ id: 'b', group: 'g', uniGroup: true, noneable: true, value: '真的值' });
+    const c = makeColumn({ id: 'c', group: 'g', uniGroup: true, noneable: true, value: '另一個值' });
+    validateColumn(b, [a, b, c]);
+    expect(b.status).toBe('');
+  });
+});
+
 describe('statusDetector', () => {
   it('必答未答 → danger', () => {
     const col = makeColumn({ must: true, value: '' });
@@ -203,3 +254,4 @@ describe('statusDetector', () => {
     expect(statusDetector(col)).toBeUndefined();
   });
 });
+

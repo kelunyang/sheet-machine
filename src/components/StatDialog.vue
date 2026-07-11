@@ -1,8 +1,9 @@
 <template>
-  <el-dialog
+  <el-drawer
     :show-close="false"
     v-model="dialog.show"
-    :fullscreen="dialog.fullscreen"
+    direction="ttb"
+    size="60%"
     :title="sheetName + '目前總填答率為：' + completeRate + '%'"
   >
     <el-space direction="vertical" fill wrap style="width: 100%">
@@ -27,15 +28,15 @@
         >關閉對話框</el-button
       >
     </el-space>
-  </el-dialog>
+  </el-drawer>
 </template>
 
 <script setup>
 import { ref, reactive, computed } from 'vue';
-import { ElMessage } from 'element-plus';
 import dayjs from 'dayjs';
 import _ from 'lodash';
 import { gasRun } from '../composables/useGasRpc';
+import { beginLoading } from '../composables/useLoadingGame';
 import { downloadCSV } from '../utils/formatters';
 import ErrorAlert from './ErrorAlert.vue';
 
@@ -45,7 +46,7 @@ const props = defineProps({
   sheetName: { type: String, default: '' },
 });
 
-const dialog = reactive({ show: false, fullscreen: true });
+const dialog = reactive({ show: false });
 const stats = ref([]);
 const loadTick = ref(0);
 const errorMessage = ref('');
@@ -72,7 +73,8 @@ async function open() {
   if (!props.sheet) {
     return;
   }
-  ElMessage('載入統計列表中，請稍後');
+  // compareSheets 要掃整份 record 算填答率，跑得久——掛 loading 遊戲，進度不再另發 toast
+  const endLoading = beginLoading('填答率統計計算中');
   try {
     const statsObj = await gasRun('compareSheets', props.sheet.refer, props.sheet.record);
     errorMessage.value = '';
@@ -82,6 +84,8 @@ async function open() {
   } catch (err) {
     errorMessage.value = err && err.message ? err.message : '載入統計失敗';
     dialog.show = true;
+  } finally {
+    endLoading();
   }
 }
 

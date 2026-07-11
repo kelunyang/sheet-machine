@@ -1,0 +1,31 @@
+# 收尾檢查清單（每次結束前跑一遍）
+
+每次一段開發結束、要交付/部署前，逐項確認以下事項。這份清單是「刻意設計」的一部分，
+要推翻任一條先討論（同 plan/issue.md 規矩）。
+
+## 1. footer 版權列
+
+- footer 由 `src/components/AppFooter.vue` **單一元件**渲染；App.vue 內不得再出現硬編碼版權列。
+- 格式：`Developer: Kelunyang@LKSH {當年} · by claude since 2026 with ♥ · github`
+  - 年份走 `dayjs().format('YYYY')` **自動取當年**——正常情況不必手改；但收尾時仍**目視確認畫面上
+    年份正確、無跨年殘留**（例如快取或寫死的舊值）。
+  - `since 2026` 是固定起始年，不隨當年變。
+  - 愛心＝FontAwesome `fa-solid fa-heart`、github＝`fa-brands fa-github`，github 連結
+    （`https://github.com/kelunyang/sheet-machine`）與 Kelunyang 的 mailto 不變。
+- 確認 footer 在**問卷列表** drawer 與其它有掛 `<AppFooter />` 的地方都正常顯示。
+
+## 2. 圖示（FontAwesome CDN）
+
+- UI 圖示一律 FontAwesome：模板 `<i class="fa-solid fa-...">` / `<i class="fa-brands fa-github">`，
+  按鈕內用 `<el-icon>` 外殼包住 FA `<i>`。**不再引 `@element-plus/icons-vue`**（全域註冊已移除）。
+- 新增圖示後，收尾時**實機**確認該圖示是 FA 字符、**不是豆腐框 □**（GAS 沙盒 CSP 若擋 webfont
+  會顯示豆腐框——這是 FA CDN 方案的唯一風險，見 plan/issue.md「圖示走 FontAwesome CDN」）。
+- 不准在模板/字串放 emoji 當圖示（既有 📝 資料標記、pixelSprites 例外不動）。
+
+## 3. 建置與品質關卡
+
+- `npm run lint`（含 `vue/no-undef-properties`——改過模板一定要跑）。
+- `npm test`。
+- `npm run build`——順帶確認 `dist/index.html` 內仍保留 FA/PapaParse 的外部 `<link>`/`<script>`
+  （singlefile 不 inline 遠端 URL，掉了代表引用被誤刪）。
+- 部署遵守 memory 的部署原則（測試部署用 `deploy -i` 就地更新，不動其他既有部署）。
