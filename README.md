@@ -53,7 +53,26 @@ npm install
 npm run build      # 產生 dist/index.html（GAS 部署格式）
 ```
 
-### 2. 準備兩個 GAS 專案
+### 2. 建立「問卷列表」母表（**先做這個，其他子表都從它生出來**）
+
+問卷列表是整個系統的母表：管理者之後用選單「新增問卷」會**自動生出對照表單（結構表）、
+紀錄表（填入表）子表並掛回母表新列**。但母表本身要先手動建好——工具程式只會 `getSheetByName`，
+不會自建分頁與表頭：
+
+1. 新建一份 Google 試算表（這就是母表）。
+2. 把**第一個分頁改名為 `問卷列表`**（名稱必須一模一樣）。
+3. 在第 1 列填 **16 欄標題（A:P）**——web app 把第 1 列當標題略過、第 2 列起才是問卷：
+
+   > A 表單名稱｜B 對照表單ID｜C 新表單ID｜D 填表截止日期Timestamp｜E 檢視截止時間Timestamp｜
+   > F 預設修改｜G 簽名｜H 登入後說明｜I 登入前說明｜J 填寫完畢備註語｜K 登入失敗備註語｜
+   > L 顯示｜M 管理員Email｜N 固定ID｜O 開放進入｜P 亂數出題
+
+   各欄語意（timestamp 用毫秒、布林填「是/否」等）見 [`plan/dataformat.md`](plan/dataformat.md) 第 1 節。
+4. 記下這份試算表的 **Sheet ID**（網址 `/d/` 後那段），等一下要填進 web app 專案的 `listSheetID`。
+
+> 資料列不必手動填——建好空表頭即可，之後全用下面步驟 3(B) 的「問卷管理」選單新增問卷。
+
+### 3. 準備兩個 GAS 專案
 
 本系統有**兩個各自獨立**的 Apps Script 專案（各有自己的 ScriptProperties，互不相通）：
 
@@ -72,12 +91,19 @@ npm run gpush            # 複製 Code.js + dist/index.html 到 appscript/ 並 c
 （設定已寫在 `appscript/appsscript.json`：`executeAs: USER_DEPLOYING`、`access: ANYONE_ANONYMOUS`。）
 
 **(B) 問卷列表容器綁定專案** — 管理者建卷/改卷/匯出的工具，程式碼在 [`tools/export.js`](tools/export.js)：
-把該檔內容手動貼進「問卷列表試算表」的「擴充功能 → Apps Script」，存檔後重整試算表，
-會多一個「問卷管理」選單。**這個專案不隨 clasp 部署**（見 [`tools/README.md`](tools/README.md)）。
+把該檔內容手動貼進**步驟 2 建的那份問卷列表母表**的「擴充功能 → Apps Script」，存檔後重整試算表，
+會多一個「問卷管理」選單（新增問卷、建立新問卷骨架、欄位輔助精靈、修改設定/內容、輸出、格式檢查）。
+**這個專案不隨 clasp 部署**（見 [`tools/README.md`](tools/README.md)）。
 
-### 3. 設定 ScriptProperties（見下方第四節）
+### 4. 設定 ScriptProperties（見下方第四節）
 
-兩個專案都要各自設。設完就能用；改參數即時生效、**不必重新部署**。
+兩個專案都要各自設（web app 的 `listSheetID` 填步驟 2 母表的 Sheet ID）。
+設完就能用；改參數即時生效、**不必重新部署**。
+
+### 5. 用「問卷管理」選單長出子表
+
+回到母表，選單「問卷管理 → 新增問卷（貼上對照表單ID）」或「建立新問卷骨架（從零開始）」，
+即會建立對照表單/紀錄表並自動掛回母表新列。之後填寫者就能從 web app 網址進入該問卷。
 
 ### 常用指令
 
