@@ -77,6 +77,7 @@ dev（`npm run dev`）由 Vite 從 node_modules 解析、不注入 import map（
 
 | 檔案 | 說明 |
 |------|------|
+| `README.md` | 對外安裝／維運入口：系統架構、雙 GAS 專案部署步驟、**ScriptProperties 完整清單（兩專案各一張表）**、loading 小遊戲換主題/關閉指引（含小人共用說明）、文件導覽。給第一次拿到專案的人看 |
 | `src/App.vue` | 主元件：狀態編排、對話框流程、GAS 呼叫 |
 | `src/components/` | UI 元件：FormField、SheetCard、FormToolbar、SignatureToolbar、JwtCountdownBar、FieldTimeline、LifecycleTimeline、InviteeSignDialog、PinCodeInput、MultiSelectDrawer、FileUploadDrawer、TempTransferDrawers、ConfirmDrawer、LoadingGame、Stat/LatestDialog、ErrorAlert、AppFooter（版權列單一來源）——各元件職責與彈窗規範（全站零 el-dialog、drawer 方向、`.drawer-flow-title`）見 plan/struct.md「前端元件細節」 |
 | `src/composables/` | 有狀態共用邏輯：useCrypto、useGasRpc、useDraft、useInvites、useSignatures、useJwtSession、useConfirmDrawer（全站禁用 ElMessageBox）、useLoadingGame——細節見 plan/struct.md |
