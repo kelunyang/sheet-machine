@@ -559,14 +559,18 @@ sticky 條（JwtCountdownBar/FormToolbar）捲動時才能越過標題升到 y=0
 - **CollapsibleControls**（Phase 22）：手機用的可收合外殼，`<slot>` 包住 FormToolbar／SignatureToolbar
   的按鈕群那個 `__controls` div（JWT 條留外層、永遠可見）。只在**手機（≤768px，`matchMedia`）**
   啟用：進場展開，往下捲題目/簽名（`scrollTop` 遞增且 >32px，捲動容器＝`rootRef.closest('.el-drawer__body')`）
-  自動收合成 handle（「更多功能請點此」），點 handle 手動展開（往上捲不動作）。收合用
-  `grid-template-rows 1fr↔0fr` 手風琴（不必量內容高度）；`active` prop（父層據按鈕顯示條件傳，
+  自動收合成 handle（「更多功能請點此」，往下捲需遞增 >6px、含頂端 32px 寬限濾抖動）；
+  **捲回頂端（≤32px）自動彈開**；也可點 handle 手動展開/收合（手動展開有 350ms 寬限期，
+  擋掉點擊當下慣性捲動誤收）。收合用 `grid-template-rows 1fr↔0fr` 手風琴（不必量內容高度）；
+  具名插槽 **`#peek`**：收合時仍露出的主要動作（展開態/桌機隱藏，本尊由預設 slot 負責），
+  簽名列用它保留「下一個簽名」。`active` prop（父層據按鈕顯示條件傳，
   FormToolbar `!viewOnly||hasLastSubmit`、SignatureToolbar `signatureCount>0||hasInvites`）為 false
   時退化 passthrough、不長 handle；桌機/平板 `collapsible=false` 原樣顯示、無 handle。
 - **SignatureToolbar**：簽名確認 drawer 的 sticky 控制列（比照 FormToolbar）：JWT 條＋
   「下一個簽名（n／m）／清除簽名／遠端簽名」＋「更新邀請狀態」（有邀請卡才出現，全格共用），
   前三顆作用於當前輪播格（簽誰由 body 的警告 alert 說明），本機沒有待簽格也沒邀請時
-  只剩 JWT 條。按鈕群同樣包在 CollapsibleControls 內、手機可收合（見上）。
+  只剩 JWT 條。按鈕群同樣包在 CollapsibleControls 內、手機可收合（見上）；
+  「下一個簽名」另放進 `#peek`，手機收合後仍露出（否則只剩 handle 使用者不知能換下一位）。
   主行動「送出簽名」與「回去修改」同樣收斂到 drawer footer（.formFooter），
   內容流零動作按鈕——邀請卡的格別操作放在卡片 header 右側（.inviteCardHeader__actions）：
   pending/expired 攤平主行動「重發授權信」＋「更多 ▾」dropdown（更換Email／撤回授權）；

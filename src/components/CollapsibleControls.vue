@@ -5,6 +5,11 @@
         <slot></slot>
       </div>
     </div>
+    <!-- peek：收合後仍露出的主要動作（如簽名列的「下一個簽名」），讓使用者知道還能做什麼；
+         展開態或桌機（collapsible=false）不顯示，主按鈕由 body 內的本尊負責，避免重複 -->
+    <div v-if="collapsible && !expanded && $slots.peek" class="cc-peek">
+      <slot name="peek"></slot>
+    </div>
     <button
       v-if="collapsible"
       type="button"
@@ -25,9 +30,11 @@ import { ref, computed, onMounted, onBeforeUnmount } from 'vue';
 // 手機用的可收合控制列外殼（Phase 22）：把 toolbar 的「按鈕群」包起來——
 // JWT 倒數條在外層（永遠留著、效期是時間敏感資訊），只有這裡包住的按鈕會收合。
 // 手機（≤768px）往下捲題目/簽名時自動收成 handle（「更多功能請點此」），
-// 點 handle 手動展開；往上捲不動作（展開一律走 handle）。
+// 捲回頂端（top≈0）自動彈開；也可隨時點 handle 手動展開／收合。
 // 桌機/平板：collapsible=false，原樣顯示、無 handle、無收合。
 // active=false（如 viewOnly 無任何按鈕）時整個外殼退化為單純 passthrough，不長 handle。
+// 具名插槽 #peek：收合後仍露出的主要動作（如簽名列的「下一個簽名」），
+// 讓使用者收合狀態下也知道能做什麼；展開態/桌機不顯示（主按鈕由預設 slot 的本尊負責）。
 const props = defineProps({
   // 這個實例是否有可收合的內容（父層據按鈕顯示條件決定，避免收合空殼長出 handle）
   active: { type: Boolean, default: true },
@@ -42,12 +49,17 @@ const expanded = ref(true);
 const collapsible = computed(() => isMobile.value && props.active);
 
 const MOBILE_QUERY = '(max-width: 768px)';
-// 捲過這段距離才自動收合，避免頂端輕微抖動誤觸
+// 捲過這段距離才算「離開頂端」；在此之內（含 top:0）視為在頂端 → 自動展開
 const COLLAPSE_THRESHOLD = 32;
+// 需明顯往下捲才收合，濾掉頂端輕微抖動與「點 handle 展開」當下的慣性回彈
+const SCROLL_DELTA = 6;
+// 手動展開後的寬限期：擋掉點擊當下的慣性捲動把它立刻收回去（bug：按了不彈開）
+const EXPAND_GRACE_MS = 350;
 
 let mql = null;
 let scrollEl = null;
 let lastScrollTop = 0;
+let expandGraceUntil = 0;
 
 function onMqlChange(e) {
   isMobile.value = e.matches;
@@ -56,8 +68,11 @@ function onMqlChange(e) {
 function onScroll() {
   if (!collapsible.value || !scrollEl) return;
   const st = scrollEl.scrollTop;
-  // 只在往下捲（讀題/簽名）且已離開頂端時自動收合；往上捲不動作
-  if (st > lastScrollTop && st > COLLAPSE_THRESHOLD) {
+  if (st <= COLLAPSE_THRESHOLD) {
+    // 捲回頂端：自動彈開
+    expanded.value = true;
+  } else if (st - lastScrollTop > SCROLL_DELTA && Date.now() > expandGraceUntil) {
+    // 明顯往下捲（讀題/簽名）且已離頂：自動收合；手動展開寬限期內不收
     expanded.value = false;
   }
   lastScrollTop = st;
@@ -65,6 +80,8 @@ function onScroll() {
 
 function toggle() {
   expanded.value = !expanded.value;
+  // 手動展開時給一段寬限期，避免點擊當下的慣性捲動誤把它收回去
+  if (expanded.value) expandGraceUntil = Date.now() + EXPAND_GRACE_MS;
 }
 
 onMounted(() => {
@@ -107,6 +124,13 @@ onBeforeUnmount(() => {
 .cc-body-wrap > .cc-body {
   overflow: hidden;
   min-height: 0;
+}
+
+/* peek：收合後仍露出的按鈕列，內距比照各 toolbar 的 __controls */
+.cc-peek {
+  display: flex;
+  gap: 8px;
+  padding: 8px var(--el-drawer-padding-primary, 20px);
 }
 
 /* handle：抽屜把手，整條可點；色走主題語意變數（不寫死 hex） */

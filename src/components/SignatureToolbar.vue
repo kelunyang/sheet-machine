@@ -26,6 +26,13 @@
           更新邀請狀態
         </el-button>
       </div>
+      <!-- 收合後仍露出「下一個簽名」，否則使用者只看到 handle 不知道能換下一位要簽的人 -->
+      <template #peek>
+        <el-button v-if="signatureCount > 1" class="signature-toolbar__next" size="large" type="primary" @click="emit('next')">
+          <el-icon class="el-icon--left"><i class="fa-solid fa-arrow-right"></i></el-icon>
+          下一個簽名（{{ currentIndex + 1 }}／{{ signatureCount }}）
+        </el-button>
+      </template>
     </CollapsibleControls>
   </div>
 </template>
@@ -75,6 +82,11 @@ const emit = defineEmits(['renew', 'next', 'clear', 'invite', 'refresh']);
 /* 間距交給 flex gap，抵銷 Element Plus 相鄰按鈕的預設 margin */
 .signature-toolbar__controls .el-button + .el-button {
   margin-left: 0;
+}
+
+/* peek 露出的「下一個簽名」撐滿寬度，跟收合前的排版一致 */
+.signature-toolbar__next {
+  width: 100%;
 }
 
 /* 手機直式：按鈕撐滿寬度平均分配，避免擠成一團 */
