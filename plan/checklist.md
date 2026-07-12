@@ -29,3 +29,14 @@
 - `npm run build`——順帶確認 `dist/index.html` 內仍保留 FA/PapaParse 的外部 `<link>`/`<script>`
   （singlefile 不 inline 遠端 URL，掉了代表引用被誤刪）。
 - 部署遵守 memory 的部署原則（測試部署用 `deploy -i` 就地更新，不動其他既有部署）。
+
+## 4. 後端維運工具（部署後手動掛時間觸發器，程式不自建）
+
+- **Phase 18 `rebuildDraftSpreadsheet()`**：離線重建暫存試算表（需設 ScriptProperties
+  `draftBackupFolderID`；選用 `draftRebuildMinRows`）。建議離峰。
+- **Phase 21 `scanLoginLog()`**：定時掃 `_logins` 稽核日誌偵測撞庫（建議每小時或每日、離峰）。
+  選用 ScriptProperties（皆有預設）：`securityAlertEmail`（掃描警報收件人，未設寄觸發器擁有者）、
+  `loginFailMax`／`loginCooldownMinutes`／`scanAlertThreshold`／`scanAlertWindowMinutes`／
+  `scanAlertCooldownMinutes`／`loginScanFailThreshold`／`loginScanDistinctThreshold`。
+  `draftEncSecret`（Phase 20/21 共用 HMAC 派生 secret）首次自動生成，**輪替/遺失＝所有暫存＋登入假名重算**。
+- 參數建議值、警報信判讀、大批通知/被鎖等維運場景 → 見 **plan/security.md**（維運手冊）。

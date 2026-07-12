@@ -26,7 +26,7 @@
         <span style="font-size: 1.2em">
           匯出內容包含：文字、選單、已上傳的檔案連結。 匯出的檔案經過 AES-256
           加密，打開後會看到亂碼。
-          解密需要使用「你的登入帳號 + 你現在輸入的密碼」組合的密碼。
+          解密需要「用同一組身分登入本問卷 + 你現在輸入的密碼」，兩者缺一不可。
         </span>
       </template>
     </el-alert>
@@ -68,8 +68,8 @@
     <el-alert title="注意事項" type="info" show-icon>
       <template #default>
         <span style="font-size: 1.2em">
-          匯入的檔案經過 AES-256 加密。 解密需要使用「你的登入帳號 +
-          匯出時設定的密碼」組合的密碼。 如果登入帳號不同或密碼錯誤，將無法解密。
+          匯入的檔案經過 AES-256 加密。 解密需要「用同一組身分登入本問卷 +
+          匯出時設定的密碼」。 如果登入身分不同或密碼錯誤，將無法解密。
         </span>
       </template>
     </el-alert>
@@ -106,7 +106,7 @@ import {
   filterImportableQueue,
   applyQueueToColumns,
 } from '../utils/tempQueue';
-import { getQueueAnswers, findAnsIndex, replaceAns } from '../utils/tempStorage';
+import { loadQueue, saveQueue } from '../utils/tempStorage';
 import { encrypt, decrypt } from '../composables/useCrypto';
 import JwtCountdownBar from './JwtCountdownBar.vue';
 
@@ -114,8 +114,9 @@ const props = defineProps({
   authDb: { type: Array, required: true },
   // 整份 columnDB：匯入時就地回寫欄位值
   columnDb: { type: Array, required: true },
-  // 問卷 sheetID（localStorage 暫存的 key）
-  uid: { type: String, default: '' },
+  // 暫存金鑰對 { id, enc }（Phase 20）：id 假名進匯出檔加密金鑰料與 localStorage key，
+  // enc 給本機暫存層加解密；null＝尚未登入
+  draftKeys: { type: Object, default: null },
   // 問卷清單列 id（匯出 payload 的 formId）
   sid: { type: String, default: '' },
   // 問卷名稱（匯出檔名用）
@@ -157,23 +158,21 @@ function onFileSelected(event) {
 }
 
 async function exportTemp() {
-  let primaryKey = findPrimaryKey(props.authDb);
-  if (primaryKey === undefined) {
-    ElMessage.error('找不到主鍵欄位，無法匯出');
+  if (props.draftKeys === null) {
+    ElMessage.error('找不到暫存金鑰，無法匯出');
     return;
   }
-  let queueAnswers = getQueueAnswers(primaryKey.value);
-  let ansIndex = findAnsIndex(queueAnswers, props.uid);
-  let currentAns = ansIndex > -1 ? queueAnswers[ansIndex] : undefined;
-  if (!currentAns || currentAns.queue.length === 0) {
+  let queue = await loadQueue(props.draftKeys);
+  if (!queue || queue.length === 0) {
     ElMessage.error('沒有可以匯出的暫存資料');
     return;
   }
   // 組成匯出物件（與線上暫存同一格式）
-  let exportData = buildQueuePayload(props.sid, currentAns.queue);
+  let exportData = buildQueuePayload(props.sid, queue);
   try {
-    // 加密金鑰 = 主鍵值 + 密碼
-    const encryptPassword = primaryKey.value + exportDrawer.password;
+    // 加密金鑰 = id 假名 + 密碼（Phase 20：明文主鍵值不再進金鑰料；
+    // 跨裝置在另一台登入會拿到同一把假名，照樣解得開）
+    const encryptPassword = props.draftKeys.id + exportDrawer.password;
     const encrypted = await encrypt(exportData, encryptPassword);
     // 下載檔案
     const blob = new Blob([encrypted], { type: 'application/octet-stream' });
@@ -199,17 +198,25 @@ function importTemp() {
     ElMessage.error('請先選擇檔案');
     return;
   }
-  let primaryKey = findPrimaryKey(props.authDb);
-  if (primaryKey === undefined) {
-    ElMessage.error('找不到主鍵欄位，無法匯入');
+  if (props.draftKeys === null) {
+    ElMessage.error('找不到暫存金鑰，無法匯入');
     return;
   }
   const reader = new FileReader();
   reader.onload = async function (e) {
     try {
-      // 解密金鑰 = 當前主鍵值 + 密碼
-      const decryptPassword = primaryKey.value + importDrawer.password;
-      const importData = await decrypt(e.target.result, decryptPassword);
+      // 解密金鑰 = id 假名 + 密碼；舊格式匯出檔 fallback = 主鍵值 + 密碼
+      // （Phase 5 決策本就保留 P 欄值在記憶體，登入後仍在 authDb）
+      let importData;
+      try {
+        importData = await decrypt(e.target.result, props.draftKeys.id + importDrawer.password);
+      } catch (firstErr) {
+        let primaryKey = findPrimaryKey(props.authDb);
+        if (primaryKey === undefined) {
+          throw firstErr;
+        }
+        importData = await decrypt(e.target.result, primaryKey.value + importDrawer.password);
+      }
       // 驗證檔案格式
       if (!importData.version || !importData.data || !importData.data.queue) {
         ElMessage.error('匯入檔案格式不正確');
@@ -226,8 +233,8 @@ function importTemp() {
         ElMessage.error('匯入失敗：沒有任何欄位可以匯入（欄位結構可能已變更）');
         return;
       }
-      // 儲存到 localStorage 並直接更新 columnDB，讓畫面立即反應
-      replaceAns(primaryKey.value, props.uid, importedQueue);
+      // 加密存回 localStorage 並直接更新 columnDB，讓畫面立即反應
+      saveQueue(props.draftKeys, importedQueue);
       applyQueueToColumns(importedQueue, props.columnDb);
       emit('imported');
       // 顯示結果訊息

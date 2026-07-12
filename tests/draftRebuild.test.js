@@ -194,32 +194,44 @@ function inviteRow(token, referSSID, primaryValue, signName, status) {
   ];
 }
 
-describe('compactDraftRows_（草稿分頁壓縮：每主鍵最新列）', () => {
-  it('多版本 → 留最新一列（superseded 舊版被丟），保留主鍵首次出現順序', () => {
+describe('compactDraftRows_（草稿分頁壓縮：每 (主鍵, referSSID) 複合鍵最新列）', () => {
+  it('多版本 → 留最新一列（superseded 舊版被丟），保留複合鍵首次出現順序', () => {
     const rows = [
       DRAFT_HEADER,
-      ['測試生甲', 1, 'gz:v1'],
-      ['測試生乙', 2, 'gz:x'],
-      ['測試生甲', 3, 'gz:v2'],
+      ['測試生甲', 1, 'REF_1', 'gz:v1'],
+      ['測試生乙', 2, 'REF_1', 'gz:x'],
+      ['測試生甲', 3, 'REF_1', 'gz:v2'],
     ];
     expect(compactDraftRows_(rows)).toEqual([
-      ['測試生甲', 3, 'gz:v2'],
-      ['測試生乙', 2, 'gz:x'],
+      ['測試生甲', 3, 'REF_1', 'gz:v2'],
+      ['測試生乙', 2, 'REF_1', 'gz:x'],
+    ]);
+  });
+
+  it('跨問卷同主鍵各自保留（複合鍵，Phase 19 單表化）', () => {
+    const rows = [
+      DRAFT_HEADER,
+      ['測試生甲', 1, 'REF_1', 'gz:formA'],
+      ['測試生甲', 2, 'REF_2', 'gz:formB'],
+    ];
+    expect(compactDraftRows_(rows)).toEqual([
+      ['測試生甲', 1, 'REF_1', 'gz:formA'],
+      ['測試生甲', 2, 'REF_2', 'gz:formB'],
     ]);
   });
 
   it('表頭列（首欄字面字串）被跳過、不當資料', () => {
-    expect(compactDraftRows_([DRAFT_HEADER, ['測試生甲', 1, 'gz:v1']]).length).toBe(1);
+    expect(compactDraftRows_([DRAFT_HEADER, ['測試生甲', 1, 'REF_1', 'gz:v1']]).length).toBe(1);
   });
 
   it('變長 chunk 列補 \'\' 對齊成矩形', () => {
     const out = compactDraftRows_([
       DRAFT_HEADER,
-      ['測試生甲', 1, 'c1', 'c2', 'c3'],
-      ['測試生乙', 2, 'x'],
+      ['測試生甲', 1, 'REF_1', 'c1', 'c2', 'c3'],
+      ['測試生乙', 2, 'REF_1', 'x'],
     ]);
-    expect(out[0].length).toBe(5);
-    expect(out[1]).toEqual(['測試生乙', 2, 'x', '', '']);
+    expect(out[0].length).toBe(6);
+    expect(out[1]).toEqual(['測試生乙', 2, 'REF_1', 'x', '', '']);
   });
 
   it('空陣列與只有表頭都回空', () => {
@@ -228,7 +240,9 @@ describe('compactDraftRows_（草稿分頁壓縮：每主鍵最新列）', () =>
   });
 
   it('無主鍵的空列被跳過', () => {
-    expect(compactDraftRows_([DRAFT_HEADER, ['', '', ''], ['測試生甲', 1, 'gz:v1']]).length).toBe(1);
+    expect(
+      compactDraftRows_([DRAFT_HEADER, ['', '', '', ''], ['測試生甲', 1, 'REF_1', 'gz:v1']]).length
+    ).toBe(1);
   });
 });
 
@@ -257,7 +271,9 @@ describe('compactInviteRows_（_invites 壓縮：每格最新列原樣快照）'
 });
 
 describe('rebuildDraftSpreadsheet（重建編排）', () => {
-  // 標準 fixture：_invites（同格兩版）＋草稿分頁（甲兩版含變長 chunk＋乙）＋認不得的分頁＋空分頁
+  // 標準 fixture：_invites（同格兩版）＋ _draft 單表（甲兩版含變長 chunk＋乙＋跨問卷）
+  // ＋ Phase 19 前殘留的舊亂數名草稿分頁（首格同表頭字串，按名稱分派認不得 → 原樣照抄）
+  // ＋認不得的分頁＋空分頁
   function standardSheets() {
     return [
       makeSheet('_invites', [
@@ -266,11 +282,16 @@ describe('rebuildDraftSpreadsheet（重建編排）', () => {
         inviteRow('b'.repeat(64), 'REF_1', '測試生甲', '家長', 'signed'),
         inviteRow('c'.repeat(64), 'REF_1', '測試生乙', '家長', 'pending'),
       ]),
-      makeSheet('REF_1', [
+      makeSheet('_draft', [
         DRAFT_HEADER,
-        ['測試生甲', 1, 'gz:v1'],
-        ['測試生甲', 2, 'gz:v2a', 'gz:v2b'],
-        ['測試生乙', 3, 'gz:x'],
+        ['測試生甲', 1, 'REF_1', 'gz:v1'],
+        ['測試生甲', 2, 'REF_1', 'gz:v2a', 'gz:v2b'],
+        ['測試生乙', 3, 'REF_1', 'gz:x'],
+        ['測試生甲', 4, 'REF_2', 'gz:other-form'],
+      ]),
+      makeSheet('REF_OLD', [
+        ['primaryKey 主鍵', 'updatedAt 存檔(ms)', 'payload 草稿(gz:base64，超長切塊)'],
+        ['測試生甲', 1, 'gz:old'],
       ]),
       makeSheet('隨手記', [['未知格式'], ['第二列', 'x']]),
       makeSheet('空分頁', []),
@@ -298,19 +319,20 @@ describe('rebuildDraftSpreadsheet（重建編排）', () => {
 
   it('未達 draftRebuildMinRows 門檻 → 跳過重建（資料列數扣掉表頭列）', () => {
     const { gas, store, created } = makeEnv({
-      // fixture 資料列：邀請 3 + 草稿 3 + 未知 2 + 空 0 = 8（表頭不計）
-      props: { draftBackupFolderID: 'BACKUP_FOLDER', draftRebuildMinRows: '9' },
+      // fixture 資料列：邀請 3 + _draft 4 + 舊亂數分頁 2（Phase 20 改表頭字串後，
+      // 舊分頁首格不再等於 DRAFT_HEADER[0]、其表頭列計為資料——門檻計數保守方向）+ 未知 2 + 空 0 = 11
+      props: { draftBackupFolderID: 'BACKUP_FOLDER', draftRebuildMinRows: '12' },
       oldSheets: standardSheets(),
     });
     const msg = gas.rebuildDraftSpreadsheet();
-    expect(msg).toContain('未達門檻（資料 8 列 < draftRebuildMinRows 9）');
+    expect(msg).toContain('未達門檻（資料 11 列 < draftRebuildMinRows 12）');
     expect(store.draftSheetID).toBe('OLD_SS');
     expect(created.length).toBe(0);
   });
 
   it('門檻剛好達標 → 照常重建', () => {
     const { gas, store } = makeEnv({
-      props: { draftBackupFolderID: 'BACKUP_FOLDER', draftRebuildMinRows: '8' },
+      props: { draftBackupFolderID: 'BACKUP_FOLDER', draftRebuildMinRows: '11' },
       oldSheets: standardSheets(),
     });
     expect(gas.rebuildDraftSpreadsheet()).toContain('重建完成');
@@ -339,13 +361,22 @@ describe('rebuildDraftSpreadsheet（重建編排）', () => {
     expect(invites.state.rows[1][7]).toBe('signed');
     expect(invites.state.rows[2][0]).toBe('c'.repeat(64));
 
-    // 草稿分頁：表頭＋每主鍵最新列，表頭與短列補 '' 對齊成矩形
-    const draft = newSS.getSheetByName('REF_1');
+    // _draft 單表：表頭＋每 (主鍵, referSSID) 複合鍵最新列，表頭與短列補 '' 對齊成矩形
+    const draft = newSS.getSheetByName('_draft');
     expect(draft.state.frozenRows).toBe(1);
-    expect(draft.state.rows.length).toBe(3);
+    expect(draft.state.rows.length).toBe(4);
     expect(draft.state.rows[0]).toEqual(DRAFT_HEADER.concat(['']));
-    expect(draft.state.rows[1]).toEqual(['測試生甲', 2, 'gz:v2a', 'gz:v2b']);
-    expect(draft.state.rows[2]).toEqual(['測試生乙', 3, 'gz:x', '']);
+    expect(draft.state.rows[1]).toEqual(['測試生甲', 2, 'REF_1', 'gz:v2a', 'gz:v2b']);
+    expect(draft.state.rows[2]).toEqual(['測試生乙', 3, 'REF_1', 'gz:x', '']);
+    expect(draft.state.rows[3]).toEqual(['測試生甲', 4, 'REF_2', 'gz:other-form', '']);
+
+    // Phase 19 前殘留的舊亂數名草稿分頁：首格同表頭字串，但按名稱分派認不得 → 原樣照抄、不壓、不凍結
+    const oldDraft = newSS.getSheetByName('REF_OLD');
+    expect(oldDraft.state.frozenRows).toBe(0);
+    expect(oldDraft.state.rows).toEqual([
+      ['primaryKey 主鍵', 'updatedAt 存檔(ms)', 'payload 草稿(gz:base64，超長切塊)'],
+      ['測試生甲', 1, 'gz:old'],
+    ]);
 
     // 認不得的分頁原樣複製、不凍結；空分頁照建（空的）
     const notes = newSS.getSheetByName('隨手記');
@@ -359,14 +390,15 @@ describe('rebuildDraftSpreadsheet（重建編排）', () => {
     // 預設空白分頁已刪、無 __rebuild_ 暫名殘留
     expect(newSS.getSheets().map((s) => s.getName())).toEqual([
       '_invites',
-      'REF_1',
+      '_draft',
+      'REF_OLD',
       '隨手記',
       '空分頁',
     ]);
 
-    // 舊表原封不動（純讀，7 列邀請/草稿資料照舊）
+    // 舊表原封不動（純讀，邀請/草稿資料照舊）
     expect(oldSS.getSheetByName('_invites').state.rows.length).toBe(4);
-    expect(oldSS.getSheetByName('REF_1').state.rows.length).toBe(4);
+    expect(oldSS.getSheetByName('_draft').state.rows.length).toBe(5);
 
     // 檔案搬移：新表搬到舊表原父資料夾、舊表改名（帶「備份」字樣）搬進備份資料夾
     expect(files.NEW_SS_1.parent).toBe(parentFolder);

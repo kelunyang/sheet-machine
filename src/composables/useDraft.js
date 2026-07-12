@@ -4,25 +4,26 @@ import { drawerConfirm } from './useConfirmDrawer';
 import dayjs from 'dayjs';
 import _ from 'lodash';
 import { gasRun } from './useGasRpc';
-import { findPrimaryKey } from '../utils/columnRules';
 import {
   buildTempQueue,
   buildQueuePayload,
   filterImportableQueue,
   applyQueueToColumns,
 } from '../utils/tempQueue';
-import { getQueueAnswers, findAnsIndex, replaceAns } from '../utils/tempStorage';
+import { loadQueue, saveQueue } from '../utils/tempStorage';
+import { sealDraft, openDraft } from '../utils/draftCipher';
 
-// 線上暫存：把 localStorage 的 queue 上傳到雲端暫存試算表／登入後詢問還原。
+// 線上暫存：把本機的 queue 上傳到雲端暫存試算表／登入後詢問還原。
 // 後端 token 驗證（authByToken_）是安全邊界：沒有有效 token 就存取不到任何人的暫存。
+// Phase 20 端到端加密：上傳前以 draftKeys.enc 前端 sealDraft，雲端只落 smd1 密文
+// （後端零解密需求）；還原時前端 openDraft。
 export function useDraft({
   sheets,
   currentSID,
-  currentUID,
-  authDB,
   columnDB,
   tempFound,
   authToken,
+  draftKeys,
   onTokenExpired,
 }) {
   const draftEnabled = ref(false);
@@ -39,28 +40,21 @@ export function useDraft({
     if (currentSheet.length === 0) {
       return;
     }
-    let primaryKey = findPrimaryKey(authDB.value);
-    if (primaryKey === undefined) {
-      ElMessage.error('找不到主鍵欄位，無法線上暫存');
+    if (draftKeys.value === null) {
+      ElMessage.error('找不到暫存金鑰，無法線上暫存');
       return;
     }
-    let queueAnswers = getQueueAnswers(primaryKey.value);
-    let currentAnsIndex = findAnsIndex(queueAnswers, currentUID.value);
-    let currentAns = currentAnsIndex > -1 ? queueAnswers[currentAnsIndex] : undefined;
-    if (!currentAns || !currentAns.queue || currentAns.queue.length === 0) {
+    let queue = await loadQueue(draftKeys.value);
+    if (!queue || queue.length === 0) {
       ElMessage.error('目前沒有可以暫存的填寫內容');
       return;
     }
     // 與匯出檔相同的封裝格式，載入時走同一套驗證
-    let payload = buildQueuePayload(currentSID.value, currentAns.queue);
+    let payload = buildQueuePayload(currentSID.value, queue);
     draftSaving.value = true;
     try {
-      let result = await gasRun(
-        'saveDraft',
-        currentSheet[0].refer,
-        authToken.value,
-        JSON.stringify(payload)
-      );
+      let sealed = await sealDraft(payload, draftKeys.value.enc);
+      let result = await gasRun('saveDraft', currentSheet[0].refer, authToken.value, sealed);
       if (result && result.success) {
         ElMessage.success(
           '已線上暫存！換裝置用同一組身分登入即可還原（簽名需重簽）。暫存會被系統定期清理，請勿當作長期保存'
@@ -85,18 +79,14 @@ export function useDraft({
     let currentSheet = _.filter(sheets.value, (sheet) => {
       return sheet.id === currentSID.value;
     });
-    if (currentSheet.length === 0) {
+    if (currentSheet.length === 0 || draftKeys.value === null) {
       return false;
     }
     let payload = buildQueuePayload(currentSID.value, buildTempQueue(columnDB.value));
     draftSaving.value = true;
     try {
-      let result = await gasRun(
-        'saveDraft',
-        currentSheet[0].refer,
-        authToken.value,
-        JSON.stringify(payload)
-      );
+      let sealed = await sealDraft(payload, draftKeys.value.enc);
+      let result = await gasRun('saveDraft', currentSheet[0].refer, authToken.value, sealed);
       if (result && result.success) {
         return true;
       }
@@ -114,6 +104,9 @@ export function useDraft({
 
   // 登入成功後檢查雲端是否有暫存，有的話詢問是否還原
   async function checkOnlineDraft(currentSheet) {
+    if (draftKeys.value === null) {
+      return;
+    }
     let draft;
     try {
       draft = await gasRun('loadDraft', currentSheet.refer, authToken.value);
@@ -131,8 +124,14 @@ export function useDraft({
     }
     let importData;
     try {
-      importData = JSON.parse(draft.payload);
-    } catch {
+      // smd1 密文前端解；非 smd1 直接當 JSON 解析（防呆，比照後端 decode 的殘留分支）。
+      // 解不開（draftEncSecret 已輪替等）視同無暫存，不擋填寫流程
+      importData =
+        typeof draft.payload === 'string' && draft.payload.slice(0, 5) === 'smd1:'
+          ? await openDraft(draft.payload, draftKeys.value.enc)
+          : JSON.parse(draft.payload);
+    } catch (err) {
+      console.error('openDraft failed', err);
       return;
     }
     if (!importData.data || !importData.data.queue || importData.data.queue.length === 0) {
@@ -154,8 +153,7 @@ export function useDraft({
   }
 
   function applyOnlineDraft(importData) {
-    let primaryKey = findPrimaryKey(authDB.value);
-    if (primaryKey === undefined) {
+    if (draftKeys.value === null) {
       return;
     }
     // 與匯入暫存檔相同的還原邏輯：過濾只還原存在的欄位（包含檔案欄位的 Drive 連結）
@@ -164,7 +162,7 @@ export function useDraft({
       ElMessage.error('雲端暫存沒有任何欄位可以還原（欄位結構可能已變更）');
       return;
     }
-    replaceAns(primaryKey.value, currentUID.value, importedQueue);
+    saveQueue(draftKeys.value, importedQueue);
     applyQueueToColumns(importedQueue, columnDB.value);
     tempFound.value = true;
     ElMessage.success('已還原 ' + importedQueue.length + ' 個欄位的雲端暫存');

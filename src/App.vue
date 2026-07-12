@@ -95,7 +95,7 @@
       @renew="handleRenewClick"
     />
     <ErrorAlert :message="scriptError.message" />
-    <el-space direction="vertical" fill wrap style="width: 100%">
+    <el-space direction="vertical" fill wrap class="sheet-card-list" style="width: 100%">
       <el-alert
         title="重要公告"
         type="warning"
@@ -449,7 +449,7 @@
     ref="tempTransfer"
     :auth-db="authDB"
     :column-db="columnDB"
-    :uid="currentUID"
+    :draft-keys="draftKeys"
     :sid="currentSID"
     :sheet-name="currentQuery"
     :jwt-visible="authToken !== ''"
@@ -503,7 +503,7 @@ import {
 } from './utils/columnRules';
 import { prepareColumnsForDisplay } from './utils/columnPrep';
 import { buildTempQueue, hasFilledData } from './utils/tempQueue';
-import { upsertQueue, clearQueue, clearSubmitted, loadOrCreateAns } from './utils/tempStorage';
+import { loadQueue, saveQueue, removeQueue, migrateLegacyEntry } from './utils/tempStorage';
 import { gasRun, plainClone } from './composables/useGasRpc';
 import { useSignatures } from './composables/useSignatures';
 import { useDraft } from './composables/useDraft';
@@ -540,6 +540,10 @@ const columnDB = ref([]);
 const authDB = ref([]);
 // 登入後的 JWT：特權 RPC 只帶它，認證欄位值（個資）不再重傳（Phase 5）
 const authToken = ref('');
+// 暫存加密金鑰對（Phase 20）：readRecord 隨 token 回傳的 { id, enc }。
+// 比照 authToken 只放記憶體 ref——重新整理即消失、重登重取；id 假名可落地當
+// localStorage key／匯出檔金鑰料，enc 只用來加解密草稿、絕不落地
+const draftKeys = ref(null);
 const enableModify = ref(false);
 const sheets = ref([]);
 // 問卷列表頁重要公告（Markdown 原文，後端 getAnnouncement 供應，空字串＝不顯示）
@@ -592,6 +596,11 @@ const inviteResendCooldown = ref(0);
 let inviteCooldownTimer = null;
 let enteringInvitee = false; // OTP 通過的轉場旗標：drawer @close 時不要導回列表
 
+// 登入防枚舉冷卻倒數（Phase 21）：後端回 {throttled, cooldownSeconds} 時純顯示倒數，
+// 前端不做任何限流判斷（安全邊界在後端）；倒數歸零自動清掉錯誤訊息讓使用者重試
+const loginCooldown = ref(0);
+let loginCooldownTimer = null;
+
 // ===== composables =====
 const {
   signatures,
@@ -621,11 +630,10 @@ const {
 } = useDraft({
   sheets,
   currentSID,
-  currentUID,
-  authDB,
   columnDB,
   tempFound,
   authToken,
+  draftKeys,
   onTokenExpired: handleTokenExpired,
 });
 const { remainingTime, sessionPercentage, renewing, handleRenewClick } = useJwtSession({
@@ -699,18 +707,16 @@ const pendingInviteNames = computed(() => {
   });
 });
 
-// ===== 本機暫存：columnDB 一變動就寫回 localStorage =====
+// ===== 本機暫存：columnDB 一變動就加密寫回 localStorage（Phase 20 假名 key＋smd1 密文） =====
 watch(
   columnDB,
   (newValue) => {
-    if (sheetLoaded.value) {
+    if (sheetLoaded.value && draftKeys.value !== null) {
       let tempQueue = buildTempQueue(newValue);
-      let primaryKey = findPrimaryKey(authDB.value);
-      if (primaryKey !== undefined) {
-        upsertQueue(primaryKey.value, currentUID.value, tempQueue);
-        // 有欄位的值與原始值（savedContent）不同才算有暫存
-        tempFound.value = hasFilledData(tempQueue, newValue);
-      }
+      // saveQueue 內部序列化寫入，這裡 fire-and-forget 即可（落地順序＝觸發順序）
+      saveQueue(draftKeys.value, tempQueue);
+      // 有欄位的值與原始值（savedContent）不同才算有暫存
+      tempFound.value = hasFilledData(tempQueue, newValue);
     }
   },
   { deep: true }
@@ -722,16 +728,13 @@ function importTempFromToolbar() {
   tempTransfer.value.openImport();
 }
 
-function clearTemp() {
-  let primaryKey = findPrimaryKey(authDB.value);
-  if (primaryKey !== undefined) {
-    if (clearQueue(primaryKey.value, currentUID.value)) {
-      reloadPage();
-    } else {
-      ElMessage('找不到你的存檔值，確定這是從正常流程中呼叫的？');
-    }
+async function clearTemp() {
+  if (draftKeys.value !== null) {
+    // 等移除真的落地（排在同一條寫入鏈尾）再整頁重載，避免還在路上的加密寫入蓋回來
+    await removeQueue(draftKeys.value);
+    reloadPage();
   } else {
-    ElMessage('找不到你的問卷唯一值，確定這是從正常流程中呼叫的？');
+    ElMessage('找不到你的暫存金鑰，確定這是從正常流程中呼叫的？');
   }
 }
 
@@ -1219,22 +1222,34 @@ async function loginView() {
           plainClone(authDB.value)
         );
         scriptError.value.message = '';
-        if (!sheetConfig) {
+        if (sheetConfig && sheetConfig.throttled) {
+          // Phase 21：被冷卻——顯示倒數，不區分被鎖與一般失敗（不洩漏存在性）
+          loginStatus.value = false;
+          startLoginCooldown(sheetConfig.cooldownSeconds);
+        } else if (!sheetConfig) {
           scriptError.value.message = sheet[0].loginfailTip;
           loginStatus.value = false;
         } else {
-          // 登入成功：改持有 token，清掉認證欄位值（身分證等個資不再駐留記憶體）。
-          // 主鍵欄位值保留——它是 localStorage 暫存的 key，也本來就會存在瀏覽器
+          // 登入成功：停掉殘留的冷卻倒數（避免 timer 之後又蓋回錯誤訊息）
+          stopLoginCooldown();
+          // 改持有 token 與暫存金鑰對，清掉認證欄位值（身分證等個資不再駐留記憶體）。
+          // 主鍵欄位值保留（Phase 5 決策）——一次性搬家與舊版匯出檔 fallback 都還用得到
           authToken.value = sheetConfig.token || '';
+          draftKeys.value = sheetConfig.draftKeys || null;
           for (let i = 0; i < authDB.value.length; i++) {
             if (!/P/.test(authDB.value[i].type)) {
               authDB.value[i].value = '';
             }
           }
-          let currentAns = { uid: currentUID.value, queue: [] };
-          let primaryKey = findPrimaryKey(authDB.value);
-          if (primaryKey !== undefined) {
-            currentAns = loadOrCreateAns(primaryKey.value, currentUID.value);
+          // 本機暫存（Phase 20）：先把舊版留在瀏覽器的明文條目一次性搬進假名 key
+          // （順手清除明文個資），再載入加密暫存
+          let storedQueue = [];
+          if (draftKeys.value !== null) {
+            let primaryKey = findPrimaryKey(authDB.value);
+            if (primaryKey !== undefined) {
+              await migrateLegacyEntry(primaryKey.value, currentUID.value, draftKeys.value);
+            }
+            storedQueue = (await loadQueue(draftKeys.value)) || [];
           }
           remainEmail.value = sheetConfig.emailQuota;
           savedSignatures.value = sheetConfig.signatures;
@@ -1257,14 +1272,14 @@ async function loginView() {
           if (sheet[0].randomQ) {
             columnDB.value = _.shuffle(columnDB.value);
           } //亂數欄位
-          prepareColumnsForDisplay(columnDB.value, currentAns.queue);
+          prepareColumnsForDisplay(columnDB.value, storedQueue);
           loginDialog.show = false;
           loginStatus.value = false;
           googleStatus.value = undefined;
           columnDialog.show = true;
           // 檢查是否有有意義的暫存資料（值不為空且與原始值不同）
-          if (currentAns.queue.length > 0) {
-            tempFound.value = hasFilledData(currentAns.queue, columnDB.value);
+          if (storedQueue.length > 0) {
+            tempFound.value = hasFilledData(storedQueue, columnDB.value);
           }
           sheetLoaded.value = true;
           // 線上暫存：問卷有啟用且非檢視模式時，查雲端有沒有暫存可還原
@@ -1361,9 +1376,8 @@ async function sendMod() {
         columnDialog.show = false;
         confirmDialog.show = false;
         if (saveSuccessed.value) {
-          let primaryKey = findPrimaryKey(authDB.value);
-          if (primaryKey !== undefined) {
-            clearSubmitted(primaryKey.value, currentUID.value);
+          if (draftKeys.value !== null) {
+            removeQueue(draftKeys.value);
           }
           // 純 append 模型（Phase 17）：雲端草稿永不刪除，送出後重新登入仍會跳暫存提示
           // （文案已註明「線上暫存不代表最終結果」），由使用者自行選擇忽略
@@ -1438,6 +1452,41 @@ function stopInviteCooldown() {
     inviteCooldownTimer = null;
   }
   inviteResendCooldown.value = 0;
+}
+
+// 登入被冷卻：一致化訊息＋逐秒倒數（沿用 invite cooldown 模式）。歸零自動清訊息，
+// 使用者可再試——不洩漏「被鎖」與其他失敗的差別
+function loginCooldownMessage() {
+  let s = loginCooldown.value;
+  let mm = Math.floor(s / 60);
+  let ss = s % 60;
+  return '登入嘗試過於頻繁，請於 ' + (mm > 0 ? mm + ' 分 ' : '') + ss + ' 秒後再試';
+}
+
+function startLoginCooldown(seconds) {
+  stopLoginCooldown();
+  loginCooldown.value = Math.max(0, Math.ceil(seconds));
+  if (loginCooldown.value === 0) {
+    return;
+  }
+  scriptError.value.message = loginCooldownMessage();
+  loginCooldownTimer = setInterval(() => {
+    loginCooldown.value -= 1;
+    if (loginCooldown.value <= 0) {
+      stopLoginCooldown();
+      scriptError.value.message = '';
+    } else {
+      scriptError.value.message = loginCooldownMessage();
+    }
+  }, 1000);
+}
+
+function stopLoginCooldown() {
+  if (loginCooldownTimer !== null) {
+    clearInterval(loginCooldownTimer);
+    loginCooldownTimer = null;
+  }
+  loginCooldown.value = 0;
 }
 
 // 邀請碼 → 寄一次性驗證碼。首次確認與「重寄驗證碼」共用；後端有 60 秒節流兜底，
@@ -1593,6 +1642,14 @@ onMounted(() => {
 </script>
 
 <style scoped>
+/* 問卷列表：el-space 的 flex item 預設 min-width:auto 會被 SheetCard 內 nowrap
+   看板串撐爆、整頁橫向溢出（手機超螢幕）。放行縮小，讓 .sc-flow 的 overflow-x
+   自己接手橫捲，卡片不再撐寬 */
+.sheet-card-list :deep(.el-space__item) {
+  min-width: 0;
+  max-width: 100%;
+}
+
 /* 填問卷/簽名確認 drawer 共用的固定 footer：主要動作（送出）靠後、次要動作靠前 */
 .formFooter__hint {
   color: var(--el-color-danger);

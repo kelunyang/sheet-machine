@@ -121,6 +121,7 @@ import { useJwtSession } from '../composables/useJwtSession';
 import { prepareColumnsForDisplay } from '../utils/columnPrep';
 import { dateConverter } from '../utils/formatters';
 import { htmlConverter } from '../utils/markdown';
+import { openDraft } from '../utils/draftCipher';
 
 // 受邀簽名者的簽名畫面：邀請碼＋email OTP 二段驗證在 App.vue 的邀請碼 drawer 完成，
 // 這裡以 open(inviteeLogin 的回傳值) 接手——開啟時內容已就緒，顯示 read-only 問卷 +
@@ -170,7 +171,7 @@ const { remainingTime, sessionPercentage, renewing, handleRenewClick } = useJwtS
 
 // result = inviteeLogin 通過 OTP 後的回傳值（App.vue 的邀請碼 drawer 驗完才呼叫）。
 // initSignaturePads 內建 3 秒延遲才量尺寸，足以蓋過 drawer 開啟動畫（iPadOS 13 時機修復）
-function open(result) {
+async function open(result) {
   show.value = true;
   errorMessage.value = '';
   sheetName.value = result.sheetName;
@@ -188,6 +189,27 @@ function open(result) {
   let columns = _.filter(result.headers, (column) => {
     return /F|C|G/.test(column.type);
   });
+  // 填寫者草稿疊層（Phase 20）：後端解不開 smd1 密文，改回傳密文 blob＋填寫者的
+  // enc 派生鍵，這裡前端解密後疊進唯讀欄位（read-only 顯示走 savedContent/lastInput，
+  // 草稿值要疊進 lastInput 受邀者才看得到）。草稿壞掉/解不開退回已送出的 savedContent
+  if (result.draftBlob && result.draftEncKey) {
+    try {
+      const payload =
+        result.draftBlob.slice(0, 5) === 'smd1:'
+          ? await openDraft(result.draftBlob, result.draftEncKey)
+          : JSON.parse(result.draftBlob); // 後端 decode 的 gz: 防呆分支回的是明文 JSON
+      const queue = payload && payload.data && payload.data.queue ? payload.data.queue : [];
+      for (const item of queue) {
+        const column = _.find(columns, (col) => col.id === item.id);
+        if (column !== undefined) {
+          column.value = item.val;
+          column.lastInput = item.isFile === true ? item.url : item.val;
+        }
+      }
+    } catch (err) {
+      console.error('invitee draft open failed', err);
+    }
+  }
   columnDB.value = prepareColumnsForDisplay(columns, []);
   loaded.value = true;
   if (!signed.value) {

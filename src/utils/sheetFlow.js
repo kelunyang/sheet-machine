@@ -9,38 +9,16 @@ function chipDate_(tick) {
   return dayjs(tick).format('YYYY-MM-DD HH:mm');
 }
 
-// 右上角兩行「色點＋期限文字」：可填寫至／可檢視至各一行，檢視期不再另掛卡片下方。
-// tone 對映 Element Plus 語意色：success/warning/danger/info
-export function sheetStatus(sheet, now) {
-  let write;
-  if (!sheet.writeAllowed) {
-    write = { text: '暫時關閉', tone: 'info' };
-  } else if (!sheet.dueDate || sheet.dueDate <= 0) {
-    write = { text: '不開放填寫', tone: 'info' };
-  } else if (now >= sheet.dueDate) {
-    write = { text: '已截止填寫', tone: 'danger' };
-  } else {
-    write = {
-      text: '可填寫至 ' + chipDate_(sheet.dueDate),
-      tone: sheet.dueDate - now <= WARNING_MS ? 'warning' : 'success',
-    };
-  }
-  // getQList 只回傳 viewDate 未過的問卷，這裡的空值防禦只擋資料異常；
-  // 檢視期與填寫截止同時（截止即不可檢視）時第二行冗餘，省略
-  const view =
-    sheet.viewDate > 0 && sheet.viewDate !== sheet.dueDate
-      ? { text: '可檢視至 ' + chipDate_(sheet.viewDate), tone: 'info' }
-      : null;
-  return { write, view };
-}
-
-// 流程預覽看板串：開始(建立日期) →（填寫/檢視）→（簽名 ×n，有簽名格才出現）→ 結束(截止日期)。
-// 純靜態預覽（問卷沒有「當前階段」，不做指示物）；tone：normal=進行中主題色、
-// muted=已截止/關閉/不開放整條轉灰、danger=已截止的結束標記紅字
+// 流程預覽看板串：開始(建立日期) →（填寫/檢視）→（簽名 ×n，有簽名格才出現）→ 結束。
+// 純靜態預覽（問卷沒有「當前階段」，不做指示物）。右上角提醒退役後，「還來得及嗎」
+// 的急迫度改由結束節點承載——但只染方框下方日期文字（subTone），方框本身跟全條走 tone。
+// tone（方框）：normal=進行中、muted=已截止/關閉/不開放整條轉灰。
+// subTone（結束日期文字）：''=充裕灰、warning=剩<10分橘、danger=已截止磚紅。
+// 結束節點語意：填寫未截止顯示「填寫結束」＋dueDate；已截止改「查看結束」＋viewDate。
 export function buildFlowChips(sheet, now) {
+  const active = sheet.dueDate > 0 && now < sheet.dueDate && sheet.writeAllowed;
   const ended = sheet.dueDate > 0 && now >= sheet.dueDate;
-  const inactive = ended || !sheet.writeAllowed || !sheet.dueDate || sheet.dueDate <= 0;
-  const baseTone = inactive ? 'muted' : 'normal';
+  const baseTone = active ? 'normal' : 'muted';
   const nodes = [
     {
       type: 'start',
@@ -53,11 +31,16 @@ export function buildFlowChips(sheet, now) {
   if (Array.isArray(sheet.signatures) && sheet.signatures.length > 0) {
     nodes.push({ type: 'chip', label: '簽名 ×' + sheet.signatures.length, sub: '', tone: baseTone });
   }
-  nodes.push({
-    type: 'end',
-    label: '結束',
-    sub: sheet.dueDate > 0 ? chipDate_(sheet.dueDate) : '不開放',
-    tone: ended ? 'danger' : baseTone,
-  });
+  let endLabel, endSub, subTone;
+  if (ended) {
+    endLabel = '查看結束';
+    endSub = sheet.viewDate > 0 ? chipDate_(sheet.viewDate) : '';
+    subTone = 'danger';
+  } else {
+    endLabel = '填寫結束';
+    endSub = sheet.dueDate > 0 ? chipDate_(sheet.dueDate) : '不開放';
+    subTone = active && sheet.dueDate - now <= WARNING_MS ? 'warning' : '';
+  }
+  nodes.push({ type: 'end', label: endLabel, sub: endSub, tone: baseTone, subTone });
   return nodes;
 }

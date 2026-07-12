@@ -35,7 +35,8 @@ function loadGasFunctions() {
     'Utilities',
     `${source}\n;return {
       chunkPayload_, DRAFT_CHUNK_SIZE, DRAFT_HEADER,
-      encodeDraftPayload_, decodeDraftPayload_, parseDraftRow_, latestDraftRowForKey_,
+      encodeDraftPayload_, decodeDraftPayload_, parseDraftRow_,
+      latestDraftRowIndexForKey_,
     };`
   );
   return factory(
@@ -52,7 +53,7 @@ const {
   encodeDraftPayload_,
   decodeDraftPayload_,
   parseDraftRow_,
-  latestDraftRowForKey_,
+  latestDraftRowIndexForKey_,
 } = loadGasFunctions();
 
 describe('chunkPayload_（線上暫存切塊）', () => {
@@ -146,57 +147,75 @@ describe('encodeDraftPayload_ / decodeDraftPayload_（gzip 單格化）', () => 
   });
 });
 
+// 測試用假 referSSID（明顯虛構，非真實 Drive file ID）
+const REFER_A = 'FAKE_REFER_SSID_A';
+const REFER_B = 'FAKE_REFER_SSID_B';
+
 describe('parseDraftRow_（解析草稿列）', () => {
-  it('單格 payload：A 主鍵、B updatedAt、C payload', () => {
-    expect(parseDraftRow_(['測試生甲', 1700000000000, 'gz:AAA'])).toEqual({
+  it('單格 payload：A 主鍵、B updatedAt、C referSSID、D payload', () => {
+    expect(parseDraftRow_(['測試生甲', 1700000000000, REFER_A, 'gz:AAA'])).toEqual({
       key: '測試生甲',
       updatedAt: 1700000000000,
+      referSSID: REFER_A,
       payload: 'gz:AAA',
     });
   });
 
-  it('變長 chunk 列：C 起串接', () => {
-    expect(parseDraftRow_(['測試生乙', 1700000000001, 'part1', 'part2', 'part3']).payload).toBe(
-      'part1part2part3'
-    );
+  it('變長 chunk 列：D 起串接', () => {
+    expect(
+      parseDraftRow_(['測試生乙', 1700000000001, REFER_A, 'part1', 'part2', 'part3']).payload
+    ).toBe('part1part2part3');
   });
 
   it('尾端空格（讀取端補齊的空儲存格）串接後不影響', () => {
-    expect(parseDraftRow_(['測試生丙', 1700000000002, 'gz:BBB', '', '']).payload).toBe('gz:BBB');
+    expect(parseDraftRow_(['測試生丙', 1700000000002, REFER_A, 'gz:BBB', '', '']).payload).toBe(
+      'gz:BBB'
+    );
   });
 
   it('updatedAt 以 10 進位整數解析', () => {
-    expect(parseDraftRow_(['k', '1700000000003', 'x']).updatedAt).toBe(1700000000003);
+    expect(parseDraftRow_(['k', '1700000000003', REFER_A, 'x']).updatedAt).toBe(1700000000003);
   });
 });
 
-describe('latestDraftRowForKey_（同主鍵最新列勝出）', () => {
+describe('latestDraftRowIndexForKey_（(主鍵, referSSID) 複合鍵最新列勝出）', () => {
   const header = DRAFT_HEADER;
 
-  it('多版本 → 回傳最後（最新）一列，舊版 superseded', () => {
+  it('多版本 → 回傳最後（最新）一列索引，舊版 superseded', () => {
     const rows = [
       header,
-      ['測試生甲', 1700000000000, 'gz:v1'],
-      ['測試生乙', 1700000000001, 'gz:other'],
-      ['測試生甲', 1700000000002, 'gz:v2'],
+      ['測試生甲', 1700000000000, REFER_A, 'gz:v1'],
+      ['測試生乙', 1700000000001, REFER_A, 'gz:other'],
+      ['測試生甲', 1700000000002, REFER_A, 'gz:v2'],
     ];
-    expect(latestDraftRowForKey_(rows, '測試生甲')).toEqual(['測試生甲', 1700000000002, 'gz:v2']);
+    expect(latestDraftRowIndexForKey_(rows, REFER_A, '測試生甲')).toBe(3);
   });
 
-  it('表頭列首欄為字面字串，永不匹配真實主鍵', () => {
-    const rows = [header, ['測試生甲', 1700000000000, 'gz:v1']];
+  it('跨問卷同主鍵互不干擾（單表混所有問卷的草稿）', () => {
+    const rows = [
+      header,
+      ['測試生甲', 1700000000000, REFER_A, 'gz:formA'],
+      ['測試生甲', 1700000000001, REFER_B, 'gz:formB'],
+    ];
+    expect(latestDraftRowIndexForKey_(rows, REFER_A, '測試生甲')).toBe(1);
+    expect(latestDraftRowIndexForKey_(rows, REFER_B, '測試生甲')).toBe(2);
+  });
+
+  it('表頭列 A/C 欄為字面字串，永不匹配真實主鍵/referSSID', () => {
+    const rows = [header, ['測試生甲', 1700000000000, REFER_A, 'gz:v1']];
+    // 真實複合鍵不會撈到表頭
+    expect(latestDraftRowIndexForKey_(rows, REFER_A, '測試生甲')).toBe(1);
     // 拿表頭字面字串去查也只會撈到表頭列自己，不會誤傷資料
-    expect(latestDraftRowForKey_(rows, DRAFT_HEADER[0])).toBe(rows[0]);
-    // 真實主鍵不會撈到表頭
-    expect(latestDraftRowForKey_(rows, '測試生甲')).toEqual(['測試生甲', 1700000000000, 'gz:v1']);
+    expect(latestDraftRowIndexForKey_(rows, DRAFT_HEADER[2], DRAFT_HEADER[0])).toBe(0);
   });
 
-  it('查無此主鍵回 null', () => {
-    const rows = [header, ['測試生甲', 1700000000000, 'gz:v1']];
-    expect(latestDraftRowForKey_(rows, '測試生丙')).toBeNull();
+  it('查無此複合鍵回 -1（主鍵存在但問卷不同也算查無）', () => {
+    const rows = [header, ['測試生甲', 1700000000000, REFER_A, 'gz:v1']];
+    expect(latestDraftRowIndexForKey_(rows, REFER_A, '測試生丙')).toBe(-1);
+    expect(latestDraftRowIndexForKey_(rows, REFER_B, '測試生甲')).toBe(-1);
   });
 
-  it('只有表頭（空資料）查真實主鍵回 null', () => {
-    expect(latestDraftRowForKey_([header], '測試生甲')).toBeNull();
+  it('只有表頭（空資料）查真實複合鍵回 -1', () => {
+    expect(latestDraftRowIndexForKey_([header], REFER_A, '測試生甲')).toBe(-1);
   });
 });

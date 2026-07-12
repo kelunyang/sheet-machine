@@ -247,13 +247,41 @@ function getQList_() {
 }
 
 // ===== 線上暫存 =====
-// 暫存試算表：ScriptProperties 的 draftSheetID 指定，一份問卷一個分頁（分頁名 = referSSID）。
+// 暫存試算表：ScriptProperties 的 draftSheetID 指定，全部問卷共用單一 _draft 分頁（Phase 19：
+// referSSID 是資料欄不是分頁名——比照 _invites 的單表模型，不再一份問卷開一個亂數名分頁）。
 // 純 append 快照日誌（Phase 17）：每次暫存 appendRow 一筆快照，永不 setValues/clearContent/deleteRow；
-// 「當前草稿」＝該主鍵最新一列（append 保序，後列勝出＝舊版 superseded 自動失效，無刪除/消耗概念）。
-// 分頁結構：第 1 列人類可讀表頭 DRAFT_HEADER（凍結、對 reader 惰性）；資料列 A 欄主鍵、
-// B 欄更新時間(ms)、C 欄之後為 payload（gz:base64 單格化，超長才切塊，單一儲存格上限 50000 字元）。
+// 「當前草稿」＝(主鍵, referSSID) 複合鍵最新一列（append 保序，後列勝出＝舊版 superseded 自動失效，
+// 無刪除/消耗概念）。分頁結構：第 1 列人類可讀表頭 DRAFT_HEADER（凍結、對 reader 惰性——A/C 欄是
+// 字面字串，永不等於真實主鍵/referSSID）；資料列 A 主鍵、B 更新時間(ms)、C referSSID、
+// D 欄之後為 payload（gz:base64 單格化，超長才切塊，單一儲存格上限 50000 字元）。
+// ===== 暫存內容端到端加密（Phase 20）：per-(問卷×用戶) HMAC 派生金鑰 =====
+// 無字典、確定性派生：每次登入當場重算，不存任何對照表＝沒有字典可被偷。
+// secret 與 jwtSecret 分離——輪替 jwtSecret 不會弄丟所有暫存；
+// 輪替/遺失 draftEncSecret ＝ 所有既有暫存（含使用者裝置上的）解不開，視同「暫存全部歸零」
+function getDraftEncSecret_() {
+  let secret = appProperties.getProperty('draftEncSecret');
+  if(secret === null || secret.toString().trim() === "") {
+    // 首次使用自動生成 256-bit 隨機密鑰，零管理者設定（比照 getJwtSecret_）
+    secret = Utilities.getUuid().replace(/-/g, "") + Utilities.getUuid().replace(/-/g, "");
+    appProperties.setProperty('draftEncSecret', secret);
+  }
+  return secret;
+}
+
+// 派生鍵 = base64url(HMAC-SHA256(secret, JSON.stringify([purpose, referSSID, pkeyValue])))。
+// JSON.stringify 複合鍵防串接碰撞（比照 inviteCellKey_）；purpose 做 key separation：
+// 'id'＝假名（可落地當定位鍵：_draft A 欄、localStorage key）、'enc'＝加密金鑰（只回前端
+// 記憶體、絕不落地）、'log'＝登入稽核假名（Phase 21 用，本 Phase 先佔位）。
+// 鎖與鑰匙分離：同一把既當落地 key 名又當加密鑰，等於鑰匙貼在鎖上
+function deriveDraftKey_(purpose, referSSID, pkeyValue) {
+  return base64UrlEncode_(Utilities.computeHmacSha256Signature(
+    JSON.stringify([purpose, referSSID, pkeyValue.toString()]), getDraftEncSecret_()
+  ));
+}
+
+const DRAFT_SHEET_NAME = '_draft';
 const DRAFT_CHUNK_SIZE = 45000;
-const DRAFT_HEADER = ['primaryKey 主鍵', 'updatedAt 存檔(ms)', 'payload 草稿(gz:base64，超長切塊)'];
+const DRAFT_HEADER = ['primaryKey 主鍵假名(HMAC)', 'updatedAt 存檔(ms)', 'referSSID 問卷表ID', 'payload 草稿(smd1:前端加密密文，超長切塊)'];
 
 // 把 payload 字串切成單一儲存格放得下的塊（空字串回傳空陣列）
 function chunkPayload_(payloadStr) {
@@ -264,16 +292,21 @@ function chunkPayload_(payloadStr) {
   return chunks;
 }
 
-// payload gzip+base64 單格化：'gz:' 是自描述版本記號（非舊資料相容）。JSON 壓縮通常 3~6 倍、
-// base64 回胖 4/3，淨縮 2~4 倍——一般草稿穩進單格；50000 字/格是 Sheets 硬限制，仍超長由 chunkPayload_ 切塊。
+// payload 單格化：'smd1:' 是前端已加密＋壓縮好的密文 blob（Phase 20），原樣通過——
+// 後端解不開也壓不動（密文無冗餘），零解密需求。'gz:' 是後端 gzip+base64 的自描述版本記號
+// （Phase 20 後正常路徑不再產生，留作防呆）：JSON 壓縮通常 3~6 倍、base64 回胖 4/3，
+// 淨縮 2~4 倍——一般草稿穩進單格；50000 字/格是 Sheets 硬限制，仍超長由 chunkPayload_ 切塊。
 function encodeDraftPayload_(str) {
+  if(str.slice(0, 5) === 'smd1:') { return str; }
   return 'gz:' + Utilities.base64Encode(Utilities.gzip(Utilities.newBlob(str)).getBytes());
 }
 
-// 反解：'gz:' 前綴 → base64Decode → ungzip；無前綴原樣回傳（不做舊格式相容，僅防呆）
+// 反解：'smd1:' 密文原樣回傳（前端解）；'gz:' 前綴 → base64Decode → ungzip；
+// 無前綴原樣回傳（不做舊格式相容，僅防呆）
 // newBlob 第二參數 'application/x-gzip' 不可省：經 base64 往返重建的 blob content type 會遺失，
 // 真機 Utilities.ungzip 對 null content type 會丟「Blob object must have non-null content type」
 function decodeDraftPayload_(str) {
+  if(str.slice(0, 5) === 'smd1:') { return str; }
   if(str.slice(0, 3) === 'gz:') {
     return Utilities.ungzip(
       Utilities.newBlob(Utilities.base64Decode(str.slice(3)), 'application/x-gzip')
@@ -282,35 +315,41 @@ function decodeDraftPayload_(str) {
   return str;
 }
 
-// 解析一筆草稿列 → {key, updatedAt, payload=C 起串接（含變長 chunk）}；純函數，不碰 GAS 全域
+// 解析一筆草稿列 → {key, updatedAt, referSSID, payload=D 起串接（含變長 chunk）}；純函數，不碰 GAS 全域
 function parseDraftRow_(row) {
   let payload = "";
-  for(let i=2; i<row.length; i++) {
+  for(let i=3; i<row.length; i++) {
     payload += row[i].toString();
   }
-  return { key: row[0].toString(), updatedAt: parseInt(row[1].toString(), 10), payload: payload };
+  return {
+    key: row[0].toString(),
+    updatedAt: parseInt(row[1].toString(), 10),
+    referSSID: row[2].toString(),
+    payload: payload,
+  };
 }
 
-// 同主鍵取最新一列（後列勝出＝舊版 superseded），無則 null；
-// 表頭列首欄為字面字串、永不等於真實主鍵值，天然不匹配、不需特判
-function latestDraftRowForKey_(rows, key) {
-  let found = null;
+// (主鍵, referSSID) 複合鍵取最新一列的索引（後列勝出＝舊版 superseded），無則 -1；
+// 回索引而非列＝配合兩段式讀取（先讀 A:C 定位、再單讀該列全寬）。表頭列 A/C 欄為字面字串、
+// 永不等於真實主鍵/referSSID，天然不匹配、不需特判。純函數可 vitest
+function latestDraftRowIndexForKey_(rows, referSSID, key) {
+  let found = -1;
   for(let i=0; i<rows.length; i++) {
-    if(rows[i][0].toString() === key) { found = rows[i]; }
+    if(rows[i][0].toString() === key && rows[i][2].toString() === referSSID) { found = i; }
   }
   return found;
 }
 
-// 草稿分頁壓縮（Phase 18 離線重建用）：每主鍵留最新一列（後列勝出，superseded 舊版只進備份），
-// 跳過表頭列與無主鍵的空列；變長 chunk 列以 '' 補齊成矩形（parseDraftRow_ 容忍尾端空格）。
-// 純函數不碰 GAS 全域，可 vitest
+// 草稿分頁壓縮（Phase 18 離線重建用）：每 (主鍵, referSSID) 複合鍵留最新一列（後列勝出，
+// superseded 舊版只進備份），跳過表頭列與無主鍵的空列；變長 chunk 列以 '' 補齊成矩形
+// （parseDraftRow_ 容忍尾端空格）。純函數不碰 GAS 全域，可 vitest
 function compactDraftRows_(rows) {
   let byKey = {};
   let order = [];
   for(let i=0; i<rows.length; i++) {
     if(i === 0 && rows[0][0].toString() === DRAFT_HEADER[0]) { continue; } // 跳過表頭列
-    let key = rows[i][0].toString();
-    if(key === "") { continue; }
+    if(rows[i][0].toString() === "") { continue; }
+    let key = JSON.stringify([rows[i][0].toString(), rows[i][2].toString()]); // 複合鍵，比照 inviteCellKey_
     if(!(key in byKey)) { order.push(key); }
     byKey[key] = rows[i];
   }
@@ -348,12 +387,14 @@ function draftKey_(referSSID, auth) {
   return null;
 }
 
-function draftSheet_(referSSID) {
+// _draft 分頁（找不到就建：表頭＋凍結首列，比照 inviteSheet_）。建分頁權只在寫入路徑
+// （saveDraft）——讀取路徑一律 getSheetByName 自己判 null，不從這裡走，
+// 避免 loadDraft 探一下就落地空分頁的副作用（Phase 19 前的空分頁元兇）
+function draftSheet_() {
   let draftSS = SpreadsheetApp.openById(appProperties.getProperty('draftSheetID'));
-  let sheet = draftSS.getSheetByName(referSSID);
+  let sheet = draftSS.getSheetByName(DRAFT_SHEET_NAME);
   if(sheet === null) {
-    // 新分頁：直接帶人類可讀表頭 + 凍結首列（比照 inviteSheet_），對 reader 惰性
-    sheet = draftSS.insertSheet(referSSID);
+    sheet = draftSS.insertSheet(DRAFT_SHEET_NAME);
     sheet.appendRow(DRAFT_HEADER);
     sheet.setFrozenRows(1);
   }
@@ -366,15 +407,16 @@ function saveDraft(referSSID, token, payload) {
     // token 是安全邊界：web app 為匿名存取，沒有有效 token 就不能存任何人的暫存
     let claims = authByToken_(referSSID, token);
     if(claims === false) { return { success: false, tokenExpired: true, message: "登入已逾時，請重新驗證身分" }; }
-    let key = claims.pkey;
+    // A 欄落 id 假名（後端自算，不信前端）：暫存表全面去識別化，連「誰有草稿」都看不到明文
+    let key = deriveDraftKey_('id', referSSID, claims.pkey);
     let chunks = chunkPayload_(encodeDraftPayload_(payload.toString()));
     let updatedAt = (new Date()).getTime();
     let lock = LockService.getScriptLock();
     lock.waitLock(10000);
     try {
-      let sheet = draftSheet_(referSSID);
+      let sheet = draftSheet_();
       // 純 append 快照日誌：永不 setValues/clearContent/deleteRow；舊版因非最新列自動失效（superseded）
-      sheet.appendRow([key, updatedAt].concat(chunks));
+      sheet.appendRow([key, updatedAt, referSSID].concat(chunks));
       return { success: true, updatedAt: updatedAt };
     } finally {
       lock.releaseLock();
@@ -388,20 +430,25 @@ function loadDraft(referSSID, token) {
     // token 是安全邊界：web app 為匿名存取，沒有有效 token 就不能撈任何人的暫存
     let claims = authByToken_(referSSID, token);
     if(claims === false) { return { tokenExpired: true }; }
-    return draftPayloadByKey_(referSSID, claims.pkey);
+    // 以 id 假名定位（與 saveDraft 同一把派生鍵）；回傳的 payload 是 smd1: 密文，前端解
+    return draftPayloadByKey_(referSSID, deriveDraftKey_('id', referSSID, claims.pkey));
   });
 }
 
-// 以主鍵值撈暫存 payload（loadDraft 與受邀者 inviteeLogin 共用；呼叫端負責身分驗證）
-// 讀全表 → 取該主鍵最新一列（後列勝出）→ C 起串接 → decode，介面不變
+// 以 id 假名撈暫存 payload（loadDraft 與受邀者 inviteeLogin 共用；呼叫端負責身分驗證與假名派生）。
+// 讀取路徑不建分頁（getSheetByName 判 null）；兩段式讀取：先只讀 A:C 三欄以 (主鍵, referSSID)
+// 複合鍵定位最新一列，命中才單讀該列全寬——單表混所有問卷的草稿，不把所有 payload 大格搬進記憶體。
+// 純 append 保證列永不位移，兩段讀之間就算有人 append 也不影響已定位的列索引
 function draftPayloadByKey_(referSSID, key) {
-  let sheet = draftSheet_(referSSID);
+  let draftSS = SpreadsheetApp.openById(appProperties.getProperty('draftSheetID'));
+  let sheet = draftSS.getSheetByName(DRAFT_SHEET_NAME);
+  if(sheet === null) { return null; }
   let lastRow = sheet.getLastRow();
-  let lastCol = sheet.getLastColumn();
-  if(lastRow < 1 || lastCol < 1) { return null; }
-  let rows = sheet.getRange(1, 1, lastRow, lastCol).getValues();
-  let row = latestDraftRowForKey_(rows, key);
-  if(row === null) { return null; }
+  if(lastRow < 1) { return null; }
+  let keyRows = sheet.getRange(1, 1, lastRow, 3).getValues();
+  let idx = latestDraftRowIndexForKey_(keyRows, referSSID, key);
+  if(idx === -1) { return null; }
+  let row = sheet.getRange(idx + 1, 1, 1, sheet.getLastColumn()).getValues()[0];
   let parsed = parseDraftRow_(row);
   if(parsed.payload === "") { return null; }
   return { updatedAt: parsed.updatedAt, payload: decodeDraftPayload_(parsed.payload) };
@@ -765,10 +812,12 @@ function rebuildDraftSpreadsheet_() {
       let values = (lastRow > 0 && lastCol > 0) ? sheet.getRange(1, 1, lastRow, lastCol).getValues() : [];
       let frozen = false;
       let outRows;
+      // 按分頁名分派（Phase 19）：只認 _invites 與 _draft 兩個固定名，其餘一律原樣複製——
+      // 不做首格嗅探（Phase 19 前的舊 3 欄草稿分頁首格字串相同，嗅探會被新欄位邏輯誤壓）
       if(name === INVITE_SHEET_NAME) {
         outRows = [INVITE_HEADER].concat(compactInviteRows_(values));
         frozen = true;
-      } else if(values.length > 0 && values[0][0].toString() === DRAFT_HEADER[0]) {
+      } else if(name === DRAFT_SHEET_NAME) {
         outRows = [DRAFT_HEADER].concat(compactDraftRows_(values));
         frozen = true;
       } else {
@@ -831,7 +880,8 @@ function listRowFor_(referSSID, recordSSID) {
   return rows.length > 0 ? rows[0] : null;
 }
 
-// 受邀者的 read-only 問卷內容：已送出的紀錄（savedContent）疊上填寫者最新線上暫存（草稿優先）。
+// 受邀者的 read-only 問卷內容：已送出的紀錄（savedContent）。填寫者最新線上暫存自 Phase 20
+// 起是 smd1: 密文、後端解不開——疊草稿移到受邀者前端（inviteeLogin 另回密文 blob＋enc key）。
 // primaryValue 一律來自伺服器端查出的邀請列，不信前端
 function buildReadonlyHeaders_(referSSID, primaryValue) {
   let headers = getHeaders(referSSID);
@@ -846,27 +896,6 @@ function buildReadonlyHeaders_(referSSID, primaryValue) {
       column.value = column.savedContent;
     }
     column.pos = undefined;
-  }
-  let draft = draftPayloadByKey_(referSSID, primaryValue);
-  if(draft !== null) {
-    try {
-      let payload = JSON.parse(draft.payload);
-      let queue = payload.data !== undefined && payload.data.queue !== undefined ? payload.data.queue : [];
-      for(let i=0; i<queue.length; i++) {
-        let column = _.find(headers, (header) => {
-          return header.id === queue[i].id;
-        });
-        if(column !== undefined) {
-          column.value = queue[i].val;
-          // read-only 顯示（enableModify=false 的 FormField）走 savedContent/lastInput，
-          // 草稿值要疊進 lastInput 受邀者才看得到
-          column.lastInput = queue[i].isFile === true ? queue[i].url : queue[i].val;
-        }
-      }
-    } catch (err) {
-      // 草稿壞掉不影響 read-only 檢視，退回已送出的 savedContent
-      console.error('buildReadonlyHeaders_ draft parse failed: ' + err);
-    }
   }
   return headers;
 }
@@ -1167,6 +1196,15 @@ function inviteeLogin(token, otp) {
       headers: buildReadonlyHeaders_(invite.referSSID, invite.primaryValue),
       sessionToken: issueInviteSession_(invite, resolved.now, resolved.dueDate)
     };
+    // 填寫者最新草稿（Phase 20：smd1 密文後端解不開，疊草稿移到受邀者前端）：
+    // 密文 blob＋後端重算的填寫者 enc key 一起回。安全邊界不變——受邀者本來就被授權
+    // 看填寫內容（他要簽的就是這份），這把 key 也只能解這一份問卷×這一人的暫存
+    let draft = draftPayloadByKey_(invite.referSSID,
+      deriveDraftKey_('id', invite.referSSID, invite.primaryValue));
+    if(draft !== null) {
+      result.draftBlob = draft.payload;
+      result.draftEncKey = deriveDraftKey_('enc', invite.referSSID, invite.primaryValue);
+    }
     if(status === 'signed' && invite.fileID !== "") {
       result.myImage = signatureDataUrl_(invite.fileID);
     }
@@ -1244,12 +1282,284 @@ function signatureDataUrl_(fileID) {
   return 'data:' + blob.getContentType() + ';base64,' + Utilities.base64Encode(blob.getBytes());
 }
 
+// ===== 登入防枚舉（Phase 21）：CacheService 即時防線 ＋ _logins 稽核日誌 =====
+// 主登入 authRecord 純比對名冊、web app 匿名 → 對低熵認證欄位可窮舉撞庫。GAS 拿不到 client IP，
+// 故只做「不會誤傷」的防護：per-帳號縱向鎖定（連錯冷卻）＋per-refer 橫向偵測（過閾值通知管理者、
+// 人來斷），全域自動封鎖明確不做。cache 快但會被驅逐（防線暫鬆非破口）、_logins 表慢但一筆不漏
+// （事後稽核），兩者互補。
+// **_logins 存明文真實登入帳號值（非 HMAC）**——它是稽核日誌、價值就在「誰登入了什麼」，假名化會
+// 讓事件響應（誰被撞中）當場報廢，比照業界做法（auth log 存真值＋靠存取控制保護）。保護邊界＝
+// **draftSheetID 暫存試算表永不對外分享**（同表已有 _invites 的明文主鍵，本就是個資資產）。
+// 對比：_draft 的 id 假名是 Phase 20 端到端加密的結構性必需（前端用同一把派生鍵加解密草稿），
+// 不是隱私裝飾，故 _draft 維持假名＋密文，_logins 走真值——兩者用途不同、取捨不同。
+// cache key 仍用 HMAC（deriveDraftKey_ purpose='log'）純為 key 的長度/字元衛生（cache 是腳本內部、
+// 不落任何表），與隱私無關。
+const LOGIN_SHEET_NAME = '_logins';
+const LOGIN_HEADER = ['timestamp 時間(ms)', 'referSSID 問卷表ID', 'account 登入帳號(明文主鍵值)', 'result 結果'];
+const LOGIN_FAIL_MAX_DEFAULT = 5;
+const LOGIN_COOLDOWN_MINUTES_DEFAULT = 5;
+const SCAN_ALERT_THRESHOLD_DEFAULT = 30;         // per-refer 窗口內失敗次數（橫向即時警報）
+const SCAN_ALERT_WINDOW_MINUTES_DEFAULT = 10;    // per-refer 失敗計數窗口（cache TTL，滑動）
+const SCAN_ALERT_COOLDOWN_MINUTES_DEFAULT = 60;  // 同 refer 警報節流（封頂 MailApp 配額）
+const LOGIN_SCAN_FAIL_THRESHOLD_DEFAULT = 20;    // scanLoginLog：refer 失敗總數
+const LOGIN_SCAN_DISTINCT_THRESHOLD_DEFAULT = 10;// scanLoginLog：refer 相異失敗帳號數（橫向掃描特徵）
+const LOGIN_SCAN_SUSPECT_RUN = 3;                // 同一帳號連錯 ≥N 次後成功＝疑似撞中
+
+// ScriptProperties 正整數常數（未設或非正整數用預設，比照 inviteTtlMs_）
+function positiveIntProp_(name, fallback) {
+  let n = parseInt((appProperties.getProperty(name) || '').toString().trim(), 10);
+  return (isNaN(n) || n <= 0) ? fallback : n;
+}
+function loginFailMax_() { return positiveIntProp_('loginFailMax', LOGIN_FAIL_MAX_DEFAULT); }
+function loginCooldownMs_() { return positiveIntProp_('loginCooldownMinutes', LOGIN_COOLDOWN_MINUTES_DEFAULT) * 60 * 1000; }
+function scanAlertThreshold_() { return positiveIntProp_('scanAlertThreshold', SCAN_ALERT_THRESHOLD_DEFAULT); }
+function scanAlertWindowSec_() { return positiveIntProp_('scanAlertWindowMinutes', SCAN_ALERT_WINDOW_MINUTES_DEFAULT) * 60; }
+function scanAlertCooldownSec_() { return positiveIntProp_('scanAlertCooldownMinutes', SCAN_ALERT_COOLDOWN_MINUTES_DEFAULT) * 60; }
+
+// 嘗試的主鍵值過 HMAC 成假名，**只當 cache key**（長度/字元衛生，非隱私；cache 腳本內部不落表）。
+// 失敗時無伺服器裁決值可用，用前端傳來的嘗試值；Gmail 取 Session。
+// 取不到（無 P 欄或空值）回 null → 呼叫端跳過限流（空嘗試不是有意義的枚舉）
+function loginPseudonym_(referSSID, auth) {
+  let attempted = draftKey_(referSSID, auth);
+  if(attempted === null) { return null; }
+  return deriveDraftKey_('log', referSSID, attempted);
+}
+
+// 即時防線：讀 cache 的 per-假名冷卻旗標。check 與 append 之間刻意不上鎖（並發下攻擊者多擠
+// 一兩次可接受，不在登入尖峰上 ScriptLock）
+function checkLoginThrottle_(referSSID, pseudonym, nowMs) {
+  let until = CacheService.getScriptCache().get('sm:lc:' + pseudonym);
+  if(until !== null && nowMs < parseInt(until, 10)) {
+    return { allowed: false, cooldownRemainMs: parseInt(until, 10) - nowMs };
+  }
+  return { allowed: true, cooldownRemainMs: 0 };
+}
+
+// 記一次登入嘗試：cache 更新縱向（per-帳號）/橫向（per-refer）計數＋_logins append 一筆
+// （成功失敗都記——掃描若命中，長相是一次成功，稽核要看得到）。
+// pseudonym＝HMAC，只當 cache key；loginId＝明文真實帳號值，落 _logins C 欄
+function recordLoginAttempt_(referSSID, pseudonym, loginId, success, nowMs) {
+  let cache = CacheService.getScriptCache();
+  if(success) {
+    // 成功清零（含冷卻旗標）——「連錯後成功」的稽核痕跡留在 _logins，不靠 cache
+    cache.remove('sm:lf:' + pseudonym);
+    cache.remove('sm:lc:' + pseudonym);
+  } else {
+    let cooldownSec = Math.ceil(loginCooldownMs_() / 1000);
+    let failCount = parseInt(cache.get('sm:lf:' + pseudonym) || '0', 10) + 1;
+    cache.put('sm:lf:' + pseudonym, failCount.toString(), cooldownSec);
+    if(failCount >= loginFailMax_()) {
+      cache.put('sm:lc:' + pseudonym, (nowMs + loginCooldownMs_()).toString(), cooldownSec);
+    }
+    // per-refer 橫向窗口計數（TTL＝窗口，滑動）；過閾值且無警報節流旗標 → 寄該問卷管理者
+    let referFails = parseInt(cache.get('sm:lr:' + referSSID) || '0', 10) + 1;
+    cache.put('sm:lr:' + referSSID, referFails.toString(), scanAlertWindowSec_());
+    if(referFails >= scanAlertThreshold_() && cache.get('sm:la:' + referSSID) === null) {
+      sendLoginScanAlert_(referSSID, referFails, nowMs);
+      cache.put('sm:la:' + referSSID, '1', scanAlertCooldownSec_());
+    }
+  }
+  appendLoginLog_(referSSID, loginId, success, nowMs);
+}
+
+// _logins 分頁純 append 稽核（找不到就建，比照 draftSheet_）；draftSheetID 未設則靜默不記
+// （cache 防線照常運作）。C 欄存**明文真實帳號值**（稽核價值＝知道是誰；保護靠暫存表永不分享）。
+// 鐵律照舊：純 append、禁 deleteRow、ms timestamp、快照零清空
+function appendLoginLog_(referSSID, loginId, success, nowMs) {
+  if(!draftEnabled_()) { return; }
+  let draftSS = SpreadsheetApp.openById(appProperties.getProperty('draftSheetID'));
+  let sheet = draftSS.getSheetByName(LOGIN_SHEET_NAME);
+  if(sheet === null) {
+    sheet = draftSS.insertSheet(LOGIN_SHEET_NAME);
+    sheet.appendRow(LOGIN_HEADER);
+    sheet.setFrozenRows(1);
+  }
+  sheet.appendRow([nowMs, referSSID, loginId, success ? '成功' : '失敗']);
+}
+
+// 即時警報（per-refer 窗口失敗過閾值）：寄該問卷管理者（名冊 M 欄）。全計數、無明文個資。
+// 信尾附參數說明（帶當前生效值）——收信的管理者才知道門檻怎麼調、大批通知期間怎麼避免誤報
+function sendLoginScanAlert_(referSSID, windowFails, nowMs) {
+  let row = listRowByRefer_(referSSID);
+  if(row === null) { return; }
+  let email = row[12].toString().trim();
+  if(email === "" || MailApp.getRemainingDailyQuota() <= 0) { return; }
+  let name = row[0].toString().trim();
+  let windowMin = Math.round(scanAlertWindowSec_() / 60);
+  let cooldownMin = Math.round(loginCooldownMs_() / 60000);
+  MailApp.sendEmail(email, '【問卷系統｜登入異常警示】' + name, [
+    '問卷「' + name + '」在最近 ' + windowMin + ' 分鐘內累計 ' + windowFails +
+      ' 次登入失敗，達到警示門檻（時間 ' + new Date(nowMs).toLocaleString() + '）。',
+    '',
+    '這可能是有人在窮舉猜測登入資訊；但若你剛用簡訊/Email 大批通知填寫者，尖峰期打錯字也可能觸發本信，請自行判讀。',
+    '系統不會自動封鎖任何人——只有「同一帳號連錯 ' + loginFailMax_() + ' 次」會被冷卻 ' +
+      cooldownMin + ' 分鐘，期滿自動解除，不會牽連其他人。',
+    '如判斷是惡意攻擊、要暫停這份問卷，請到問卷列表把「開放進入」欄改成「否」（改後填寫者暫時無法登入，改回「是」即恢復）。',
+    '',
+    '─── 本警示相關參數（腳本的 ScriptProperties，改了即時生效、免重新部署）───',
+    '・scanAlertThreshold＝' + scanAlertThreshold_() + '：窗口內失敗達此次數就寄本信。大批通知前可暫時調高（如 500）避免誤報',
+    '・scanAlertWindowMinutes＝' + windowMin + '：失敗計數的滑動窗口（分鐘）',
+    '・scanAlertCooldownMinutes＝' + Math.round(scanAlertCooldownSec_() / 60) + '：同一問卷本信的重寄間隔（分鐘），避免洗信箱',
+    '・loginFailMax＝' + loginFailMax_() + '／loginCooldownMinutes＝' + cooldownMin +
+      '：單一帳號連錯上限與冷卻分鐘——唯一會實際擋人的機制。大批通知前可把 loginFailMax 調大（如 99999）暫停鎖定',
+    '（參數只吃正整數；填 0 或留空＝退回預設值，不是關閉。）',
+    '',
+    '（本信不含任何填寫者個資，僅為登入失敗次數統計。）'
+  ].join('\n'));
+}
+
+// 名冊分頁裡 referSSID 對應的第一列（A:O）；找不到回 null（比照 listRowFor_ 但只認 refer）
+function listRowByRefer_(referSSID) {
+  let listSS = SpreadsheetApp.openById(appProperties.getProperty('listSheetID'));
+  let listArr = listSS.getSheets()[0].getRange("A:O").getValues();
+  let rows = _.filter(listArr, (sheet) => sheet[1].toString().trim() === referSSID);
+  return rows.length > 0 ? rows[0] : null;
+}
+
+// ===== 定時掃描 _logins（Phase 21）：管理者手動掛時間觸發器，程式不自建（沿用 Phase 18 慣例） =====
+// 游標記上次處理到的列號，本次只讀 cursor+1 ~ lastRow（純 append 保證列永不位移，游標定位絕對可靠），
+// 掃完更新游標——不重複分析、不重複告警，表再長成本也只跟新增量成正比。第 1 列永遠是表頭故游標至少 1
+function loginScanCursor_() {
+  let n = parseInt((appProperties.getProperty('loginScanCursor') || '').toString().trim(), 10);
+  return (isNaN(n) || n < 1) ? 1 : n;
+}
+
+// 純函數：對一批 _logins 列（B refer、C 帳號值、D 結果）按 refer 分組統計，並偵測「同一帳號
+// 連錯 ≥ suspectRun 次後成功」＝疑似撞中。不碰 GAS 全域，可 vitest
+function analyzeLoginRows_(rows, suspectRun) {
+  let byRefer = {};
+  let runByAccount = {}; // 'refer|帳號值' → 目前連錯次數
+  for(let i=0; i<rows.length; i++) {
+    let refer = rows[i][1].toString();
+    let account = rows[i][2].toString();
+    let res = rows[i][3].toString();
+    if(res !== '成功' && res !== '失敗') { continue; } // 跳過表頭/雜訊列
+    if(!(refer in byRefer)) { byRefer[refer] = { attempts: 0, fails: 0, distinctFails: {}, suspectedHits: [] }; }
+    let g = byRefer[refer];
+    g.attempts += 1;
+    let runKey = refer + '|' + account;
+    if(res === '失敗') {
+      g.fails += 1;
+      g.distinctFails[account] = true;
+      runByAccount[runKey] = (runByAccount[runKey] || 0) + 1;
+    } else {
+      if((runByAccount[runKey] || 0) >= suspectRun) { g.suspectedHits.push(account); }
+      runByAccount[runKey] = 0;
+    }
+  }
+  let out = {};
+  Object.keys(byRefer).forEach((r) => {
+    let g = byRefer[r];
+    out[r] = {
+      attempts: g.attempts, fails: g.fails,
+      distinctFailCount: Object.keys(g.distinctFails).length,
+      suspectedHits: g.suspectedHits
+    };
+  });
+  return out;
+}
+
+// 純函數：套用閾值挑出異常 refer（任一規則命中即列入）。可 vitest 驗三規則邊界
+function flagLoginAnomalies_(analysis, failThreshold, distinctThreshold) {
+  let flagged = [];
+  Object.keys(analysis).forEach((refer) => {
+    let s = analysis[refer];
+    if(s.fails >= failThreshold || s.distinctFailCount >= distinctThreshold || s.suspectedHits.length > 0) {
+      flagged.push({ refer: refer, attempts: s.attempts, fails: s.fails,
+        distinctFailCount: s.distinctFailCount, suspectedHits: s.suspectedHits });
+    }
+  });
+  return flagged;
+}
+
+// 掃描警報信內文（純函數，config 帶當前生效閾值——信尾附參數說明讓收信者知道怎麼調）。
+// **內含實際登入帳號值（真值）**——只寄給系統管理者（securityAlertEmail），是刻意的稽核用途，請勿轉發
+function buildScanAlertBody_(flagged, config) {
+  let lines = ['登入日誌掃描發現以下問卷有異常登入樣態（含實際登入帳號值，僅供系統管理者稽核，請勿轉發）：', ''];
+  flagged.forEach((f) => {
+    lines.push('■ referSSID：' + f.refer);
+    lines.push('　嘗試 ' + f.attempts + ' 次、失敗 ' + f.fails + ' 次、相異失敗帳號 ' + f.distinctFailCount + ' 個');
+    if(f.suspectedHits.length > 0) {
+      lines.push('　⚠ 疑似撞中（連錯多次後成功）帳號 ' + f.suspectedHits.length + ' 個：' + f.suspectedHits.join('、'));
+    }
+    lines.push('');
+  });
+  lines.push('建議動作：到問卷列表把對應問卷的「開放進入」欄改成「否」暫停登入，並比對 _logins 分頁詳查；');
+  lines.push('若清單有「疑似撞中」，上面已列出實際帳號值，優先聯絡該問卷管理者確認名冊帳號是否遭冒用。');
+  lines.push('');
+  lines.push('─── 本次掃描的判定參數（腳本的 ScriptProperties，改了下次掃描生效）───');
+  lines.push('・loginScanFailThreshold＝' + config.failThreshold + '：單一問卷在本批新增紀錄中失敗總數達此值即列入。批次越大（掃描間隔越長）建議調越高——每日掃建議 50+，每小時掃可維持預設');
+  lines.push('・loginScanDistinctThreshold＝' + config.distinctThreshold + '：本批相異失敗帳號數達此值即列入。橫向掃庫特徵，最可信的訊號，一般不必調');
+  lines.push('・同一帳號連錯 ' + config.suspectRun + ' 次後成功＝疑似撞中（固定值），最高優先級');
+  lines.push('・收件人走 securityAlertEmail（未設則寄時間觸發器擁有者）；掃描頻率＝你掛的時間觸發器間隔');
+  lines.push('（參數只吃正整數；填 0 或留空＝退回預設值，不是關閉。）');
+  return lines.join('\n');
+}
+
+// 手動維運進入點（比照 rebuildDraftSpreadsheet）：GAS 編輯器執行不顯示 return，console.log 進紀錄
+function scanLoginLog() {
+  let result = scanLoginLog_();
+  console.log(result);
+  return result;
+}
+
+function scanLoginLog_() {
+  if(!draftEnabled_()) { return '線上暫存未啟用，無 _logins 可掃描'; }
+  let lock = LockService.getScriptLock();
+  if(!lock.tryLock(1000)) { return '上一輪掃描仍在執行，本輪跳過（游標下輪補上）'; }
+  try {
+    let draftSS = SpreadsheetApp.openById(appProperties.getProperty('draftSheetID'));
+    let sheet = draftSS.getSheetByName(LOGIN_SHEET_NAME);
+    if(sheet === null) { return '_logins 分頁不存在，無登入紀錄可掃描'; }
+    let lastRow = sheet.getLastRow();
+    let cursor = loginScanCursor_();
+    if(lastRow <= cursor) { return '無新增登入紀錄（游標 ' + cursor + '，最後列 ' + lastRow + '）'; }
+    let rows = sheet.getRange(cursor + 1, 1, lastRow - cursor, 4).getValues();
+    let scanConfig = {
+      failThreshold: positiveIntProp_('loginScanFailThreshold', LOGIN_SCAN_FAIL_THRESHOLD_DEFAULT),
+      distinctThreshold: positiveIntProp_('loginScanDistinctThreshold', LOGIN_SCAN_DISTINCT_THRESHOLD_DEFAULT),
+      suspectRun: LOGIN_SCAN_SUSPECT_RUN
+    };
+    let flagged = flagLoginAnomalies_(
+      analyzeLoginRows_(rows, scanConfig.suspectRun),
+      scanConfig.failThreshold, scanConfig.distinctThreshold
+    );
+    // 游標只前進不回退（純 append 保證列不位移）——先更新，異常與否都不重掃這批
+    appProperties.setProperty('loginScanCursor', lastRow.toString());
+    if(flagged.length === 0) { return '掃描 ' + rows.length + ' 列，無異常（游標前進至 ' + lastRow + '）'; }
+    let recipient = (appProperties.getProperty('securityAlertEmail') || '').toString().trim();
+    if(recipient === "") { recipient = Session.getEffectiveUser().getEmail(); }
+    if(recipient === "" || MailApp.getRemainingDailyQuota() <= 0) {
+      return '掃描 ' + rows.length + ' 列，發現 ' + flagged.length + ' 個異常但無收件人或配額，未寄信（游標前進至 ' + lastRow + '）';
+    }
+    MailApp.sendEmail(recipient, '【問卷系統｜登入日誌掃描異常】', buildScanAlertBody_(flagged, scanConfig));
+    return '掃描 ' + rows.length + ' 列，發現 ' + flagged.length + ' 個異常已寄警報給 ' + recipient + '（游標前進至 ' + lastRow + '）';
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 function readRecord(referSSID, recordSSID, auth) {
   return logged_('readRecord', () => readRecord_(referSSID, recordSSID, auth));
 }
 
 function readRecord_(referSSID, recordSSID, auth) {
-  if(authRecord(referSSID, auth)) {
+  // Phase 21 即時防線：驗證前先查冷卻旗標。loginId＝嘗試的真實帳號值（進 _logins 稽核），
+  // pseudonym＝其 HMAC（只當 cache key，長度/字元衛生，不落表）
+  let nowMs = (new Date()).getTime();
+  let loginId = draftKey_(referSSID, auth);
+  let pseudonym = loginPseudonym_(referSSID, auth);
+  if(pseudonym !== null) {
+    let throttle = checkLoginThrottle_(referSSID, pseudonym, nowMs);
+    if(!throttle.allowed) {
+      // 一致化回應：不區分「被鎖」與其他失敗細節，不洩漏主鍵值在不在名冊
+      return { throttled: true, cooldownSeconds: Math.ceil(throttle.cooldownRemainMs / 1000) };
+    }
+  }
+  let passed = authRecord(referSSID, auth);
+  // 驗證後記一筆（成功清零/失敗累加＋橫向偵測＋_logins 稽核）；空嘗試（pseudonym null）不記
+  if(pseudonym !== null) { recordLoginAttempt_(referSSID, pseudonym, loginId, passed, nowMs); }
+  if(passed) {
     let listSS = SpreadsheetApp.openById(appProperties.getProperty('listSheetID'));
     let listSheet = listSS.getSheets()[0];
     let listRange = listSheet.getRange("A:O");
@@ -1380,7 +1690,13 @@ function readRecord_(referSSID, recordSSID, auth) {
                 signatures: signatures,
                 headers: headers,
                 // 登入成功即簽發 token，之後的特權 RPC 只帶它、不再重傳認證欄位值
-                token: issueToken_(referSSID, serverPkey, (new Date()).getTime())
+                token: issueToken_(referSSID, serverPkey, (new Date()).getTime()),
+                // 暫存加密金鑰對（Phase 20）：id 假名可落地當定位鍵（localStorage key、
+                // 匯出檔金鑰料），enc 只留前端記憶體加解密草稿、絕不落地
+                draftKeys: {
+                  id: deriveDraftKey_('id', referSSID, serverPkey),
+                  enc: deriveDraftKey_('enc', referSSID, serverPkey)
+                }
               };
             }
           }

@@ -2,6 +2,78 @@
 
 ## 待處理
 
+### 23. sticky 控制列手機可收合：按鈕群摺進 handle、JWT 條留著（2026-07-12 設計定案＋實作完成，規格見 plan.md Phase 22）✅
+
+**2026-07-12 實作完成（待實機驗證後部署）**：手機直式時 FormToolbar／SignatureToolbar 的按鈕區太高、
+往下填題/簽名擋畫面。學 `scoringSystem-cf` ProjectDetail 抽屜的「收合成 handle」（**不學 matter.js 物理**）：
+新元件 `CollapsibleControls.vue` 包住兩條 toolbar 的按鈕群——手機（≤768px，`matchMedia`）往下捲
+（`scrollTop` 遞增且 >32px）自動收合成 handle（「更多功能請點此」）、點 handle 手動展開；
+**JWT 倒數條留在外層永遠可見**（只收按鈕群）。收合用 `grid-template-rows 1fr↔0fr` 手風琴；
+`active` prop 防空殼長 handle（viewOnly 無鈕時 passthrough）；桌機/平板 `collapsible=false` 原樣顯示。
+lint 淨、298 測試綠、build 158KB；無頭 Chromium 實測手機 ALLPASS（捲動收合 56→0、點展開 0→56）、
+桌機 handle 隱藏不收合。
+
+### 22. 登入防枚舉：CacheService 即時防線＋`_logins` 稽核日誌（2026-07-12 設計定案＋實作完成，規格見 plan.md Phase 21）✅
+
+**2026-07-12 實作完成（未部署）**：後端 `src/Code.js` 新增即時防線＋稽核＋掃描三層：
+`loginPseudonym_`（`draftKey_` 過 `deriveDraftKey_` purpose='log'，沿用 Phase 20 派生基礎）；
+`checkLoginThrottle_`/`recordLoginAttempt_`（CacheService：per-假名連錯達 `loginFailMax`（5）冷卻
+`loginCooldownMinutes`（5）、成功清零；per-refer 窗口失敗過 `scanAlertThreshold`（30）寄該問卷 M 欄管理者、
+`scanAlertCooldownMinutes`（60）節流）；`appendLoginLog_`/`_logins` 分頁（純 append、A ms／B refer／C 假名／
+D 成功失敗、表頭凍結、draftSheetID 未設則靜默不記、cache 防線照常）；`readRecord_` 開頭 check 被擋回
+`{throttled, cooldownSeconds}`（一致化不洩漏存在性）、驗證後 record（success=authRecord 結果）。
+定時掃描 `scanLoginLog()`（管理者手動掛觸發器、程式不自建）：`loginScanCursor` 游標增量、`tryLock` 防重疊、
+純函數 `analyzeLoginRows_`/`flagLoginAnomalies_` 三規則（失敗總數 `loginScanFailThreshold`（20）／相異假名數
+`loginScanDistinctThreshold`（10）／同假名連錯≥3後成功＝疑似撞中），寄 `securityAlertEmail`（未設 fallback
+觸發器擁有者 `getEffectiveUser`）、乾淨批次靜默、游標只前進。前端 App.vue `loginView` 處理 throttled 分支、
+`startLoginCooldown` 逐秒倒數（沿用 invite cooldown 模式）顯示一致化訊息，前端不做限流判斷（純顯示）。
+測試：新開 tests/loginThrottle.test.js（20 測試，fake cache TTL+可控時鐘、MailApp、LockService tryLock、
+_logins、名冊、refer P 欄——連錯鎖定/期滿解除/成功清零/常數可調、_logins 純 append 存假名、橫向警報節流、
+掃描三規則邊界＋游標增量＋不重複告警＋tryLock 失敗 return＋收件人 fallback＋乾淨批次不寄信、readRecord_
+被擋早退＋失敗記稽核）；inviteRpc loader 補 CacheService stub。345 測試綠、lint 淨、build 159.8KB。
+**待端對端實機驗證**（plan.md Phase 21 清單）＋管理者掛 `scanLoginLog()` 時間觸發器＋選用 ScriptProperties
+（`securityAlertEmail` 等，皆有預設）後部署。**跨 Phase 相依**：`getDraftEncSecret_`/`deriveDraftKey_` Phase 20
+已建、本 Phase 直接沿用（purpose='log'）。
+
+### 21. 暫存內容端到端加密：per-(問卷×用戶) HMAC 派生金鑰（2026-07-12 設計收斂定案＋實作完成，規格見 plan.md Phase 20）✅
+
+**2026-07-12 實作完成（未部署）**：後端 `getDraftEncSecret_`（ScriptProperties 自動生成，與 jwtSecret
+分離）＋`deriveDraftKey_(purpose, referSSID, pkey)`（base64url HMAC，purpose=id/enc/log 做 key
+separation，log 給 Phase 21 沿用）；`readRecord_` 隨 token 回 `draftKeys:{id,enc}`；`saveDraft` A 欄改落
+id 假名（後端自算不信前端）、`encodeDraftPayload_`/`decodeDraftPayload_` 對 `smd1:` 原樣直通（不重壓，
+`gz:` 分支留防呆）；`buildReadonlyHeaders_` 不再疊草稿，`inviteeLogin` 改回密文 blob＋後端重算的填寫者
+enc key（無草稿不外流 key）。前端新增 `utils/draftCipher.js`（sealDraft/openDraft：CompressionStream
+gzip→`smd1:g:`、不可用走 `smd1:r:`，內層沿用 useCrypto smv2）；`tempStorage.js` 全面改寫（key=假名、
+value=密文、每問卷×人一條目、寫入鏈序列化、`migrateLegacyEntry` 一次性搬家清明文——舊 key 內其他問卷
+條目隨鍵清除是刻意取捨）；App.vue 持 `draftKeys` 記憶體 ref；useDraft 上傳前 seal／還原時 open；
+匯出匯入金鑰改「id 假名＋密碼」＋舊檔 fallback（主鍵值＋密碼）；InviteeSignDialog 前端解密疊草稿。
+測試：inviteRpc 擴充（派生鍵穩定性/分離、saveDraft 假名＋不重壓、loadDraft 假名定位、readRecord
+draftKeys、inviteeLogin 密文含無草稿不外流）＋新開 draftCipher.test.js（g/r roundtrip、錯 key/壞前綴/
+截斷）＋tempStorage.test.js（roundtrip、搬家冪等/不覆蓋/壞 JSON、匯出檔新舊金鑰）；draftRebuild 門檻
+fixture 隨 DRAFT_HEADER 文案更新調整（舊亂數分頁表頭列改計為資料，保守方向）。325 測試綠、lint 淨、
+build 159KB。**待實機驗證**（plan.md Phase 20 端對端清單：假名 key＋密文、跨裝置、受邀者疊層、舊明文
+搬家、iPad OS 13 r 路徑）後部署；`draftEncSecret` 輪替＝暫存全部歸零（plan.md 注意點）。
+
+原定案摘要：接續 Phase 5（JWT，登入個資不留前端）的下一步——保護**暫存內容**：
+原況 localStorage 是「明文主鍵值當 key＋明文答案 JSON」、線上 `_draft` 是「明文主鍵值＋gzip 編碼（非加密）」。
+定案機制：後端以 `HMAC(draftEncSecret, [purpose, referSSID, pkey])` **確定性派生兩把 key**（id 假名可落地
+當定位鍵、enc 金鑰只留記憶體），登入時隨 JWT 回傳，**無字典不落地、重登重算同一把**；前端 gzip
+（CompressionStream，iPad OS13 無則跳過、格式帶旗標）→ AES 加密（沿用 useCrypto）→ localStorage 與
+`_draft` 都只落 `smd1:` 密文＋假名 key（暫存表全面去識別化）。受邀者疊草稿改前端解密（後端回密文＋派生
+key）；localStorage 舊明文條目登入時一次性搬家清除；record（正式結果）不在範圍（管理者要直接看 sheet）。
+
+### 20. 草稿分頁收斂為單一 `_draft` 分頁：referSSID 降為資料欄（2026-07-11 設計定案＋實作完成，規格見 plan.md Phase 19）✅
+
+**2026-07-11 實作完成（未部署）**：Phase 17 的「一份問卷一個亂數名分頁」退役——實際使用
+發現 loadDraft 的建分頁副作用會落地一堆只有表頭的空分頁。改比照 `_invites` 單表模型：
+全問卷共用 `_draft` 分頁，4 欄（A 主鍵、B updatedAt、C referSSID、D 起 payload 切塊），
+「當前草稿」＝(主鍵, referSSID) 複合鍵最新一列。`draftPayloadByKey_` 改兩段式讀取
+（先讀 A:C 定位、命中才單讀該列全寬，不搬全表 payload）且**讀取路徑不再建分頁**；
+`compactDraftRows_` 改複合鍵去重；rebuild 分頁分派改按名稱（不做首格嗅探，舊亂數分頁
+原樣照抄 fail-safe）。前端/RPC 介面零改動。測試改寫（draftChunks＋draftRebuild，
+含跨問卷同主鍵隔離、舊分頁照抄回歸）。全庫 298 測試綠、lint 淨。
+**部署前手動刪暫存試算表舊 referSSID 分頁（保留 `_invites`）**；待實機驗證後部署。
+
 ### 19. 暫存試算表定期重建＋備份 folder（2026-07-11 設計定案＋實作完成，規格見 plan.md Phase 18）✅
 
 **2026-07-11 實作完成（未部署）**：`src/Code.js` 新增 `rebuildDraftSpreadsheet()`（全程
@@ -94,17 +166,18 @@ datetime-local 日曆選、免手算 timestamp，B/C/N（表ID/固定ID）唯讀
 
 ### 13. 問卷列表卡片化＋流程預覽看板串（2026-07-10 設計定案，規格見 plan.md Phase 14）✅
 
-**已於 2026-07-10 實作完成（未部署）**：lint／測試／build 全綠。
-新元件 SheetCard.vue 取代 sheetsDialog 的 el-table（sheet-list-table 樣式一併移除）：
-標題＋tags＋右上角兩行色點期限（2026-07-11 改版：「可填寫至」帶 success/warning、
-已截止填寫 danger、暫時關閉/不開放 info；「可檢視至」固定 info 恆在，
-原卡底「截止後仍可檢視至」細字退役；期限開卡算一次不自跑 tick）＋靜態流程看板串
-「開始(建立日期)→填寫或檢視→簽名×n(有簽名格才出現)→結束(dueDate，截止轉 danger)」＋
-進入按鈕（沿用 viewCheck 語意，viewCheck 自 App.vue 退役）；
-純函數 utils/sheetFlow.js（buildFlowChips/sheetStatus）＋ tests/sheetFlow.test.js
-（15 測試，含 signatures/viewDate 缺值退化）；零後端改動。
-**待人工驗收**：有/無簽名格的卡片、過期卷轉檢視＋整條灰、dueDate=0、手機直式
-看板串橫捲、tags 染色一致（plan.md Phase 14 端對端清單）。
+**已實作完成**：lint／測試／build 全綠。SheetCard.vue 取代 sheetsDialog 的 el-table
+（sheet-list-table 樣式一併移除）：標題＋tags＋靜態流程看板串「開始(建立日期)→填寫/檢視
+→簽名×n(有簽名格才出現)→結束」＋進入按鈕（沿用 viewCheck 語意，viewCheck 自 App.vue 退役）。
+看板串走灰＋磚紅（起訖框/箭頭石墨灰、中段 chip 珊瑚紅）、hover 底色淡黃 --sm-alert-bg。
+**2026-07-11 右上角提醒退役**：原兩行「可填寫至/可檢視至」色點提醒全移除（與看板串結束
+節點語意重複、手機擠），急迫度改由**結束節點日期文字色**表達——方框維持灰、只染下方日期
+（充裕灰／剩<10分橘 --sm-warning-on-light／已截止磚紅 --el-color-danger）；結束節點語意
+填寫未截止「填寫結束」＋dueDate、已截止改「查看結束」＋viewDate。`sheetStatus` 一併退役。
+純函數 utils/sheetFlow.js（buildFlowChips）＋ tests/sheetFlow.test.js（10 測試，含
+充裕/快截止/已截止/暫時關閉/不開放/dueDate=0/signatures 缺值退化）；零後端改動。
+**待人工驗收**：充裕卡結束灰字、快截止橘字、已截止「查看結束」磚紅字＋整條灰、
+有/無簽名格、dueDate=0、手機直式看板串橫捲＋標題不被擠（plan.md Phase 14 端對端清單）。
 
 sheetsDialog 的 el-table 退役改卡片列；每卡一條靜態看板串
 「開始(建立日期)→填寫→簽名×n(有簽名格才出現)→結束(dueDate)」——挪用
