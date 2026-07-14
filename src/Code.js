@@ -1867,6 +1867,82 @@ function authRecord(referSSID, auth) {
   return false;
 }
 
+// ===== 檔案欄位：沿用舊檔哨兵 ＋ `_file` 上傳登記表（Phase 23）=====
+// 背景：舊版 writeRecord 對檔案欄「原樣採用前端傳來的 fileID」且不驗歸屬——任何人都能把不屬於
+// 自己的 fileID 掛進自己的紀錄，回條信的 DriveApp.getFileById 還會幫忙把它轉成可開的 URL。
+// 根因是上傳的 fileID 從來沒地方登記、後端無從驗證。本 Phase 兩手補上：
+//  (1) **沿用舊檔走哨兵**：前端要「用上次那個檔」時只送 REUSE_LAST_FILE_SENTINEL（傳輸層指令、
+//      絕不落地），伺服器自己從該使用者紀錄表最後一列查出真 fileID 填入——前端沒有傳舊 fileID 的
+//      通道（比照簽名的 resolveSignatureSources_ 模型）。**不 fallback 名冊**：名冊母表該格存的是
+//      檔名片段（readRecord 用 title contains 模糊搜），模糊搜出來的檔案歸屬無法保證，不可當寫入來源。
+//  (2) **新上傳驗歸屬**：saveFile 成功建檔後在 `_file` append 一筆登記，writeRecord 收到非哨兵的
+//      fileID 時比對登記（同 referSSID＋同人＋同欄位）；查無則 fallback 比對紀錄表最後一列同欄
+//      fileID（自家落過地的值，涵蓋登記表上線前的舊暫存），兩者皆無就整筆擋下。
+// `_file` 只是 metadata 登記（無檔案內容、無明文個資，pkey 走 id 假名與 _draft A 欄同源），
+// 保護邊界同 _logins/_invites＝draftSheetID 永不對外分享；draftSheetID 未設則靜默不記、驗證跳過
+// （維持舊行為，比照 appendLoginLog_ 的降級）。鐵律照舊：純 append、禁 deleteRow、ms timestamp。
+const FILE_SHEET_NAME = '_file';
+// D 欄記**欄位 ID**（對照表單第 1 列的 id），不是欄位位置——位置（pos）會隨管理者在對照表單
+// 插欄/搬欄而改變，舊登記列就會對到別的欄位；id 是穩定識別碼
+const FILE_HEADER = ['timestamp 上傳時間(ms)', 'referSSID 問卷表ID', 'uploader 上傳者假名(HMAC)', 'columnID 欄位ID', 'fileID Drive檔案ID', 'mimeType 檔案類型'];
+// 前端帶入「沿用上次上傳的檔案」時送的哨兵。與會落地的中文哨兵（「無資料」／「不提供資料」）
+// 語意分家：這個絕不落地，進 pureData 前必被替換成真 fileID，查無就擋（見 plan/issue.md 三哨兵）。
+// 字面值與前端 src/utils/sentinels.js 的 REUSE_LAST_FILE 必須一致（有測試鎖）
+const REUSE_LAST_FILE_SENTINEL = '__SM_REUSE_LAST_FILE__';
+
+// _file 分頁純 append 登記（找不到就建，比照 appendLoginLog_）；draftSheetID 未設則靜默不記。
+// 建分頁權只在寫入路徑（saveFile），讀取路徑一律 getSheetByName 自己判 null（比照 draftSheet_ 的教訓）
+function appendFileLog_(referSSID, uploaderPseudo, columnID, fileID, mimeType, nowMs) {
+  if(!draftEnabled_()) { return; }
+  let draftSS = SpreadsheetApp.openById(appProperties.getProperty('draftSheetID'));
+  let sheet = draftSS.getSheetByName(FILE_SHEET_NAME);
+  if(sheet === null) {
+    sheet = draftSS.insertSheet(FILE_SHEET_NAME);
+    sheet.appendRow(FILE_HEADER);
+    sheet.setFrozenRows(1);
+  }
+  sheet.appendRow([nowMs, referSSID, uploaderPseudo, columnID, fileID, mimeType]);
+}
+
+// 讀 _file 全部登記列（分頁不存在／未設 draftSheetID 回空陣列——呼叫端據此降級）
+function fileLogRows_() {
+  if(!draftEnabled_()) { return []; }
+  let draftSS = SpreadsheetApp.openById(appProperties.getProperty('draftSheetID'));
+  let sheet = draftSS.getSheetByName(FILE_SHEET_NAME);
+  if(sheet === null) { return []; }
+  return sheet.getDataRange().getValues();
+}
+
+// 純函數：_file 裡有沒有這個人在這份問卷這個欄位上傳過這個檔？欄位認 **id 不認 pos**
+// （pos 會隨對照表單插欄/搬欄而位移，舊登記列就對到別的欄位了）。表頭列的字面字串永不等於
+// 真實 referSSID/假名/fileID，天然不匹配、不需特判
+function fileLogHasUpload_(rows, referSSID, uploaderPseudo, columnID, fileID) {
+  for(let i=0; i<rows.length; i++) {
+    if(rows[i][1].toString() === referSSID &&
+       rows[i][2].toString() === uploaderPseudo &&
+       rows[i][3].toString() === columnID.toString() &&
+       rows[i][4].toString() === fileID) { return true; }
+  }
+  return false;
+}
+
+// 純函數：紀錄表裡該主鍵的最後一列（比照 readRecord_ 的 userRecords 取法：C 欄＝主鍵值），無則 null
+function latestRecordRowFor_(recordArr, pkeyValue) {
+  let rows = _.filter(recordArr, (arr) => {
+    return arr[2].toString() === pkeyValue.toString();
+  });
+  return rows.length > 0 ? rows[rows.length - 1] : null;
+}
+
+// 純函數：從紀錄列取某欄的 fileID（紀錄列前 5 欄是 metadata，headers 從第 6 欄起＝pos+5），
+// 無列/空值回 null（呼叫端據此擋下）
+function resolveReuseFileId_(userRecord, pos) {
+  if(userRecord === null || userRecord === undefined) { return null; }
+  if(userRecord[pos + 5] === null || userRecord[pos + 5] === undefined) { return null; }
+  let fileID = userRecord[pos + 5].toString().trim();
+  return fileID === "" ? null : fileID;
+}
+
 function writeRecord(referSSID, recordSSID, token, record, accept, signatures, email) {
   return logged_('writeRecord', () => writeRecord_(referSSID, recordSSID, token, record, accept, signatures, email));
 }
@@ -1935,6 +2011,11 @@ function writeRecord_(referSSID, recordSSID, token, record, accept, signatures, 
     }
     record = _.orderBy(record, ['pos'], ['asc']);
     let userRows = getUserRow(referSSID, auth);
+    // 檔案欄裁決（Phase 23）用的惰性快取：紀錄表與 _file 整筆 writeRecord 各最多讀一次
+    // （純 append 保證列不位移，讀一次夠用）；uploaderPseudo 與 _draft A 欄同源（purpose='id'）
+    let recordArrCache = null;
+    let fileLogCache = null;
+    let uploaderPseudo = draftEnabled_() ? deriveDraftKey_('id', referSSID, claims.pkey) : "";
     if(userRows.length > 0) {
       let userRow = userRows[0];
       for(let i=0; i<record.length; i++) {
@@ -1985,7 +2066,42 @@ function writeRecord_(referSSID, recordSSID, token, record, accept, signatures, 
                 } else {
                   let errorReason = "";
                   if(formatDetector('F', 'F', column)) {
-                    column.value = data.value;
+                    if(data.value === REUSE_LAST_FILE_SENTINEL) {
+                      // 沿用上次上傳的檔案（Phase 23）：fileID 一律伺服器端從**本人**紀錄表最後一列
+                      // 查出（claims.pkey 由 token 裁決），前端沒有傳舊 fileID 的通道；查無＝擋下要求重傳。
+                      // 哨兵到此為止，絕不落地
+                      if(recordArrCache === null) {
+                        recordArrCache = SpreadsheetApp.openById(recordSSID).getSheets()[0].getDataRange().getValues();
+                      }
+                      let reuseID = resolveReuseFileId_(latestRecordRowFor_(recordArrCache, claims.pkey), column.pos);
+                      if(reuseID === null) {
+                        proceedWrite = false;
+                        errorReason = "：找不到你先前上傳的檔案，請重新上傳";
+                      } else {
+                        column.value = reuseID;
+                      }
+                    } else if(data.value !== "" && draftEnabled_()) {
+                      // 新上傳驗歸屬（Phase 23）：_file 登記命中（同問卷＋同人＋同欄位），或 fallback
+                      // 命中本人紀錄表最後一列同欄 fileID（自家落過地的值，涵蓋 _file 上線前的舊暫存）；
+                      // 兩者皆無＝來源不明（可能是竄改的任意 fileID），整筆擋下。
+                      // draftSheetID 未設時整段跳過（無登記表可查，維持舊行為）
+                      if(fileLogCache === null) { fileLogCache = fileLogRows_(); }
+                      let owned = fileLogHasUpload_(fileLogCache, referSSID, uploaderPseudo, column.id, data.value.toString());
+                      if(!owned) {
+                        if(recordArrCache === null) {
+                          recordArrCache = SpreadsheetApp.openById(recordSSID).getSheets()[0].getDataRange().getValues();
+                        }
+                        owned = resolveReuseFileId_(latestRecordRowFor_(recordArrCache, claims.pkey), column.pos) === data.value.toString();
+                      }
+                      if(owned) {
+                        column.value = data.value;
+                      } else {
+                        proceedWrite = false;
+                        errorReason = "：檔案來源無法確認，請重新上傳";
+                      }
+                    } else {
+                      column.value = data.value;
+                    }
                   } else if(formatDetector('L', 'F', column)) {
                     let defaultNum = [1, 10, 100];
                     let numConfig = column.content.split(";");
@@ -2297,7 +2413,8 @@ function saveFile(referSSID, recordSSID, token, columnID, fileObj) {
 
 function saveFile_(referSSID, recordSSID, token, columnID, fileObj) {
   // 舊版沒驗身分就允許上傳 Drive，token 化時順手補上這層
-  if(authByToken_(referSSID, token) === false) {
+  let claims = authByToken_(referSSID, token);
+  if(claims === false) {
     return {
       status: false,
       tokenExpired: true,
@@ -2357,10 +2474,21 @@ function saveFile_(referSSID, recordSSID, token, columnID, fileObj) {
             let blob = Utilities.newBlob(fileObj.bytes, fileObj.mimeType, fileObj.filename);
             if(fileObj.bytes.length <= maxSize * 1000000) {
               let folder = DriveApp.getFolderById(storageID);
-              let writtenFile = folder.createFile(blob); 
+              let writtenFile = folder.createFile(blob);
               writtenFile.setName("[" + writtenFile.getId() + "]" + currentSheet[0][0].toString().trim() + fileObj.filename);
               fileID = writtenFile.getId();
               fileURL = writtenFile.getUrl();
+              // Phase 23：登記到 _file——writeRecord 送出時據此驗 fileID 歸屬（同問卷＋同人＋同欄位）。
+              // 欄位記 **id 不記 pos**（pos 會隨對照表單插欄/搬欄位移，舊登記列會對到別的欄位）；
+              // 上傳者走 id 假名（與 _draft A 欄同源）；draftSheetID 未設則靜默不記（驗證端一併降級）。
+              // 登記失敗不擋上傳（檔案已在 Drive，擋了使用者也拿不回來）——退化成 writeRecord 走
+              // 紀錄表 fallback 或要求重傳
+              try {
+                appendFileLog_(referSSID, deriveDraftKey_('id', referSSID, claims.pkey), column.id,
+                  fileID, fileObj.mimeType, (new Date()).getTime());
+              } catch (err) {
+                console.error('appendFileLog failed: ' + (err.stack || err));
+              }
             } else {
               proceedWrite = false;
               errorLog.push("檔案大小超過" + maxSize + "MB限制");

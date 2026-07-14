@@ -101,6 +101,10 @@ const CDN_IMPORT_MAP = {
     marked: 'https://esm.sh/marked@18.0.5',
     signature_pad: 'https://esm.sh/signature_pad@5.1.3',
     uuid: 'https://esm.sh/uuid@14.0.1',
+    // 送出前差異對照（Phase 23）：diff 產 unified patch、diff2html 轉 HTML。
+    // diff2html 的 CSS 走 index.html 的 jsDelivr <link>，**版本要與這裡同步**
+    diff: 'https://esm.sh/diff@9.0.0',
+    diff2html: 'https://esm.sh/diff2html@3.4.56',
   },
 }
 

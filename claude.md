@@ -30,6 +30,8 @@
 | `marked` | Markdown 轉 HTML 引擎（同上，輸出必過 DOMPurify） |
 | `signature_pad` | 簽名板（`composables/useSignatures.js`） |
 | `uuid` | 產生識別碼 |
+| `diff` | 產生 unified patch（`components/DiffText.vue` 的 `createTwoFilesPatch`，送出前差異對照） |
+| `diff2html` | 把 patch 轉成 HTML（同上；輸出必過 DOMPurify 才 v-html）。**CSS 走 index.html 的 jsDelivr `<link>`，版號與 import map 兩處必須同步** |
 
 ### devDependencies
 
@@ -51,8 +53,9 @@
 於 GAS 沙盒 iframe 執行期載入。清單：
 
 - **JS library**（import map → esm.sh）：vue、element-plus、lodash、dayjs、dompurify、
-  marked、signature_pad、uuid。改版本要**同步改** `vite.config.js` 的 `CDN_IMPORT_MAP`
-  與 `index.html` 的 element-plus CSS `<link>` 版號（兩處版本必須一致）。
+  marked、signature_pad、uuid、diff、diff2html。改版本要**同步改** `vite.config.js` 的
+  `CDN_IMPORT_MAP` 與 `index.html` 的 CSS `<link>` 版號（element-plus、diff2html 各一條，
+  兩處版本必須一致）。
 - **CSS／字型／其他 `<link>`／`<script>`**：Element Plus CSS（jsDelivr）、FontAwesome
   6（cdnjs）、Noto Sans TC 黑體（Google Fonts，全域 `--el-font-family` 設在 `src/style.scss`）、
   PapaParse（cdnjs `<script>`）。
@@ -79,9 +82,9 @@ dev（`npm run dev`）由 Vite 從 node_modules 解析、不注入 import map（
 |------|------|
 | `README.md` | 對外安裝／維運入口：系統架構、雙 GAS 專案部署步驟、**ScriptProperties 完整清單（兩專案各一張表）**、loading 小遊戲換主題/關閉指引（含小人共用說明）、文件導覽。給第一次拿到專案的人看 |
 | `src/App.vue` | 主元件：狀態編排、對話框流程、GAS 呼叫 |
-| `src/components/` | UI 元件：FormField、SheetCard、FormToolbar、SignatureToolbar、JwtCountdownBar、FieldTimeline、LifecycleTimeline、InviteeSignDialog、PinCodeInput、MultiSelectDrawer、FileUploadDrawer、TempTransferDrawers、ConfirmDrawer、LoadingGame、Stat/LatestDialog、ErrorAlert、AppFooter（版權列單一來源）——各元件職責與彈窗規範（全站零 el-dialog、drawer 方向、`.drawer-flow-title`）見 plan/struct.md「前端元件細節」 |
+| `src/components/` | UI 元件：FormField（左側狀態邊界條：細線＋頂端狀態圖示）、FieldValueSwitch（答案來源 el-segmented：預設值/你上次的/暫存/你現在填的，切了自動帶入）、SubmitDiffDrawer、DiffText、SheetCard、FormToolbar、SignatureToolbar、JwtCountdownBar、FieldTimeline、LifecycleTimeline、InviteeSignDialog、PinCodeInput、MultiSelectDrawer、FileUploadDrawer、TempTransferDrawers、ConfirmDrawer、LoadingGame、Stat/LatestDialog、ErrorAlert、AppFooter（版權列單一來源）——各元件職責與彈窗規範（全站零 el-dialog、drawer 方向、`.drawer-flow-title`）見 plan/struct.md「前端元件細節」 |
 | `src/composables/` | 有狀態共用邏輯：useCrypto、useGasRpc、useDraft、useInvites、useSignatures、useJwtSession、useConfirmDrawer（全站禁用 ElMessageBox）、useLoadingGame——細節見 plan/struct.md |
-| `src/utils/` | 純函數：columnRules、columnPrep、tempQueue、tempStorage、draftCipher、markdown、multiSelect、formatters、jwt、timeline、sheetFlow、pixelSprites——細節見 plan/struct.md |
+| `src/utils/` | 純函數：columnRules、columnPrep、tempQueue、tempStorage、draftCipher、sentinels、fieldChips、submitDiff、markdown、multiSelect、formatters、jwt、timeline、sheetFlow、pixelSprites——細節見 plan/struct.md |
 | `src/theme/colors.config.js` | 主題配色單一來源（含 WCAG 實測對比度）；`vite.config.js` 的插件在建置時據此生成 `src/styles/_theme-generated.scss`（gitignored），手寫樣式層在 `src/styles/_theme.scss`，改色只改 config |
 | `src/Code.js` | Google Apps Script 後端程式（非 ES module，clasp 原樣推送） |
 | `tests/` | Vitest 單元測試（純函數；Code.js 以 stub 全域載入測試） |
@@ -239,6 +242,19 @@ formatDetector('F', 'F', column)  // format=F, type=F
   限流判斷。**誠實邊界**：cache 驅逐＝計數歸零（防線暫鬆非破口、`_logins` 一筆不漏）；`_logins` 明文保護全靠
   draftSheetID 永不分享（管理者責任）；無 IP 下橫向枚舉只能偵測＋人工斷，根治靠
   認證欄位的熵（管理者建名冊時的選擇）
+- **檔案欄 fileID 歸屬驗證（Phase 23，2026-07-14 實作完成，規格見 plan/plan.md Phase 23）**：舊版
+  writeRecord 對檔案欄**原樣採用前端傳來的 fileID 且不驗歸屬**（可把他人 fileID 掛進自己的紀錄，
+  回條信的 `DriveApp.getFileById` 還會轉成可開的 URL），根因是上傳的 fileID 從來沒地方登記。
+  兩手補上：(1) **沿用舊檔走哨兵**——前端帶入舊檔時 `column.value` 只放
+  `__SM_REUSE_LAST_FILE__`（`utils/sentinels.js`／Code.js 同字面常數、測試鎖），**前端沒有傳舊
+  fileID 的通道**；writeRecord 遇哨兵才用 `latestRecordRowFor_`＋`resolveReuseFileId_` 從本人
+  （claims.pkey）紀錄表最後一列查出真 fileID 落地（哨兵絕不落地），查無整筆擋下。不 fallback 名冊
+  （名冊存檔名片段非 fileID，模糊搜歸屬無保證）。(2) **新上傳驗歸屬**——saveFile 成功後在 **`_file`
+  分頁**（draftSheetID 試算表，純 append、凍結表頭、A ms／B refer／C 上傳者 id 假名／D **欄位 ID**
+  （不記 pos——插欄/搬欄會位移）／E fileID／F mime）appendRow 登記；writeRecord 用 `fileLogHasUpload_`
+  比對 (refer, 假名, columnID, fileID)，
+  查無時 fallback 比對本人紀錄表最後一列同欄 fileID（涵蓋登記表上線前的舊值），兩者皆無擋下。
+  **draftSheetID 未設＝驗證跳過**（維持舊行為，比照 `_logins` 靜默降級）
 - **遠端簽名邀請**（`_invites` 分頁存於 draftSheetID 試算表，功能與線上暫存綁定）：邀請碼（token）為 64 字元 hex，doGet 注入走 regex 白名單 + JSON.stringify 雙保險；受邀者登入走 **email OTP 二段驗證**——`requestInviteOtp(token)` 寄 6 位數一次性驗證碼到邀請列登記信箱（RPC 不收 email 參數；列上只存 `SHA-256(otp+邀請碼)` hash、10 分鐘有效、60 秒重寄節流、連錯 5 次作廢、單次使用），`inviteeLogin(token, otp)` 在 ScriptLock 內比對通過才回問卷內容並換 session JWT（帶 invite claim，`authByToken_` 一律拒絕，不能冒充填寫者打 writeRecord/暫存/邀請 RPC）；`?token=` 直連進入後前端以 `google.script.history.replace` 洗掉網址列參數（原生 history API 在 GAS 沙盒 iframe 改不了上層網址）；`submitInviteSignature`/`revokeInvite` 都在 ScriptLock 內重讀邀請列（競態防線，有測試覆蓋）；`writeRecord` 的簽名來源由 `resolveSignatureSources_` 伺服器端裁決（pending 整筆擋下、signed 用列上 fileID），前端沒有傳 fileID 的通道；簽名圖內嵌一律走 `signatureDataUrl_`（私有函數，fileID 由伺服器端查出，**絕不做成收 fileID 的 RPC**）；名詞統一：64-hex =「邀請碼」、6 位數 =「一次性驗證碼」
   - **邀請碼有效期可設定**：由 ScriptProperties 的 `inviteTtlMinutes`（**分鐘**）決定，管理者自行設定；`inviteTtlMs_()` 讀取、未設或非正整數退回預設 `INVITE_TTL_DEFAULT_MINUTES`（7 天＝10080 分）。實際到期 = `min(發出時間 + inviteTtlMinutes, 問卷截止日)`（`inviteExpireAt_`，邀請不會活過問卷截止）
   - **`_invites` 第 1 列為人類可讀表頭**（`INVITE_HEADER`，凍結）：新表由 `inviteSheet_()` 建立時自帶；此列對所有 reader **惰性**（col A/B/D 是字面字串，永不等於真實邀請碼/referSSID/主鍵值，被既有 key 過濾），故不必改掃描邏輯。**既有舊表（資料從第 1 列開始、無表頭）**用一次性 `initInviteHeader()`（Apps Script 編輯器手動跑、ScriptLock 保護、離峰執行、冪等）補上——`insertRowBefore(1)` 下移資料不刪不覆寫

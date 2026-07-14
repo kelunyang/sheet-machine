@@ -80,6 +80,32 @@
   前端有按鈕、回填時原樣保留（按鈕狀態靠它）；「不提供資料」＝留空的落地形式、
   純伺服器端。
 
+## 三個哨兵各司其職，不要「統一整理」
+
+- **「無資料」**（D 欄位，Phase 15）＝使用者主動宣告，前端有按鈕、**原樣落地**進紀錄、
+  回填時原樣保留（按鈕狀態靠它）。
+- **「不提供資料」**（N 欄位，見上一節）＝可空欄位留空的**落地形式**，純伺服器端，
+  前端完全不認識。
+- **`__SM_REUSE_LAST_FILE__`**（檔案欄「沿用上次」，Phase 23）＝**傳輸層指令、絕不落地**：
+  前端帶入舊檔時 value 設它（前端沒有傳舊 fileID 的通道），後端 writeRecord 遇到它才從該
+  使用者紀錄表最後一列查出真 fileID 替換進 pureData；查無整筆擋下。刻意選機器味字串與前兩個
+  中文哨兵視覺分家。常數單一來源 `src/utils/sentinels.js`（前端）＋ Code.js 同字面常數，
+  兩邊字面一致由測試鎖（fieldSources.test.js 讀 Code.js 原始碼 assert）。
+- 三者語意（使用者宣告／留空落地／傳輸指令）互不相通，看到「好幾個魔法字串好亂」
+  想收斂前先來讀這節。
+
+## 檔案欄的 lastInput 是「上次送出的檔案」，前端不得覆寫
+
+- **踩坑紀錄（2026-07-14，Phase 23 實機回報）**：`applyFileUpload` 原本把這次上傳的 URL 直接寫進
+  `column.lastInput`（為了顯示「你剛剛上傳的檔案」），於是送出前的 diff 拿新檔當舊檔比——
+  「從沒傳過檔的欄位這次傳了」會顯示成前後同一個檔案。
+- **正確語意**：`lastInput` ＝ readRecord 給的「上次送出的檔案」（紀錄表最後一列），是 diff 與
+  「你上次的」來源的基準值，**前端只讀不寫**；這次上傳的連結一律放 `column.uploadUrl`
+  （暫存 queue 的 `url` 欄存的也是它）。`utils/fieldSources.js` 的 `fileUrlOfSource(column, kind)`
+  是唯一該用來取「某來源指向哪個檔案」的地方，不要在元件裡自己接 lastInput。
+- 同理，受邀者檢視填寫者草稿（InviteeSignDialog）也不再疊進 lastInput，改疊成 `draftOrigin`
+  ＋`uploadUrl`（source='draft'）。
+
 ## 第 8 列的 D（可宣告無資料）需要新版後端先部署
 
 - Phase 15（2026-07-11 實作）：`getHeaders` 第 7/8 列改 regex test 並新增

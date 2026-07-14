@@ -2,6 +2,25 @@
 
 ## 待處理
 
+### 24. 每題答案來源切換器（el-segmented）＋左側狀態邊界條＋送出前純文字 diff＋檔案「沿用上次」哨兵＋`_file` 登記表（2026-07-14 設計定案＋實作完成，規格見 plan.md Phase 23）✅
+
+**2026-07-14 實作完成（未部署）**：前端新增 `utils/sentinels.js`（哨兵單一來源）／`fieldSources.js`
+（答案來源選項導出、切換即帶入的 per-format 轉換、markUserInput）／`submitDiff.js`（diff 文字組裝、
+基準取值、零差異判定、檔案對照）；新元件 `FieldValueSwitch`（**el-segmented 四選項：預設值／你上次的／
+暫存／你現在填的——切換就自動帶入該來源的值**；沒值的來源不長選項，「你現在填的」在使用者動手前
+disabled；使用者一動手 `markUserInput()` 存進 `column.userInput`，切走再切回不弄丟）／`DiffText`
+（搬自 scoringSystem-cf 的 RankingComparison，改吃兩段純文字、手機自動切 line-by-line、輸出過
+DOMPurify）／`SubmitDiffDrawer`（基準切換也用 el-segmented；footer 兩鈕各半寬比照填問卷 drawer）。
+FormField 刪兩行唯讀文字與頂部 el-tag，改左側狀態邊界條（細線＋頂端 FA 狀態圖示、文字走 tooltip；兼題目邊界）＋來源切換器，唯讀展示欄
+（C-T/C-F/C-S）改為直接顯示值；App.vue authMod 抽出 `proceedAfterDiff()`、前面插 `hasAnyDiff` 判斷
+（零差異自動跳過）。後端 `_file` 純 append 登記表（saveFile 成功後 appendRow，A ms／B refer／
+C 上傳者 id 假名／D pos／E fileID／F mime）＋`fileLogHasUpload_` 驗歸屬＋哨兵
+`__SM_REUSE_LAST_FILE__` 裁決（`latestRecordRowFor_`／`resolveReuseFileId_`，絕不落地）——
+補掉「前端傳任意 fileID 後端不驗」的缺口。diff／diff2html 走 CDN import map（CSS 走 index.html
+`<link>`，版號兩處同步）。lint 淨、**396 測試綠**、build 174.1KB；無頭 Chromium 驗證 diff 兩種版面
+＋el-segmented 切換帶入行為 ALLPASS。**待實機驗證後部署——先部署後端再換前端**（舊後端會把哨兵當
+fileID 原樣落地）。
+
 ### 23. sticky 控制列手機可收合：按鈕群摺進 handle、JWT 條留著（2026-07-12 設計定案＋實作完成，規格見 plan.md Phase 22）✅
 
 **2026-07-12 實作完成（待實機驗證後部署）**：手機直式時 FormToolbar／SignatureToolbar 的按鈕區太高、

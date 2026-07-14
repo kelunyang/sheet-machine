@@ -9,6 +9,13 @@
       rel="stylesheet"
       href="https://cdn.jsdelivr.net/npm/element-plus@2.14.2/dist/index.css"
     />
+    <!-- diff2html 樣式走 jsDelivr CDN：送出前差異對照（DiffText.vue）用。
+         **版號必須與 vite.config.js 的 CDN_IMPORT_MAP.diff2html 一致**（JS 與 CSS 同版）。
+         元件裡不 import 這支 CSS——singlefile 不處理 CSS import，只有 <link> 會原樣留在 dist。 -->
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/diff2html@3.4.56/bundles/css/diff2html.min.css"
+    />
     <!-- FontAwesome 6（免費 solid+brands）走 cdnjs CDN：全站 UI 圖示來源。
          vite-plugin-singlefile 不 inline 遠端 URL，原樣留在 dist/index.html，於 GAS 沙盒 iframe 執行期載入。 -->
     <link

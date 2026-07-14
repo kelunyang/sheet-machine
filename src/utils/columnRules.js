@@ -2,6 +2,7 @@
 // column 結構來自 Code.js getHeaders()：{ id, name, type, format, content, value, savedContent,
 //   must, nullable, group, uniGroup, status, ... }
 import _ from 'lodash';
+import { REUSE_LAST_FILE } from './sentinels';
 
 // 判斷欄位是否同時符合 format 與 type 的正則（例如 formatDetector('T', 'F', col) = 文字輸入欄位）
 export function formatDetector(formatReg, typeReg, column) {
@@ -57,6 +58,10 @@ export function statusDetector(column) {
     if (column.status !== '') {
       status = 'danger';
       result = '填入內容有誤，請查看題目下方說明';
+    } else if (column.value === REUSE_LAST_FILE) {
+      // Phase 23：檔案欄宣告「沿用上次上傳的檔案」（送出時由伺服器端換成真 fileID）
+      status = 'success';
+      result = '沿用上次的檔案';
     } else {
       if (column.value !== '') {
         if (column.value !== column.savedContent) {

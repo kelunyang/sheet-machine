@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import _ from 'lodash';
+import { filterMultiValue } from './fieldSources';
 
 // 登入後把後端回傳的 headers 整理成可顯示的欄位（App.vue 與 InviteeSignDialog 共用）：
 // group 設定解析、localStorage 暫存 queue 疊回、U 選項過濾、L/X 的 content 陣列化、
@@ -9,6 +10,9 @@ export function prepareColumnsForDisplay(columns, currentAnsQueue) {
   let queue = currentAnsQueue || [];
   for (let i = 0; i < columns.length; i++) {
     let fileDetect = false;
+    // Phase 23：這一欄的值是不是從暫存 queue 疊回來的——是的話在所有格式轉換做完後
+    // （L 欄的 parseInt 之後，確保等值比較成立）標 draftOrigin，草稿 chip 據此導出
+    let restored = false;
     let column = columns[i];
     column.tid = uuidv4();
     if (/F/.test(column.type)) {
@@ -26,6 +30,7 @@ export function prepareColumnsForDisplay(columns, currentAnsQueue) {
         });
         if (columnIndex > -1) {
           column.value = queue[columnIndex].val;
+          restored = true;
         }
       }
       if (/F/.test(column.format)) {
@@ -35,26 +40,16 @@ export function prepareColumnsForDisplay(columns, currentAnsQueue) {
         });
         if (fileColumnIndex > -1) {
           column.value = queue[fileColumnIndex].val;
-          column.lastInput = queue[fileColumnIndex].url;
+          // 這次上傳的連結還原到 uploadUrl；lastInput 是後端給的「上次送出的檔案」，不覆寫
+          column.uploadUrl = queue[fileColumnIndex].url;
           column.status = '';
+          restored = true;
         } else if (column.must) {
           column.status = '請至少選擇一個檔案';
           fileDetect = true;
         }
       } else if (/U/.test(column.format)) {
-        let selectionConfig = column.content.split('::');
-        let selections = _.uniq(selectionConfig[1].split(';'));
-        let selected = _.uniq(column.value.split(';'));
-        let newSelected = [];
-        for (let k = 0; k < selected.length; k++) {
-          let checkSelect = _.filter(selections, (selection) => {
-            return selection === selected[k];
-          });
-          if (checkSelect.length > 0) {
-            newSelected.push(checkSelect[0]);
-          }
-        }
-        column.value = _.join(newSelected, ';');
+        column.value = filterMultiValue(column, column.value);
       } else if (/L/.test(column.format)) {
         let defaultConfig = [1, 10, 100];
         let userConfig = column.content.split(';');
@@ -74,6 +69,13 @@ export function prepareColumnsForDisplay(columns, currentAnsQueue) {
           }
         }
         column.content = defaultConfig;
+      }
+      if (restored) {
+        // 值已完成所有格式轉換（L 的 parseInt、U 的選項過濾），此刻的 value 才是草稿的最終形式。
+        // 同時把「答案來源」設成 draft——登入後 segmented 一進場就停在「暫存」，
+        // 使用者看得出「這格是還原的」，也能切去看預設值/上次送出的
+        column.draftOrigin = { val: column.value, source: 'local' };
+        column.source = 'draft';
       }
     }
     if (!fileDetect) {

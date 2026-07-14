@@ -15,6 +15,7 @@
 | 遠端簽名邀請 email OTP | 4/11 | 邀請碼外流被冒用 | `requestInviteOtp`/`inviteeLogin`（hash 落地、10 分有效、錯 5 次作廢、單次使用） |
 | 受邀者權限分流 | 4 | 受邀者冒充填寫者 | session JWT 帶 invite claim，`authByToken_` 一律拒絕 |
 | 簽名 fileID 伺服器端裁決 | 4 | 任意 Drive 檔案讀取 | `resolveSignatureSources_`/`signatureDataUrl_`（絕不做成收 fileID 的 RPC） |
+| 檔案欄 fileID 歸屬驗證 | 23 | 前端塞任意 fileID 進自己的紀錄（含用回條信把他人檔案 URL 寄給自己） | `_file` 登記表＋`fileLogHasUpload_`；沿用舊檔走哨兵 `__SM_REUSE_LAST_FILE__`＋`resolveReuseFileId_`（前端無傳 fileID 的通道） |
 | 暫存端到端加密＋全面假名化 | 20 | 暫存內容（localStorage＋`_draft`）明文駐留被事後撈取 | `deriveDraftKey_`（HMAC 派生）＋`draftCipher.js`（smd1 密文） |
 | 登入防枚舉 | 21 | 匿名 endpoint 對低熵認證欄位窮舉撞庫 | `checkLoginThrottle_`/`recordLoginAttempt_`/`scanLoginLog()`；`_logins` 存**明文真實帳號**，保護靠暫存表永不分享 |
 | v-html 消毒 | — | Markdown 欄位 XSS | `utils/markdown.js`（marked 輸出必過 DOMPurify） |
@@ -117,6 +118,16 @@
   掃描會錯位。`rebuildDraftSpreadsheet()` 對 `_logins` 是原樣照抄（fail-safe），列號不變、安全。
 - 若真要清理歷史：離峰手動清空分頁後把 `loginScanCursor` 刪掉（回到 1）重新開始。
 
+### `_file` 分頁的鐵律（Phase 23）
+
+- 純 append 的**上傳登記**（時間／referSSID／上傳者 id 假名／**欄位 ID**（不記位置，插欄會位移）／fileID／mimeType），
+  writeRecord 靠它判斷「這個 fileID 真的是這個人在這一欄上傳的」。**絕不手動刪列**——刪掉等於
+  讓對應的舊 fileID 送出時被擋（使用者被迫重傳）。`rebuildDraftSpreadsheet()` 對它原樣照抄。
+- 只有 metadata、無檔案內容；能開 draftSheetID 的人本來就看得到 `_invites` 的明文主鍵與
+  `_logins` 的明文帳號，`_file` 沒有創造新類別的秘密。
+- **`draftSheetID` 未設 → 整段驗證跳過**（無登記表可查，維持舊行為＝缺口仍開）。要這條防線就要設
+  `draftSheetID`（本來就是線上暫存/邀請的前提）。
+
 ## 5. 誠實邊界（防什麼、不防什麼）
 
 - **GAS 拿不到 client IP**，也沒有任何 client 偽造不了的訪客唯一值（指紋/自報 IP 都可偽造，
@@ -128,6 +139,10 @@
   明文下這點放大、已知並接受。
 - 暫存加密**防**明文駐留被事後撈取；**不防**即時 XSS 與 Google 帳號整體淪陷；
   正式送出的 record 明文（管理者要直接看 sheet），保護走試算表分享權限。
+- **檔案欄歸屬驗證（Phase 23）防**「前端塞任意 fileID」——但 fileID 外洩本身等不等於檔案內容
+  外洩，取決於 `universalStorageID` 資料夾的分享設定（程式從不 `setSharing`，繼承資料夾）。
+  資料夾若開了連結分享，fileID 就等於存取權——那是部署層的既有取捨，與 `_file` 無關。
+  `_file` 上線前上傳、又不在紀錄表最後一列的 fileID 會被要求重傳（一次性過渡成本）。
 - timing side-channel 不處理（GAS 延遲噪音大）。
 - **根治枚舉靠認證欄位的熵**：建名冊時多放一欄不易猜的認證值（如自發的隨機碼）、
   或用 Gmail 模式（`format=G`，匿名枚舉直接歸零）。這是管理者的選擇，系統只能拖慢攻擊。

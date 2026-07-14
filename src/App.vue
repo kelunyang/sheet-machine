@@ -352,6 +352,12 @@
     :column="multiDrawer.column"
     @done="applyMultiSelection"
   />
+  <SubmitDiffDrawer
+    v-model:show="diffDrawer.show"
+    :columns="columnDB"
+    @confirm="proceedAfterDiff"
+    @back="reverseBody"
+  />
   <el-drawer
     v-model="confirmDialog.show"
     title="確定要送出了嗎？"
@@ -492,6 +498,7 @@ import JwtCountdownBar from './components/JwtCountdownBar.vue';
 import InviteeSignDialog from './components/InviteeSignDialog.vue';
 import PinCodeInput from './components/PinCodeInput.vue';
 import LoadingGame from './components/LoadingGame.vue';
+import SubmitDiffDrawer from './components/SubmitDiffDrawer.vue';
 import { dateConverter, downloadCSV } from './utils/formatters';
 import { htmlConverter } from './utils/markdown';
 import {
@@ -502,6 +509,8 @@ import {
   validateColumn,
 } from './utils/columnRules';
 import { prepareColumnsForDisplay } from './utils/columnPrep';
+import { markUserInput } from './utils/fieldSources';
+import { hasAnyDiff } from './utils/submitDiff';
 import { buildTempQueue, hasFilledData } from './utils/tempQueue';
 import { loadQueue, saveQueue, removeQueue, migrateLegacyEntry } from './utils/tempStorage';
 import { gasRun, plainClone } from './composables/useGasRpc';
@@ -569,6 +578,8 @@ const loginDialog = reactive({ show: false });
 const columnDialog = reactive({ show: false });
 const signatureDialog = reactive({ show: false });
 const confirmDialog = reactive({ show: false });
+// Phase 23：送出前的差異對照（驗證通過後、簽名/確認之前；零差異不開）
+const diffDrawer = reactive({ show: false });
 const inviteCodeDialog = reactive({ show: false });
 const multiDrawer = reactive({ show: false, column: null });
 const fileDrawer = reactive({ show: false, column: null });
@@ -779,6 +790,7 @@ function multiSelect(dataColumn) {
 function applyMultiSelection(selected) {
   if (multiDrawer.column) {
     multiDrawer.column.value = _.join(selected, ';');
+    markUserInput(multiDrawer.column);
     valField(multiDrawer.column);
   }
 }
@@ -955,6 +967,7 @@ function checkStatus(DB, allowEmpty) {
 function reverseBody() {
   confirmDialog.show = false;
   signatureDialog.show = false;
+  diffDrawer.show = false;
   columnDialog.show = true;
 }
 
@@ -969,34 +982,13 @@ async function authMod() {
     valField(ignoreCDB[i]);
   }
   if (!checkData()) {
-    if (allSignNames.value.length === 0) {
+    // Phase 23：驗證過了先看一眼差異——與上次送出（沒送過就跟系統值）比，有差異才彈 drawer；
+    // 零差異不打擾，直接進原本的簽名／確認流程
+    if (hasAnyDiff(ignoreCDB, 'last')) {
       columnDialog.show = false;
-      confirmDialog.show = true;
+      diffDrawer.show = true;
     } else {
-      enableSignature.value = true;
-      emptySignatures.value = [];
-      // 有啟用線上暫存才有邀請功能：進簽名步驟前先抓各格邀請狀態，
-      // 已邀請的格不建 canvas（rebuildSignatureUI 只放未邀請的格）。
-      // RPC 要在填寫 drawer 還開著時等完（按鈕轉 loading）——先關 drawer 再等，
-      // 使用者會盯著兩個 drawer 都關閉的空白畫面好幾秒
-      if (draftEnabled.value && !viewOnly.value) {
-        submitChecking.value = true;
-        const endLoading = beginLoading('查詢簽名邀請狀態中');
-        try {
-          await refreshInvites();
-        } finally {
-          submitChecking.value = false;
-          endLoading();
-        }
-      }
-      columnDialog.show = false;
-      rebuildSignatureUI(false);
-      signatureDialog.show = true;
-      nextTick(() => {
-        if (signatures.length > 0) {
-          initSignaturePads();
-        }
-      });
+      await proceedAfterDiff();
     }
   } else {
     // ignoreCDB 從 columnDB 過濾而來，順序即畫面順序，第一個 status 非空的就是最上方的錯誤欄位
@@ -1012,6 +1004,41 @@ async function authMod() {
         target.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }
     }
+  }
+}
+
+// 差異確認之後的原有流程（無簽名格 → 確認 drawer；有簽名格 → 先撈邀請狀態再進簽名 drawer）。
+// 從 authMod 抽出來，讓 SubmitDiffDrawer 的「確認繼續」與零差異路徑共用同一條路
+async function proceedAfterDiff() {
+  diffDrawer.show = false;
+  if (allSignNames.value.length === 0) {
+    columnDialog.show = false;
+    confirmDialog.show = true;
+  } else {
+    enableSignature.value = true;
+    emptySignatures.value = [];
+    // 有啟用線上暫存才有邀請功能：進簽名步驟前先抓各格邀請狀態，
+    // 已邀請的格不建 canvas（rebuildSignatureUI 只放未邀請的格）。
+    // RPC 要在填寫 drawer 還開著時等完（按鈕轉 loading）——先關 drawer 再等，
+    // 使用者會盯著兩個 drawer 都關閉的空白畫面好幾秒
+    if (draftEnabled.value && !viewOnly.value) {
+      submitChecking.value = true;
+      const endLoading = beginLoading('查詢簽名邀請狀態中');
+      try {
+        await refreshInvites();
+      } finally {
+        submitChecking.value = false;
+        endLoading();
+      }
+    }
+    columnDialog.show = false;
+    rebuildSignatureUI(false);
+    signatureDialog.show = true;
+    nextTick(() => {
+      if (signatures.length > 0) {
+        initSignaturePads();
+      }
+    });
   }
 }
 
@@ -1169,6 +1196,7 @@ async function queryPC(pColumn) {
           pColumn.value = postCode.zipcode.substring(0, parseInt(pConfig[0]));
         }
         pColumn.status = '';
+        markUserInput(pColumn); // 按鈕查回來的郵遞區號也算「你現在填的」
       } else {
         pColumn.value = '';
         pColumn.status =
@@ -1306,6 +1334,7 @@ function handleTokenExpired() {
   columnDialog.show = false;
   signatureDialog.show = false;
   confirmDialog.show = false;
+  diffDrawer.show = false;
   fileDrawer.show = false;
   loginDialog.show = true;
   loginStatus.value = false;
@@ -1421,8 +1450,11 @@ function applyFileUpload({ columnId, fileID, fileURL }) {
   });
   if (column.length > 0) {
     column[0].value = fileID;
-    column[0].lastInput = fileURL;
+    // 這次上傳的連結放 uploadUrl，**不可蓋掉 lastInput**——lastInput 是「上次送出的檔案」，
+    // 蓋掉它送出前的 diff 就會拿新檔當成舊檔比（前後一模一樣，Phase 23 實機回報的 bug）
+    column[0].uploadUrl = fileURL;
     column[0].status = '';
+    markUserInput(column[0]); // 這次新上傳的檔案＝「你現在填的」
   } else {
     ElMessage('無法對應檔案！');
   }

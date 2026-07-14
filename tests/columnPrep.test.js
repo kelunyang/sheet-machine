@@ -49,19 +49,38 @@ describe('prepareColumnsForDisplay', () => {
     expect(columns[0].value).toBe('之前填的');
   });
 
+  // Phase 23：疊回來的值要標 draftOrigin（＝「暫存」這個來源的內容）與 source='draft'
+  //（登入後 segmented 一進場就停在「暫存」）
+  it('從 queue 疊回的欄位標 draftOrigin=local＋source=draft；沒疊回的不標', () => {
+    const columns = [makeColumn(), makeColumn({ id: 'col2' })];
+    prepareColumnsForDisplay(columns, [{ id: 'col1', val: '之前填的' }]);
+    expect(columns[0].draftOrigin).toEqual({ val: '之前填的', source: 'local' });
+    expect(columns[0].source).toBe('draft');
+    expect(columns[1].draftOrigin).toBe(undefined);
+    expect(columns[1].source).toBe(undefined);
+  });
+
+  it('L 欄的 draftOrigin 記的是 parseInt 之後的值（切回「暫存」才拿得到正確的值）', () => {
+    const columns = [makeColumn({ format: 'L', content: '2;0;10' })];
+    prepareColumnsForDisplay(columns, [{ id: 'col1', val: '6' }]);
+    expect(columns[0].value).toBe(6);
+    expect(columns[0].draftOrigin).toEqual({ val: 6, source: 'local' });
+  });
+
   it('queue 傳 undefined（受邀者 read-only）不會炸、value 不動', () => {
     const columns = [makeColumn({ value: '後端給的' })];
     prepareColumnsForDisplay(columns, undefined);
     expect(columns[0].value).toBe('後端給的');
   });
 
-  it('檔案欄位：queue 有 isFile 項 → 還原 value/lastInput；沒有且必填 → 顯示提示', () => {
+  it('檔案欄位：queue 有 isFile 項 → 還原 value/uploadUrl（不覆寫 lastInput）；沒有且必填 → 顯示提示', () => {
     const restored = [makeColumn({ format: 'F', must: true })];
     prepareColumnsForDisplay(restored, [
       { id: 'col1', val: 'FILE_ID', url: 'https://drive.example/f', isFile: true },
     ]);
     expect(restored[0].value).toBe('FILE_ID');
-    expect(restored[0].lastInput).toBe('https://drive.example/f');
+    expect(restored[0].uploadUrl).toBe('https://drive.example/f');
+    expect(restored[0].lastInput).toBe(undefined); // 上次送出的檔案不被覆寫
     expect(restored[0].status).toBe('');
 
     const empty = [makeColumn({ format: 'F', must: true })];

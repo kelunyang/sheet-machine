@@ -163,7 +163,7 @@ export function useDraft({
       return;
     }
     saveQueue(draftKeys.value, importedQueue);
-    applyQueueToColumns(importedQueue, columnDB.value);
+    applyQueueToColumns(importedQueue, columnDB.value, 'online');
     tempFound.value = true;
     ElMessage.success('已還原 ' + importedQueue.length + ' 個欄位的雲端暫存');
   }

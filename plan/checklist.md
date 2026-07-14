@@ -26,8 +26,10 @@
 
 - `npm run lint`（含 `vue/no-undef-properties`——改過模板一定要跑）。
 - `npm test`。
-- `npm run build`——順帶確認 `dist/index.html` 內仍保留 FA/PapaParse 的外部 `<link>`/`<script>`
-  （singlefile 不 inline 遠端 URL，掉了代表引用被誤刪）。
+- `npm run build`——順帶確認 `dist/index.html` 內仍保留 FA／PapaParse／diff2html CSS 的外部
+  `<link>`/`<script>`（singlefile 不 inline 遠端 URL，掉了代表引用被誤刪），且 import map 內含
+  全部 library（vue…、diff、diff2html）。CDN library 換版時 **JS（vite.config.js 的
+  CDN_IMPORT_MAP）與 CSS（index.html 的 `<link>`）版號必須同步**：element-plus、diff2html 各一組。
 - 部署遵守 memory 的部署原則（測試部署用 `deploy -i` 就地更新，不動其他既有部署）。
 
 ## 4. 後端維運工具（部署後手動掛時間觸發器，程式不自建）

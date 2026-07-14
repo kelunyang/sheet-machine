@@ -190,8 +190,9 @@ async function open(result) {
     return /F|C|G/.test(column.type);
   });
   // 填寫者草稿疊層（Phase 20）：後端解不開 smd1 密文，改回傳密文 blob＋填寫者的
-  // enc 派生鍵，這裡前端解密後疊進唯讀欄位（read-only 顯示走 savedContent/lastInput，
-  // 草稿值要疊進 lastInput 受邀者才看得到）。草稿壞掉/解不開退回已送出的 savedContent
+  // enc 派生鍵，這裡前端解密後疊進唯讀欄位。Phase 23 起疊成「暫存」這個答案來源
+  // （draftOrigin＋source='draft'，切換器唯讀顯示；檔案連結走 uploadUrl，**不覆寫 lastInput**——
+  // 那是上次送出的檔案）。草稿壞掉/解不開退回已送出的 savedContent
   if (result.draftBlob && result.draftEncKey) {
     try {
       const payload =
@@ -203,7 +204,11 @@ async function open(result) {
         const column = _.find(columns, (col) => col.id === item.id);
         if (column !== undefined) {
           column.value = item.val;
-          column.lastInput = item.isFile === true ? item.url : item.val;
+          if (item.isFile === true) {
+            column.uploadUrl = item.url;
+          }
+          column.draftOrigin = { val: item.val, source: 'online' };
+          column.source = 'draft';
         }
       }
     } catch (err) {

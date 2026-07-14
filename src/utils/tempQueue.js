@@ -1,6 +1,8 @@
 // 暫存 queue 的純邏輯：組裝、判斷是否有實際填寫、還原到 columnDB。
 // queue 格式（localStorage／匯出檔／線上暫存共用）：[{ id, val }, ...]，
-// 檔案欄位為 { id, val: fileID, url: fileURL, isFile: true }
+// 檔案欄位為 { id, val: fileID（或「沿用上次」哨兵）, url: 這次上傳的 fileURL, isFile: true }
+// ——url 對應的是 val（這次上傳的檔案），**不是** column.lastInput（那是上次送出的檔案、
+// 由 readRecord 給，前端不得覆寫，否則送出前的 diff 會拿新檔當舊檔比）
 
 // 從 columnDB 組出要暫存的 queue（原 App.vue watch handler 的組裝段）
 export function buildTempQueue(columns) {
@@ -13,7 +15,7 @@ export function buildTempQueue(columns) {
           tempQueue.push({
             id: columns[i].id,
             val: columns[i].value,
-            url: columns[i].lastInput || '',
+            url: columns[i].uploadUrl || '',
             isFile: true,
           });
         }
@@ -62,17 +64,23 @@ export function filterImportableQueue(queue, columns) {
   });
 }
 
-// 把 queue 還原到 columnDB（就地改寫 value；檔案欄位一併還原 Drive 連結），回傳還原筆數
-export function applyQueueToColumns(queue, columns) {
+// 把 queue 還原到 columnDB（就地改寫 value；檔案欄位一併還原 Drive 連結），回傳還原筆數。
+// source（Phase 23）：疊回來源，落成 column.draftOrigin 供草稿 chip 導出（'online' 線上草稿、
+// 'import' 匯入的暫存檔、'local' 本機 localStorage）；不傳＝不標記
+export function applyQueueToColumns(queue, columns, source) {
   let applied = 0;
   for (let i = 0; i < queue.length; i++) {
     let columnIndex = columns.findIndex((col) => col.id === queue[i].id);
     if (columnIndex > -1) {
       columns[columnIndex].value = queue[i].val;
-      // 檔案欄位：同時設定 lastInput (fileURL)
+      // 檔案欄位：還原「這次上傳」的連結（uploadUrl），lastInput 維持 readRecord 給的上次送出值
       if (queue[i].isFile && queue[i].url) {
-        columns[columnIndex].lastInput = queue[i].url;
+        columns[columnIndex].uploadUrl = queue[i].url;
         columns[columnIndex].status = '';
+      }
+      if (source) {
+        columns[columnIndex].draftOrigin = { val: columns[columnIndex].value, source: source };
+        columns[columnIndex].source = 'draft'; // segmented 停在「暫存」
       }
       applied++;
     }

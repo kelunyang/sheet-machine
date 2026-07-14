@@ -235,7 +235,7 @@ function importTemp() {
       }
       // 加密存回 localStorage 並直接更新 columnDB，讓畫面立即反應
       saveQueue(props.draftKeys, importedQueue);
-      applyQueueToColumns(importedQueue, props.columnDb);
+      applyQueueToColumns(importedQueue, props.columnDb, 'import');
       emit('imported');
       // 顯示結果訊息
       let message = `成功匯入 ${importedQueue.length} 個欄位的暫存資料`;
