@@ -106,6 +106,35 @@
 - 同理，受邀者檢視填寫者草稿（InviteeSignDialog）也不再疊進 lastInput，改疊成 `draftOrigin`
   ＋`uploadUrl`（source='draft'）。
 
+## FieldTimeline 桌機拖曳捲軸時小人指標亂飄（2026-07-15 修，第二輪為 log 實證後定案）
+
+- **現象**：桌機用滑鼠拖曳捲軸時，右側 timeline 的像素小人指標會衝到條的最底再彈回中間、
+  高速循環亂飄；手機 1:1 慢拖不明顯。
+- **第一輪（渲染＋偵測層調整）**：回捲改 `root.scrollTo({ behavior: 'smooth' })`（reduced-motion
+  用 `'auto'`）不再瞬移、遲滯加大到 `DOT_GAP*2`（44px）；current 判定改 IntersectionObserver 錨點制
+  （對每個 `#formfield-<tid>` 掛 IO，`rootMargin:'-45% 0px -45% 0px'` 只留中間 10% 中線帶、threshold 0，
+  交會集合挑中心最接近中線者當 current，空窗 fallback 回 `updateCurrent` 全量掃）。**改完桌機仍亂飄**。
+- **實機 console log 實證的最終根因（三件事）**：
+  1. **stale rect 顆粒抖動**：`intersecting` Map 存的是 `entry.boundingClientRect` **快照**，pick 時
+     集合裡各筆是不同時間（有的幾秒前）存下的 rect，混在一起比距離會選錯 current，穩定下捲時
+     currentIndex 也會一次跳 2~5 格再修正。
+  2. **大跳是輸入端真跳、治不了**：長問卷 ~10000px、視窗 ~788px → 捲軸滑塊 ~60px，1px ≈ 13px 內容
+     ≈ 一題；手抖／Windows 捲軸 snap-back 讓捲動位置單幀瞬移數千 px，currentIndex 跳 ±21 是忠實反映。
+  3. **transition 放大成飛行**：`.walker { transition: top 0.2s }` 把每次大跳演成 0.2s 滑過整條軌道的
+     動畫，來回大跳＝小人飛來飛去。
+- **第二輪解法**：
+  - **pick 改 live rect（消顆粒抖動）**：`intersecting` Map 改存 `tid -> 錨點元素`（不存 rect 快照），
+    `pickCurrentFromIntersecting` 當場 `getBoundingClientRect` 量測（集合 3~7 個，成本可忽略）。
+  - **rAF 統一入口（快速捲動每幀更新）**：新增 `schedulePick()`／`runPick()`，IO 回呼與 scroll 都經此
+    節流；`runPick` 依集合是否為空決定走 live pick 或 `updateCurrent` 全量掃（空窗 fallback 保留）。
+  - **小步平滑、大跳 snap（消飛行）**：`watch(currentIndex)` 位移 ≤ 2 個點距維持 `transition:top 0.2s`；
+    超過就加 `.walker--snap`（`transition:none`）直接瞬移，位置落定後 `nextTick`＋`requestAnimationFrame`
+    再移除 class 恢復平滑（watch 為 pre-flush，snap class 與新 walkerTop 同一次 render 套用＝那幀無動畫）。
+    `prefers-reduced-motion`（`transition:none`）行為不動。
+  - **明確否決**：小人「釘中央」方案使用者已否決——小人必須留在軌道上反映真實進度位置。
+- **附帶（fixed 條壓捲軸）**：`@media (pointer: fine)` 桌機把 `right` 加大到 20px 離開全螢幕 drawer
+  右緣 ~15px 的原生捲軸帶（避免抓滑塊誤點圓點觸發 goTo），手機維持 6px 不吃版面。
+
 ## 第 8 列的 D（可宣告無資料）需要新版後端先部署
 
 - Phase 15（2026-07-11 實作）：`getHeaders` 第 7/8 列改 regex test 並新增
