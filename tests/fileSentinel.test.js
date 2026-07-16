@@ -349,7 +349,7 @@ describe('writeRecord：新上傳的 fileID 驗歸屬', () => {
     ctx.fileRows.push(makeFileRow(ctx.gas, 'MINE'));
     const report = submit(ctx.gas, tokenFor(ctx.gas), 'SOMEONE_ELSES_FILE');
     expect(report.status).toBe(false);
-    expect(report.errorLog.join('')).toContain('檔案來源無法確認');
+    expect(report.errorLog.join('')).toContain('你先前上傳的檔案已失效');
     expect(ctx.recordRows.length).toBe(0);
   });
 

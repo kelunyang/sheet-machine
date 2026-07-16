@@ -2,6 +2,47 @@
 
 ## 待處理
 
+### 26. email 紀錄搬進暫存表 `_email` 分頁：emailLog property 退役＋五種信全記（2026-07-17 設計定案，規格見 plan.md Phase 25）✅
+
+**2026-07-17 實作完成（未部署）**：Code.js 新增 `EMAIL_SHEET_NAME`/`EMAIL_HEADER`（8 欄）＋
+`appendEmailLog_`（比照 `appendLoginLog_`：純 append、自建分頁凍結表頭、不上鎖、未設 draftSheetID
+靜默不記**信照寄**；quotaLeft 函數內自取 `MailApp.getRemainingDailyQuota()`）＋統一「寄信＋登記」
+helper `sendLoggedEmail_`（try/catch 包 sendEmail，成功記 `ok`、失敗記錯誤後 rethrow；登記本身失敗
+只 console.error 不擋流程）。五個寄信點（簽名邀請／OTP／登入異常警示／掃描警報／填寫結果回條）全改走
+helper，type 分別 invite/otp/throttleAlert/scanAlert/receipt；scanAlert 一封橫跨多 refer 故 referSSID
+留空並註明。移除兩處 `emailLog` property 引用，README／dataformat.md／CLAUDE.md 同步（property 退役、
+`_email` 分頁說明、明文個資保護邊界同 `_logins`）。測試：inviteRpc.test.js 的 emailLog fake 改指 `_email`
+分頁＋驗 8 欄列 shape。lint／test 全綠（408 tests）。
+
+- 寄信紀錄從獨立 emailLog 試算表搬進 draftSheetID 的 **`_email`** 分頁（比照 `appendLoginLog_`：
+  純 append、自建分頁凍結表頭、不上鎖、未設 draftSheetID 靜默不記**信照寄**）——自動跟著
+  重建/備份打包（原樣複製分支，重建端零改動）。
+- 補記現在漏掉的三種信（OTP／兩種安全警報），五種全記；8 欄新表頭含 type enum、result
+  （寄失敗也留列）、quotaLeft（每日配額耗盡預警數據）；不記 OTP 碼與信件內文（回條 CSV
+  進暫存表＝違反去識別化）。
+- `emailLog` property 退役：程式移除引用、README／dataformat.md 同步；舊表留作歷史檔案。
+
+### 25. `_file` 登記表截止後清理＋登記競態補鎖（2026-07-17 設計定案，規格見 plan.md Phase 24）✅
+
+**2026-07-17 實作完成（未部署）**：Code.js 新增純函數 `compactFileRows_`（跳表頭、referSSID 查無／
+截止日 NaN 保留、`now > 截止日+保留期` 丟）＋ `deadlineMapFromListRows_`（母表 A:O 的 B 欄 refer→D 欄
+截止日）＋ `fileLogRetentionMs_`（`fileLogRetentionDays` 天，預設 7）。`rebuildDraftSpreadsheet_` 加
+`_file` 分派分支（frozen＋壓縮）、forEach 前建一次 `deadlineByRefer`（讀 listSheetID 失敗則空對照＝全保留
+fail-safe，不誤刪）；門檻計數 totalDataRows 補排除 `FILE_HEADER`/`LOGIN_HEADER`/`EMAIL_HEADER` 表頭。
+`appendFileLog_` 補 ScriptLock（waitLock 10 秒＋finally release，比照 saveDraft）。錯誤文案改
+「你先前上傳的檔案已失效，請重新上傳」（哨兵路文案不動）。測試：draftRebuild.test.js 新增
+`compactFileRows_`（保留期邊界、查無、NaN、表頭跳過、混合）＋`deadlineMapFromListRows_`＋`fileLogRetentionMs_`；
+fileSentinel.test.js 錯誤文案斷言同步。README／CLAUDE.md 同步（`fileLogRetentionDays` 一列＋rebuild／Phase 23
+描述補 `_file` 清理）。lint／test 全綠（408 tests）。
+
+- `rebuildDraftSpreadsheet_` 新增 `_file` 分派分支：問卷**截止日＋保留期**過後的登記列整批丟
+  （純函數 `compactFileRows_`，可 vitest）；referSSID 查無／截止日 NaN 一律保留（fail-safe）。
+  清理鍵是「問卷還收不收件」——每欄留最新、TTL 都會誤擋（切換器選回舊檔、長期草稿）。
+- 保留期走 ScriptProperties `fileLogRetentionDays`（天），未設退回預設 7（README 表補一列）。
+- 錯誤文案改「你先前上傳的檔案已失效，請重新上傳」（原「檔案來源無法確認」使用者看不懂該幹嘛）。
+- `appendFileLog_` 補 ScriptLock（waitLock 10 秒）——修掉重建期間登記寫進舊表被丟的競態窗口。
+- 順手修：`draftRebuildMinRows` 門檻計數把 `_file`／`_logins` 表頭列排除。
+
 ### 24. 每題答案來源切換器（el-segmented）＋左側狀態邊界條＋送出前純文字 diff＋檔案「沿用上次」哨兵＋`_file` 登記表（2026-07-14 設計定案＋實作完成，規格見 plan.md Phase 23）✅
 
 **2026-07-14 實作完成（未部署）**：前端新增 `utils/sentinels.js`（哨兵單一來源）／`fieldSources.js`

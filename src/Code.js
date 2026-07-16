@@ -757,6 +757,47 @@ function draftRebuildMinRows_() {
   return (isNaN(n) || n <= 0) ? 0 : n;
 }
 
+// _file 登記列保留期（Phase 24）：問卷截止日過後再留 fileLogRetentionDays 天才在離線重建時清掉，
+// 涵蓋管理者小幅回調截止日的情況。未設或非正整數退回預設 7 天；回傳毫秒（比照 inviteTtlMs_）
+const FILE_LOG_RETENTION_DEFAULT_DAYS = 7;
+function fileLogRetentionMs_() {
+  let n = parseInt((appProperties.getProperty('fileLogRetentionDays') || '').toString().trim(), 10);
+  let days = (isNaN(n) || n <= 0) ? FILE_LOG_RETENTION_DEFAULT_DAYS : n;
+  return days * 86400000;
+}
+
+// 純函數（Phase 24，可 vitest）：把母表 A:O 的列組成 {referSSID: 截止日D欄原值} 對照表——
+// B 欄（index 1）referSSID → D 欄（index 3）截止日。空 referSSID 略過；後列勝出（同一 refer 取最後一筆）。
+// D 欄不在此 parseInt（NaN 保留的 fail-safe 留給 compactFileRows_ 判，讓兩條 fail-safe 都可測）
+function deadlineMapFromListRows_(listRows) {
+  let map = {};
+  for(let i=0; i<listRows.length; i++) {
+    let refer = listRows[i][1] === undefined || listRows[i][1] === null ? '' : listRows[i][1].toString().trim();
+    if(refer === '') { continue; }
+    map[refer] = listRows[i][3];
+  }
+  return map;
+}
+
+// 純函數（Phase 24，比照 compactInviteRows_，可 vitest）：_file 登記列離線清理。
+// 跳過表頭列（首格 === FILE_HEADER[0]）；每列取 B 欄 referSSID 查 deadlineByRefer——
+// 查無 → 保留；截止日 parseInt 得 NaN → 保留（fail-safe：認不得就不動）；
+// nowMs > 截止日 + retentionMs → 丟棄（問卷早已截止、writeRecord 對過期問卷整筆擋下，登記列永不再被查到），
+// 否則原樣保留（快照忠實，不改欄位）。守禁刪列鐵律：只在離線重建時做，不線上刪列
+function compactFileRows_(rows, deadlineByRefer, nowMs, retentionMs) {
+  let out = [];
+  for(let i=0; i<rows.length; i++) {
+    if(i === 0 && rows[0][0].toString() === FILE_HEADER[0]) { continue; } // 跳過表頭列
+    let refer = rows[i][1].toString();
+    if(!(refer in deadlineByRefer)) { out.push(rows[i]); continue; } // referSSID 查無 → 保留
+    let dueMs = parseInt(deadlineByRefer[refer]);
+    if(isNaN(dueMs)) { out.push(rows[i]); continue; } // 截止日 NaN → 保留
+    if(nowMs > dueMs + retentionMs) { continue; } // 已截止且逾保留期 → 丟棄
+    out.push(rows[i]);
+  }
+  return out;
+}
+
 // 手動維運進入點：GAS 編輯器執行函數不顯示 return 值，故在此把結果 console.log 進執行紀錄，
 // 讓管理者手動跑時看得到走了哪條路徑（門檻跳過、未設 folder、重建完成…）。實體邏輯在 _ 版
 function rebuildDraftSpreadsheet() {
@@ -790,7 +831,8 @@ function rebuildDraftSpreadsheet_() {
         let lastRow = sheet.getLastRow();
         if(lastRow === 0) { return; }
         let first = sheet.getRange(1, 1, 1, 1).getValues()[0][0].toString();
-        totalDataRows += lastRow - ((first === DRAFT_HEADER[0] || first === INVITE_HEADER[0]) ? 1 : 0);
+        totalDataRows += lastRow - ((first === DRAFT_HEADER[0] || first === INVITE_HEADER[0] ||
+          first === FILE_HEADER[0] || first === LOGIN_HEADER[0] || first === EMAIL_HEADER[0]) ? 1 : 0);
       });
       if(totalDataRows < minRows) {
         return '未達門檻（資料 ' + totalDataRows + ' 列 < draftRebuildMinRows ' + minRows + '），未重建';
@@ -805,6 +847,20 @@ function rebuildDraftSpreadsheet_() {
     placeholder.setName('__rebuild_' + now);
     let expected = [];
     let summary = [];
+    // Phase 24：_file 清理需要每個 referSSID 的問卷截止日。母表 A:O 只讀一次（B 欄 referSSID → D 欄截止日）；
+    // 讀不到（未設 listSheetID／開啟失敗）就給空對照表 → compactFileRows_ 一律「查無保留」，fail-safe 不誤刪
+    let deadlineByRefer = {};
+    try {
+      let listID = (appProperties.getProperty('listSheetID') || '').toString().trim();
+      if(listID !== '') {
+        let listRows = SpreadsheetApp.openById(listID).getSheets()[0].getRange("A:O").getValues();
+        deadlineByRefer = deadlineMapFromListRows_(listRows);
+      }
+    } catch(err) {
+      console.error('rebuildDraftSpreadsheet_ 讀母表截止日失敗（_file 清理將全數保留）：' + (err.stack || err));
+      deadlineByRefer = {};
+    }
+    let fileRetentionMs = fileLogRetentionMs_();
     sheets.forEach((sheet) => {
       let name = sheet.getName();
       let lastRow = sheet.getLastRow();
@@ -819,6 +875,11 @@ function rebuildDraftSpreadsheet_() {
         frozen = true;
       } else if(name === DRAFT_SHEET_NAME) {
         outRows = [DRAFT_HEADER].concat(compactDraftRows_(values));
+        frozen = true;
+      } else if(name === FILE_SHEET_NAME) {
+        // Phase 24：_file 從「認不得原樣複製」獨立出來——已截止＋逾保留期問卷的登記列在此清掉，
+        // 其餘照抄（快照忠實）。清理鍵是「問卷截止」而非列新舊/時間（見 plan.md Phase 24）
+        outRows = [FILE_HEADER].concat(compactFileRows_(values, deadlineByRefer, now, fileRetentionMs));
         frozen = true;
       } else {
         outRows = values; // 認不得的分頁原樣整份複製（fail-safe，不解讀未知格式）
@@ -983,17 +1044,18 @@ function sendInvite(referSSID, recordSSID, token, signName, email, force) {
     let formTitle = listRow[0].toString().trim();
     let replyEmail = listRow[12].toString().trim();
     let systemTitle = appProperties.getProperty('systemTitle');
-    MailApp.sendEmail(email, replyEmail, systemTitle + "簽名邀請：" + formTitle,
-      "您好：\n" + maskString(claims.pkey) + " 邀請您在表單「" + formTitle + "」中簽署「" + signName + "」欄位。\n\n" +
-      "為了郵件安全，本信不附網址。請向邀請您的填寫者索取表單網站網址，\n" +
-      "開啟網站後選擇「我有簽名邀請碼」，貼上這組邀請碼：\n" + inviteToken + "\n\n" +
-      "貼上邀請碼後，系統會再寄一組 6 位數的一次性驗證碼到這個信箱，\n" +
-      "輸入驗證碼即可檢視問卷並簽名。\n\n" +
-      "本邀請有效期限至：" + (new Date(expireAt)).toLocaleString() + "\n" +
-      "您只能檢視問卷內容並簽署自己的欄位；如對填答內容有異議，請直接聯絡填寫者。\n" +
-      "任何問題，請回信至：" + replyEmail);
-    let emailSS = SpreadsheetApp.openById(appProperties.getProperty('emailLog'));
-    emailSS.getSheets()[0].appendRow([now, formTitle + "（簽名邀請：" + signName + "）", claims.pkey, email]);
+    let inviteSubject = systemTitle + "簽名邀請：" + formTitle;
+    sendLoggedEmail_(
+      { referSSID: referSSID, type: 'invite', subject: inviteSubject, recipient: email, pkey: claims.pkey },
+      [email, replyEmail, inviteSubject,
+        "您好：\n" + maskString(claims.pkey) + " 邀請您在表單「" + formTitle + "」中簽署「" + signName + "」欄位。\n\n" +
+        "為了郵件安全，本信不附網址。請向邀請您的填寫者索取表單網站網址，\n" +
+        "開啟網站後選擇「我有簽名邀請碼」，貼上這組邀請碼：\n" + inviteToken + "\n\n" +
+        "貼上邀請碼後，系統會再寄一組 6 位數的一次性驗證碼到這個信箱，\n" +
+        "輸入驗證碼即可檢視問卷並簽名。\n\n" +
+        "本邀請有效期限至：" + (new Date(expireAt)).toLocaleString() + "\n" +
+        "您只能檢視問卷內容並簽署自己的欄位；如對填答內容有異議，請直接聯絡填寫者。\n" +
+        "任何問題，請回信至：" + replyEmail]);
     return { success: true, invite: { signName: signName, email: email, expireAt: expireAt, status: 'pending' } };
   });
 }
@@ -1130,12 +1192,17 @@ function requestInviteOtp(inviteToken) {
     let formTitle = resolved.listRow[0].toString().trim();
     let replyEmail = resolved.listRow[12].toString().trim();
     let systemTitle = appProperties.getProperty('systemTitle');
-    MailApp.sendEmail(resolved.invite.email, replyEmail, systemTitle + "一次性驗證碼",
-      "您好：您正在使用簽名邀請碼進入表單「" + formTitle + "」。\n\n" +
-      "您的一次性驗證碼（10 分鐘內有效）：\n" + otp + "\n\n" +
-      "請回到網站輸入這組 6 位數驗證碼，即可檢視問卷並簽名。\n" +
-      "若非您本人操作，請忽略本信。\n" +
-      "任何問題，請回信至：" + replyEmail);
+    let otpSubject = systemTitle + "一次性驗證碼";
+    // 不記 OTP 碼本身（enum type 已足供稽核）；pkey 記邀請所屬填寫者主鍵
+    sendLoggedEmail_(
+      { referSSID: resolved.invite.referSSID, type: 'otp', subject: otpSubject,
+        recipient: resolved.invite.email, pkey: resolved.invite.primaryValue },
+      [resolved.invite.email, replyEmail, otpSubject,
+        "您好：您正在使用簽名邀請碼進入表單「" + formTitle + "」。\n\n" +
+        "您的一次性驗證碼（10 分鐘內有效）：\n" + otp + "\n\n" +
+        "請回到網站輸入這組 6 位數驗證碼，即可檢視問卷並簽名。\n" +
+        "若非您本人操作，請忽略本信。\n" +
+        "任何問題，請回信至：" + replyEmail]);
     return { success: true, maskedEmail: maskEmail_(resolved.invite.email) };
   });
 }
@@ -1377,6 +1444,52 @@ function appendLoginLog_(referSSID, loginId, success, nowMs) {
   sheet.appendRow([nowMs, referSSID, loginId, success ? '成功' : '失敗']);
 }
 
+// 寄信稽核（Phase 25）：所有系統寄出的信落地 draftSheetID 試算表的 `_email` 分頁，取代退役的
+// emailLog 獨立試算表 property。純寫入日誌（線上零讀取，同 _logins），故跟著 rebuildDraftSpreadsheet_
+// 打包備份、不做截止清理（永久稽核）。F 欄 pkey 為**明文**個資，保護邊界同 _logins/_invites＝
+// draftSheetID 永不對外分享。不記 OTP 碼/邀請碼/信件內文（回條內文含填寫結果，記了＝違反 Phase 20 去識別化）
+const EMAIL_SHEET_NAME = '_email';
+const EMAIL_HEADER = ['timestamp 寄信時間(ms)', 'referSSID 問卷表ID', 'type 信件類型', 'subject 信件主旨',
+  'recipient 收件信箱', 'pkey 關聯主鍵值(明文)', 'result 結果', 'quotaLeft 寄後剩餘配額'];
+
+// _email 分頁純 append 登記（找不到就建＋凍結表頭，比照 appendLoginLog_）；**不上鎖**（同 _logins 哲學：
+// 重建窗口寫進舊表的列留在備份檔，線上零讀取可接受）；draftSheetID 未設則靜默不記（信照寄）。
+// quotaLeft 在函數內自取 MailApp.getRemainingDailyQuota()（取失敗記空字串），配額耗盡預警的原始數據
+function appendEmailLog_(referSSID, type, subject, recipient, pkey, result, nowMs) {
+  if(!draftEnabled_()) { return; }
+  let quotaLeft;
+  try { quotaLeft = MailApp.getRemainingDailyQuota(); } catch { quotaLeft = ''; }
+  let draftSS = SpreadsheetApp.openById(appProperties.getProperty('draftSheetID'));
+  let sheet = draftSS.getSheetByName(EMAIL_SHEET_NAME);
+  if(sheet === null) {
+    sheet = draftSS.insertSheet(EMAIL_SHEET_NAME);
+    sheet.appendRow(EMAIL_HEADER);
+    sheet.setFrozenRows(1);
+  }
+  sheet.appendRow([nowMs, referSSID, type, subject, recipient, pkey, result, quotaLeft]);
+}
+
+// 「寄信＋登記」統一入口（Phase 25）：try/catch 包 MailApp.sendEmail，成功記 ok 列、失敗記錯誤列後
+// **rethrow**（維持呼叫端原本的錯誤行為——現在 sendEmail 拋錯＝整個 RPC 炸掉）；登記本身失敗只
+// console.error 絕不擋寄信/不擋原流程（比照 appendFileLog_ 呼叫端）。args 為 MailApp.sendEmail 的原參數
+function sendLoggedEmail_(meta, sendArgs) {
+  let nowMs = (new Date()).getTime();
+  let result = 'ok';
+  let sendErr = null;
+  try {
+    MailApp.sendEmail.apply(MailApp, sendArgs);
+  } catch(err) {
+    result = (err && (err.message || err)).toString();
+    sendErr = err;
+  }
+  try {
+    appendEmailLog_(meta.referSSID || '', meta.type, meta.subject, meta.recipient, meta.pkey || '', result, nowMs);
+  } catch(logErr) {
+    console.error('appendEmailLog failed: ' + (logErr.stack || logErr));
+  }
+  if(sendErr !== null) { throw sendErr; } // 維持原本「寄失敗就拋」行為
+}
+
 // 即時警報（per-refer 窗口失敗過閾值）：寄該問卷管理者（名冊 M 欄）。全計數、無明文個資。
 // 信尾附參數說明（帶當前生效值）——收信的管理者才知道門檻怎麼調、大批通知期間怎麼避免誤報
 function sendLoginScanAlert_(referSSID, windowFails, nowMs) {
@@ -1387,25 +1500,29 @@ function sendLoginScanAlert_(referSSID, windowFails, nowMs) {
   let name = row[0].toString().trim();
   let windowMin = Math.round(scanAlertWindowSec_() / 60);
   let cooldownMin = Math.round(loginCooldownMs_() / 60000);
-  MailApp.sendEmail(email, '【問卷系統｜登入異常警示】' + name, [
-    '問卷「' + name + '」在最近 ' + windowMin + ' 分鐘內累計 ' + windowFails +
-      ' 次登入失敗，達到警示門檻（時間 ' + new Date(nowMs).toLocaleString() + '）。',
-    '',
-    '這可能是有人在窮舉猜測登入資訊；但若你剛用簡訊/Email 大批通知填寫者，尖峰期打錯字也可能觸發本信，請自行判讀。',
-    '系統不會自動封鎖任何人——只有「同一帳號連錯 ' + loginFailMax_() + ' 次」會被冷卻 ' +
-      cooldownMin + ' 分鐘，期滿自動解除，不會牽連其他人。',
-    '如判斷是惡意攻擊、要暫停這份問卷，請到問卷列表把「開放進入」欄改成「否」（改後填寫者暫時無法登入，改回「是」即恢復）。',
-    '',
-    '─── 本警示相關參數（腳本的 ScriptProperties，改了即時生效、免重新部署）───',
-    '・scanAlertThreshold＝' + scanAlertThreshold_() + '：窗口內失敗達此次數就寄本信。大批通知前可暫時調高（如 500）避免誤報',
-    '・scanAlertWindowMinutes＝' + windowMin + '：失敗計數的滑動窗口（分鐘）',
-    '・scanAlertCooldownMinutes＝' + Math.round(scanAlertCooldownSec_() / 60) + '：同一問卷本信的重寄間隔（分鐘），避免洗信箱',
-    '・loginFailMax＝' + loginFailMax_() + '／loginCooldownMinutes＝' + cooldownMin +
-      '：單一帳號連錯上限與冷卻分鐘——唯一會實際擋人的機制。大批通知前可把 loginFailMax 調大（如 99999）暫停鎖定',
-    '（參數只吃正整數；填 0 或留空＝退回預設值，不是關閉。）',
-    '',
-    '（本信不含任何填寫者個資，僅為登入失敗次數統計。）'
-  ].join('\n'));
+  let alertSubject = '【問卷系統｜登入異常警示】' + name;
+  // pkey 留空（警報信不對應單一填寫者，僅失敗次數統計）；referSSID 帶所屬問卷
+  sendLoggedEmail_(
+    { referSSID: referSSID, type: 'throttleAlert', subject: alertSubject, recipient: email, pkey: '' },
+    [email, alertSubject, [
+      '問卷「' + name + '」在最近 ' + windowMin + ' 分鐘內累計 ' + windowFails +
+        ' 次登入失敗，達到警示門檻（時間 ' + new Date(nowMs).toLocaleString() + '）。',
+      '',
+      '這可能是有人在窮舉猜測登入資訊；但若你剛用簡訊/Email 大批通知填寫者，尖峰期打錯字也可能觸發本信，請自行判讀。',
+      '系統不會自動封鎖任何人——只有「同一帳號連錯 ' + loginFailMax_() + ' 次」會被冷卻 ' +
+        cooldownMin + ' 分鐘，期滿自動解除，不會牽連其他人。',
+      '如判斷是惡意攻擊、要暫停這份問卷，請到問卷列表把「開放進入」欄改成「否」（改後填寫者暫時無法登入，改回「是」即恢復）。',
+      '',
+      '─── 本警示相關參數（腳本的 ScriptProperties，改了即時生效、免重新部署）───',
+      '・scanAlertThreshold＝' + scanAlertThreshold_() + '：窗口內失敗達此次數就寄本信。大批通知前可暫時調高（如 500）避免誤報',
+      '・scanAlertWindowMinutes＝' + windowMin + '：失敗計數的滑動窗口（分鐘）',
+      '・scanAlertCooldownMinutes＝' + Math.round(scanAlertCooldownSec_() / 60) + '：同一問卷本信的重寄間隔（分鐘），避免洗信箱',
+      '・loginFailMax＝' + loginFailMax_() + '／loginCooldownMinutes＝' + cooldownMin +
+        '：單一帳號連錯上限與冷卻分鐘——唯一會實際擋人的機制。大批通知前可把 loginFailMax 調大（如 99999）暫停鎖定',
+      '（參數只吃正整數；填 0 或留空＝退回預設值，不是關閉。）',
+      '',
+      '（本信不含任何填寫者個資，僅為登入失敗次數統計。）'
+    ].join('\n')]);
 }
 
 // 名冊分頁裡 referSSID 對應的第一列（A:O）；找不到回 null（比照 listRowFor_ 但只認 refer）
@@ -1532,7 +1649,12 @@ function scanLoginLog_() {
     if(recipient === "" || MailApp.getRemainingDailyQuota() <= 0) {
       return '掃描 ' + rows.length + ' 列，發現 ' + flagged.length + ' 個異常但無收件人或配額，未寄信（游標前進至 ' + lastRow + '）';
     }
-    MailApp.sendEmail(recipient, '【問卷系統｜登入日誌掃描異常】', buildScanAlertBody_(flagged, scanConfig));
+    // referSSID 留空：一次掃描的 flagged 可橫跨多份問卷（buildScanAlertBody_ 內文已逐問卷列出），
+    // 單格 referSSID 無法忠實表達，留空優於誤記彙總字串；pkey 同理留空（警報信非對應單一填寫者）
+    let scanSubject = '【問卷系統｜登入日誌掃描異常】';
+    sendLoggedEmail_(
+      { referSSID: '', type: 'scanAlert', subject: scanSubject, recipient: recipient, pkey: '' },
+      [recipient, scanSubject, buildScanAlertBody_(flagged, scanConfig)]);
     return '掃描 ' + rows.length + ' 列，發現 ' + flagged.length + ' 個異常已寄警報給 ' + recipient + '（游標前進至 ' + lastRow + '）';
   } finally {
     lock.releaseLock();
@@ -1891,17 +2013,26 @@ const FILE_HEADER = ['timestamp 上傳時間(ms)', 'referSSID 問卷表ID', 'upl
 const REUSE_LAST_FILE_SENTINEL = '__SM_REUSE_LAST_FILE__';
 
 // _file 分頁純 append 登記（找不到就建，比照 appendLoginLog_）；draftSheetID 未設則靜默不記。
-// 建分頁權只在寫入路徑（saveFile），讀取路徑一律 getSheetByName 自己判 null（比照 draftSheet_ 的教訓）
+// 建分頁權只在寫入路徑（saveFile），讀取路徑一律 getSheetByName 自己判 null（比照 draftSheet_ 的教訓）。
+// Phase 24 補 ScriptLock（比照 saveDraft）：離線重建（rebuildDraftSpreadsheet_）持鎖數十秒，補鎖後
+// 這期間的登記會等鎖釋放寫進**新表**、不再變成寫進舊表的孤兒；waitLock 逾時拋錯由 saveFile_ 既有
+// try/catch 接住 → console.error、上傳照常（維持「登記失敗不擋上傳」）
 function appendFileLog_(referSSID, uploaderPseudo, columnID, fileID, mimeType, nowMs) {
   if(!draftEnabled_()) { return; }
-  let draftSS = SpreadsheetApp.openById(appProperties.getProperty('draftSheetID'));
-  let sheet = draftSS.getSheetByName(FILE_SHEET_NAME);
-  if(sheet === null) {
-    sheet = draftSS.insertSheet(FILE_SHEET_NAME);
-    sheet.appendRow(FILE_HEADER);
-    sheet.setFrozenRows(1);
+  let lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    let draftSS = SpreadsheetApp.openById(appProperties.getProperty('draftSheetID'));
+    let sheet = draftSS.getSheetByName(FILE_SHEET_NAME);
+    if(sheet === null) {
+      sheet = draftSS.insertSheet(FILE_SHEET_NAME);
+      sheet.appendRow(FILE_HEADER);
+      sheet.setFrozenRows(1);
+    }
+    sheet.appendRow([nowMs, referSSID, uploaderPseudo, columnID, fileID, mimeType]);
+  } finally {
+    lock.releaseLock();
   }
-  sheet.appendRow([nowMs, referSSID, uploaderPseudo, columnID, fileID, mimeType]);
 }
 
 // 讀 _file 全部登記列（分頁不存在／未設 draftSheetID 回空陣列——呼叫端據此降級）
@@ -2097,7 +2228,7 @@ function writeRecord_(referSSID, recordSSID, token, record, accept, signatures, 
                         column.value = data.value;
                       } else {
                         proceedWrite = false;
-                        errorReason = "：檔案來源無法確認，請重新上傳";
+                        errorReason = "：你先前上傳的檔案已失效，請重新上傳";
                       }
                     } else {
                       column.value = data.value;
@@ -2377,15 +2508,17 @@ function writeRecord_(referSSID, recordSSID, token, record, accept, signatures, 
             }
             if(/^\w+((-\w+)|(\.\w+))*@[A-Za-z0-9]+((\.|-)[A-Za-z0-9]+)*\.[A-Za-z]+$/.test(email)) {
               if(MailApp.getRemainingDailyQuota() > 0) {
-                let now = new Date();
                 let replyEmail = currentSheet[0][12].toString().trim();
                 let systemTitle = appProperties.getProperty('systemTitle');
-                let emailSSID = appProperties.getProperty('emailLog');
                 let formTitle = currentSheet[0][0].toString().trim();
-                MailApp.sendEmail(email, replyEmail, systemTitle + "填寫結果回條","您好：感謝您填寫表單「" + formTitle + "」，你的填寫時間是" + writeTick.toLocaleString() + "\n以下是你的填寫結果\n" + csvOutput + "\n任何問題，請回信至：" + replyEmail);
-                let emailSS = SpreadsheetApp.openById(emailSSID);
-                let emailSheet = emailSS.getSheets()[0];
-                emailSheet.appendRow([now.getTime(), formTitle, primaryData,email]);
+                let receiptSubject = systemTitle + "填寫結果回條";
+                // 不記回條內文（含填寫結果 CSV，記了＝把答案個資複寫進暫存表，違反 Phase 20 去識別化）；
+                // pkey 記填寫者主鍵，referSSID 帶所屬問卷
+                sendLoggedEmail_(
+                  { referSSID: referSSID, type: 'receipt', subject: receiptSubject, recipient: email, pkey: primaryData },
+                  [email, replyEmail, receiptSubject,
+                    "您好：感謝您填寫表單「" + formTitle + "」，你的填寫時間是" + writeTick.toLocaleString() +
+                    "\n以下是你的填寫結果\n" + csvOutput + "\n任何問題，請回信至：" + replyEmail]);
               }
             }
           }

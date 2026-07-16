@@ -2041,6 +2041,166 @@ plan/issue.md（「三哨兵關係」一節）。
 
 ---
 
+## Phase 24：`_file` 登記表截止後清理＋登記競態補鎖（2026-07-17 設計定案；同日實作完成，未部署——待端對端實機驗證）
+
+### 動機
+
+`_file` 上傳登記表（Phase 23）是純 append、永不壓縮的表，且坐在熱路徑上，三個問題：
+
+1. **送出延遲隨歷史上傳總量線性成長**：`writeRecord` 每遇新上傳的檔案欄就 `fileLogRows_()`
+   `getDataRange().getValues()` **整表讀**（Code.js:2088，惰性快取只在單次 submit 內生效）——
+   使用者按「送出」的當下付這個錢。
+2. **重建對它白做工**：`rebuildDraftSpreadsheet_` 的分頁名分派只認 `_invites`／`_draft`，
+   `_file` 走「認不得原樣複製」分支（Code.js:823-824），每次重建整份讀＋整份 bulk setValues
+   搬運、毫無壓縮效果；表越大重建越慢、ScriptLock 鎖窗越寬。且 `draftRebuildMinRows` 門檻
+   計數把 `_file` 列全算進去（連表頭都被當資料列），`_file` 大了會持續觸發重建。
+3. **登記無鎖競態**：`appendFileLog_`（Code.js:2486-2491 呼叫處）不上 ScriptLock，重建期間
+   （讀表快照 → 翻 `draftSheetID` 之間，bulk setValues＋flush＋sanity check 可達數十秒）
+   的上傳登記會 append 進舊表、不被搬進新表——該使用者送出第一次的新檔會被擋（可自救重傳，
+   但體驗差、原檔成 Drive 孤兒）。Code.js:853「寫入點皆鎖內 open」的註解保證自 Phase 23 起
+   不完全成立。
+
+### 為什麼清理鍵是「問卷截止」而不是列的新舊或時間
+
+- **「每欄留最新一列」不安全**：使用者可能上傳 A 檔後又傳 B 檔，送出時透過答案來源切換器
+  （Phase 23）選回暫存裡的 A——壓掉 A 的登記列，送出就被擋。
+- **「留最近 N 天」不安全**：長期填寫者的草稿裡可能躺著幾天前上傳、還沒送出的 fileID，
+  TTL 一清反而製造誤擋。
+- **「問卷截止後清」安全**：`writeRecord` 對過期問卷本來就整筆擋下（「表單已過時」，
+  Code.js:2444 同款判斷），截止日過了的 referSSID 其登記列永遠不會再被查到。
+  再加 7 天緩衝，涵蓋管理者小幅回調截止日的情況。
+
+### 定案表
+
+| 決策點 | 選擇 |
+|---|---|
+| 清理時機 | **只在 `rebuildDraftSpreadsheet_` 離線重建時做**（守禁刪列鐵律，不線上刪列），`_file` 從「認不得原樣複製」分支獨立出來 |
+| 清理規則 | `now > 該列 referSSID 的問卷截止日 + 保留期` 的列整批丟；其餘照抄 |
+| 保留期 | ScriptProperties **`fileLogRetentionDays`**（天），未設或非正整數退回預設 **7**；reader `fileLogRetentionMs_()` 比照 `inviteTtlMs_`／`draftRebuildMinRows_` 寫法 |
+| fail-safe | referSSID 在母表**查無** → 保留；截止日 parse 出 NaN → 保留；表頭列照舊惰性跳過（沿用「認不得就不動」哲學） |
+| 錯誤文案 | `"：檔案來源無法確認，請重新上傳"`（Code.js:2100）→ **`"：你先前上傳的檔案已失效，請重新上傳"`**（使用者看得懂該幹嘛；避開「暫存」一詞防與線上草稿撞詞）。哨兵路的 `"：找不到你先前上傳的檔案，請重新上傳"` 不動（查紀錄表，與 `_file` 清理無關） |
+| 競態補鎖 | `appendFileLog_` 的 append 包 ScriptLock `waitLock(10000)`（比照 saveDraft）收進同 Phase |
+
+### 實作規格
+
+1. **純函數 `compactFileRows_(rows, deadlineByRefer, nowMs, retentionMs)`**（比照
+   `compactInviteRows_`，不碰 GAS 全域、可 vitest）：
+   - 跳過表頭列（首格 === `FILE_HEADER[0]`，由呼叫端補回）；
+   - 每列取 B 欄 referSSID 查 `deadlineByRefer`：查無 → 保留；`parseInt` 截止日得 NaN → 保留；
+   - `nowMs > 截止日 + retentionMs` → 丟棄，否則原樣保留（快照忠實，不改欄位）。
+2. **重建分派新增分支**（Code.js:817-825）：`name === FILE_SHEET_NAME` 時
+   `outRows = [FILE_HEADER].concat(compactFileRows_(values, deadlineByRefer, now, fileLogRetentionMs_()))`、
+   `frozen = true`。`deadlineByRefer` 在 sheets.forEach 前建一次：讀 listSheetID 母表 A:O，
+   B 欄（index 1）referSSID → D 欄（index 3）截止日 ms。
+3. **`fileLogRetentionMs_()`**：讀 `fileLogRetentionDays`，未設或非正整數退回 7，回傳
+   `天 * 86400000`。
+4. **`appendFileLog_` 補鎖**：append（含建分頁）包 `LockService.getScriptLock()` +
+   `waitLock(10000)`，`finally` release；waitLock 逾時拋錯由 saveFile_ 既有 try/catch 接住 →
+   console.error、上傳照常（維持「登記失敗不擋上傳」）。修完 Code.js:853「寫入點皆鎖內 open」
+   的註解保證重新成立。
+5. **門檻計數順手修**（Code.js:793）：totalDataRows 的表頭判斷補 `FILE_HEADER[0]`
+   （`_logins` 的表頭常數同理一併補——實作時確認常數名）。
+6. **測試**：vitest 新增 `compactFileRows_`——保留期邊界（截止+7 天前後各一）、referSSID
+   查無保留、NaN 截止保留、表頭跳過（比照既有 `compactInviteRows_` 測試的 stub 載入方式）。
+7. **文件同步**：README ScriptProperties 表（草稿 GAS 專案那張，`draftRebuildMinRows` 附近）
+   補 `fileLogRetentionDays` 一列；CLAUDE.md「Sheets 寫入規範」段 rebuild 描述（「其餘分頁
+   原樣複製」多了 `_file` 例外）＋安全提醒 Phase 23 條目補清理規則與新錯誤文案。
+
+### 誠實邊界
+
+- 稽核不遺失：舊表整份改名搬備份資料夾，被清列的完整歷史在備份檔（同 `_invites` 壓縮說詞）。
+- 清理以重建當下讀到的截止日為準：管理者事後**大幅延長**已截止問卷，期間被清掉登記的
+  未送出檔案會被要求重傳（fallback 查紀錄表仍在，曾送出過的檔無感）；+7 天緩衝只涵蓋
+  小幅回調。
+- 補鎖後登記要等鎖，重建期間的上傳登記會等鎖釋放寫進**新表**；waitLock 逾時仍可能漏登記
+  （降級路徑不變：fallback 或要求重傳），只是把窗口從「整段重建」縮到「逾時 10 秒」。
+- 熱路徑仍是整表讀，本 Phase 靠「表不再無限長」控成本，不改讀取結構（游標化留待真的痛再說）。
+
+### 驗收
+
+- `npm run lint`、`npm test` 全綠。
+- 手動跑 `rebuildDraftSpreadsheet()`：`_file` 中已截止＋逾保留期問卷的列消失、
+  未截止／查無 referSSID 的列原樣保留、表頭凍結；重建 summary 列數合理。
+- 送出流程：新上傳照常放行；竄改 fileID 被擋且錯誤訊息為新文案。
+
+---
+
+## Phase 25：email 紀錄搬進暫存表 `_email` 分頁——emailLog property 退役＋五種信全記（2026-07-17 設計定案；同日實作完成，未部署——待端對端實機驗證）
+
+### 動機
+
+寄信紀錄現在走獨立試算表（ScriptProperties `emailLog`），三個問題：
+
+1. **不在打包機制裡**：`rebuildDraftSpreadsheet_` 的備份/重建只涵蓋 draftSheetID 試算表，
+   emailLog 表是編制外孤兒。
+2. **零讀取卻要多養一個 property**：全 Code.js 對 emailLog 只有兩處 appendRow（Code.js:995、
+   2386），零讀取、tools/ 也不碰——純寫入稽核日誌，跟 `_logins` 同性質，理應同一套處理。
+3. **漏記＋欄位太瘦**：五個寄信點只記兩種（簽名邀請信、填寫結果回條），OTP 驗證碼信
+   （Code.js:1133）、登入異常警示信（1390）、掃描警報信（1535）都沒記——README「記錄系統
+   寄出的每封信」的宣稱不成立。且現有 4 欄把用途混在表單名字串裡、無 referSSID、無寄送結果、
+   無配額水位（免費 GAS 每日 100 封，大批邀請前無耗盡預警數據）。
+
+### 定案表
+
+| 決策點 | 選擇 |
+|---|---|
+| 落地位置 | draftSheetID 試算表新分頁 **`_email`**，`appendEmailLog_` 完全比照 `appendLoginLog_`（Code.js:1368-1375）：純 append、找不到分頁自建＋appendRow 表頭＋凍結首列、**不上鎖**（比照 `_logins` 哲學；重建窗口寫進舊表的列留在備份檔，反正線上零讀取） |
+| 降級 | draftSheetID 未設 → **靜默不記，信照寄**（登記不在寄信成敗路徑上）；不 fallback 舊 emailLog 表 |
+| 補記範圍 | **五種信全記**：`invite`／`otp`／`receipt`／`throttleAlert`／`scanAlert` |
+| emailLog property | **退役**：程式碼移除兩處引用，README 表與 plan/dataformat.md 同步；舊試算表留作歷史檔案，不搬移不轉換 |
+| 重建端 | **零改動**——`_email` 非 `_invites`/`_draft`/`_file`，自動落入「認不得原樣複製」分支，跟著打包備份；不做截止清理（永久稽核日誌，同 `_logins`） |
+
+### `EMAIL_HEADER`（8 欄，表頭凍結、對 reader 惰性）
+
+| 欄 | 內容 |
+|---|---|
+| A `timestamp 寄信時間(ms)` | ms timestamp（全系統慣例） |
+| B `referSSID 問卷表ID` | 比照 `LOGIN_HEADER`；警報信也帶所屬 refer（scanAlert 一封涵蓋多 refer 時記彙總字串或留空，實作時擇一並註明） |
+| C `type 信件類型` | enum：`invite`／`otp`／`receipt`／`throttleAlert`／`scanAlert` |
+| D `subject 信件主旨` | 實際主旨（含表單名、簽名欄名等人讀資訊） |
+| E `recipient 收件信箱` | 收件者；警報信＝管理者信箱 |
+| F `pkey 關聯主鍵值(明文)` | 明文，保護邊界同 `_logins`/`_invites`＝draftSheetID 永不分享；OTP 信記邀請所屬填寫者主鍵、警報信留空 |
+| G `result 結果` | `ok` 或錯誤訊息——`sendEmail` 拋錯時先 append 失敗列再維持原本錯誤行為（現在拋錯＝整個 RPC 炸掉零紀錄） |
+| H `quotaLeft 寄後剩餘配額` | 寄後 `MailApp.getRemainingDailyQuota()`——配額耗盡預警的原始數據 |
+
+**不記**：OTP 碼、邀請碼、信件內文（回條內文含填寫結果 CSV，記了＝把答案個資複寫進暫存表，
+違反 Phase 20「能開暫存表也看不到內容」的去識別化方向）。
+
+### 實作規格
+
+1. 常數 `EMAIL_SHEET_NAME = '_email'`、`EMAIL_HEADER`（上表）。
+2. `appendEmailLog_(referSSID, type, subject, recipient, pkey, result, nowMs)`：比照
+   `appendLoginLog_`；quotaLeft 在函數內自取 `MailApp.getRemainingDailyQuota()`（失敗記空字串）。
+3. 統一「寄信＋登記」helper：`sendLoggedEmail_(...)` 之類——內部 try/catch 包 `sendEmail`，
+   成功 append `ok` 列、失敗 append 錯誤列後 **rethrow**（維持呼叫端原本的錯誤行為）；
+   登記本身失敗只 console.error 不擋流程（比照 `appendFileLog_` 呼叫端）。五個寄信點
+   （Code.js:986、1133、1390、1535、2385）全改走 helper；警報信兩點注意別把登記失敗變成
+   警報寄不出去。
+4. 移除兩處 `appProperties.getProperty('emailLog')`（Code.js:995-996、2383-2388 的 append 段）。
+5. **文件同步**：README ScriptProperties 表刪 `emailLog` 列（或標退役＋說明歷史表留存）、
+   補「`_email` 分頁」說明；plan/dataformat.md 的 emailLog 提及同步；CLAUDE.md 安全提醒
+   視需要補一句（`_email` 明文個資，邊界同 `_logins`）。
+6. **測試**：helper 若含可抽純函數（組列邏輯）進 vitest；GAS 全域（MailApp）以 stub 方式
+   比照既有 Code.js 測試。
+
+### 誠實邊界
+
+- `MailApp.sendEmail` 是 void：**message-id、送達/退信狀態、開信紀錄都拿不到**，`result=ok`
+  只代表「GAS 受理」不代表送達。
+- 不上鎖＝重建窗口內寄的信，其紀錄列留在備份檔而非新表（線上零讀取，可接受；同 `_logins`）。
+- draftSheetID 未設的部署完全沒有寄信紀錄（信照寄）——比照 `_logins`/`_file` 的靜默降級，
+  README 寫明。
+- 舊 emailLog 試算表的歷史資料不搬——查舊紀錄回舊表，新舊以部署日切分。
+
+### 驗收
+
+- `npm run lint`、`npm test` 全綠。
+- 實機：填寫送出→回條寄達＋`_email` 出現 `receipt` 列（8 欄齊）；發簽名邀請→`invite` 列；
+  OTP 流程→`otp` 列；draftSheetID 清空→信照寄、無紀錄、無錯誤。
+- 全 codebase `grep emailLog` 只剩文件裡的退役說明。
+
+---
+
 ## 部署原則（每次都適用）
 
 - clasp 用工作帳號登入（`npx clasp show-authorized-user` 先確認）

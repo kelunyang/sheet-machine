@@ -173,7 +173,9 @@ formatDetector('F', 'F', column)  // format=F, type=F
   失效資料**一律保留**，用 timestamp 或狀態欄當場推導有效性（如 `inviteStatusFor_`），需要「作廢」就 append 一筆終態列（tombstone），
   絕不實體刪列。表長期成長是刻意取捨（換取零位移風險與稽核軌跡），量大後做**離線壓縮**（重建整張表，不在線上刪列）——
   已實作為 `rebuildDraftSpreadsheet()`（Phase 18，2026-07-11）：建新暫存試算表（`_draft` 留每 (主鍵, referSSID) 複合鍵
-  最新列、`_invites` 留每格最新快照、其餘分頁按名稱認不得一律原樣複製——不做首格嗅探），舊表改名搬進備份資料夾
+  最新列、`_invites` 留每格最新快照、**`_file` 留「問卷未截止或截止未逾 `fileLogRetentionDays` 天（預設 7）」的登記列**
+  （Phase 24，2026-07-17；`compactFileRows_`，查無 referSSID／截止日無法解析一律保留＝fail-safe，只在重建時清、不線上刪列）、
+  其餘分頁按名稱認不得一律原樣複製——不做首格嗅探），舊表改名搬進備份資料夾
   （ScriptProperties `draftBackupFolderID`，未設不重建），翻
   `draftSheetID` 原子換手；全程 ScriptLock、sanity check 不過不翻 property；`draftRebuildMinRows` 門檻跳過低量重建；
   管理者手動掛時間觸發器（程式不自建 trigger）、建議離峰。規格見 plan/plan.md Phase 18。
@@ -253,8 +255,19 @@ formatDetector('F', 'F', column)  // format=F, type=F
   分頁**（draftSheetID 試算表，純 append、凍結表頭、A ms／B refer／C 上傳者 id 假名／D **欄位 ID**
   （不記 pos——插欄/搬欄會位移）／E fileID／F mime）appendRow 登記；writeRecord 用 `fileLogHasUpload_`
   比對 (refer, 假名, columnID, fileID)，
-  查無時 fallback 比對本人紀錄表最後一列同欄 fileID（涵蓋登記表上線前的舊值），兩者皆無擋下。
-  **draftSheetID 未設＝驗證跳過**（維持舊行為，比照 `_logins` 靜默降級）
+  查無時 fallback 比對本人紀錄表最後一列同欄 fileID（涵蓋登記表上線前的舊值），兩者皆無擋下，
+  錯誤文案 **`：你先前上傳的檔案已失效，請重新上傳`**（哨兵路查無則 `：找不到你先前上傳的檔案，請重新上傳`）。
+  **draftSheetID 未設＝驗證跳過**（維持舊行為，比照 `_logins` 靜默降級）。
+  **Phase 24（2026-07-17）補**：`appendFileLog_` 登記包 ScriptLock（比照 saveDraft，補離線重建期間登記寫進舊表的競態）；
+  `_file` 登記列在離線重建時清理——「問卷截止日 + `fileLogRetentionDays` 天（預設 7）」已過的列整批丟（`compactFileRows_`，
+  查無 referSSID／截止日 NaN 保留），控表長、守禁刪列鐵律（只在重建時清、不線上刪列）
+- **寄信稽核（Phase 25，2026-07-17 實作完成，規格見 plan/plan.md Phase 25）**：系統寄出的五種信
+  （`invite`／`otp`／`receipt`／`throttleAlert`／`scanAlert`）全記進 draftSheetID 試算表的 **`_email` 分頁**
+  （8 欄：ms／referSSID／type／subject／recipient／pkey 明文／result／寄後剩餘配額，`appendEmailLog_` 純 append、
+  不上鎖、draftSheetID 未設則靜默不記、信照寄，比照 `_logins`）。統一走 `sendLoggedEmail_`（try/catch 包 sendEmail，
+  成功記 `ok`、失敗記錯誤後 rethrow；登記本身失敗只 console.error 不擋寄信）。**不記** OTP 碼/邀請碼/信件內文
+  （回條內文含填寫結果，記了＝違反 Phase 20 去識別化）。**`_email` 存明文收件信箱與主鍵**，保護邊界同
+  `_logins`/`_invites`＝draftSheetID 永不對外分享。舊 `emailLog` property 已退役、程式零引用，舊試算表留作歷史檔案
 - **遠端簽名邀請**（`_invites` 分頁存於 draftSheetID 試算表，功能與線上暫存綁定）：邀請碼（token）為 64 字元 hex，doGet 注入走 regex 白名單 + JSON.stringify 雙保險；受邀者登入走 **email OTP 二段驗證**——`requestInviteOtp(token)` 寄 6 位數一次性驗證碼到邀請列登記信箱（RPC 不收 email 參數；列上只存 `SHA-256(otp+邀請碼)` hash、10 分鐘有效、60 秒重寄節流、連錯 5 次作廢、單次使用），`inviteeLogin(token, otp)` 在 ScriptLock 內比對通過才回問卷內容並換 session JWT（帶 invite claim，`authByToken_` 一律拒絕，不能冒充填寫者打 writeRecord/暫存/邀請 RPC）；`?token=` 直連進入後前端以 `google.script.history.replace` 洗掉網址列參數（原生 history API 在 GAS 沙盒 iframe 改不了上層網址）；`submitInviteSignature`/`revokeInvite` 都在 ScriptLock 內重讀邀請列（競態防線，有測試覆蓋）；`writeRecord` 的簽名來源由 `resolveSignatureSources_` 伺服器端裁決（pending 整筆擋下、signed 用列上 fileID），前端沒有傳 fileID 的通道；簽名圖內嵌一律走 `signatureDataUrl_`（私有函數，fileID 由伺服器端查出，**絕不做成收 fileID 的 RPC**）；名詞統一：64-hex =「邀請碼」、6 位數 =「一次性驗證碼」
   - **邀請碼有效期可設定**：由 ScriptProperties 的 `inviteTtlMinutes`（**分鐘**）決定，管理者自行設定；`inviteTtlMs_()` 讀取、未設或非正整數退回預設 `INVITE_TTL_DEFAULT_MINUTES`（7 天＝10080 分）。實際到期 = `min(發出時間 + inviteTtlMinutes, 問卷截止日)`（`inviteExpireAt_`，邀請不會活過問卷截止）
   - **`_invites` 第 1 列為人類可讀表頭**（`INVITE_HEADER`，凍結）：新表由 `inviteSheet_()` 建立時自帶；此列對所有 reader **惰性**（col A/B/D 是字面字串，永不等於真實邀請碼/referSSID/主鍵值，被既有 key 過濾），故不必改掃描邏輯。**既有舊表（資料從第 1 列開始、無表頭）**用一次性 `initInviteHeader()`（Apps Script 編輯器手動跑、ScriptLock 保護、離峰執行、冪等）補上——`insertRowBefore(1)` 下移資料不刪不覆寫

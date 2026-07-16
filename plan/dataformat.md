@@ -12,8 +12,9 @@
 | 對照表單（referSS，名冊） | 問卷列表 B 欄「對照表單ID」 | 定義欄位（前 8 列）＋名冊資料（第 9 列起） |
 | 紀錄表單（recordSS） | 問卷列表 C 欄「新表單ID」 | 填寫結果，`writeRecord` 一次送出 append 一列 |
 
-另有 ScriptProperties：`draftSheetID`（線上暫存＋`_invites` 邀請分頁）、
-`universalStorageID`（上傳檔案／簽名圖的 Drive 資料夾）、`emailLog`、`jwtSecret`、`systemTitle`。
+另有 ScriptProperties：`draftSheetID`（線上暫存＋`_invites` 邀請＋`_logins` 登入稽核＋`_file` 上傳登記
+＋`_email` 寄信稽核等分頁）、`universalStorageID`（上傳檔案／簽名圖的 Drive 資料夾）、`jwtSecret`、`systemTitle`。
+（`emailLog` property 自 Phase 25、2026-07-17 起退役——寄信紀錄改記到 `draftSheetID` 的 `_email` 分頁，舊 property 零引用。）
 暫存與邀請分頁結構見 `struct.md`，不在本文件範圍。
 
 ---

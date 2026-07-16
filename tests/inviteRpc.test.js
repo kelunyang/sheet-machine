@@ -46,10 +46,10 @@ function loadGasRpc({
     listSheetID: 'LIST_SHEET_ID',
     draftSheetID: 'DRAFT_SHEET_ID',
     universalStorageID: 'STORAGE_FOLDER_ID',
-    emailLog: 'EMAIL_LOG_ID',
     systemTitle: '測試系統',
   };
   const sentEmails = [];
+  // Phase 25：寄信紀錄改進 draftSheetID 試算表的 `_email` 分頁（emailLog property 已退役）
   const emailLogRows = [];
   const trashedFiles = [];
   const createdFiles = [];
@@ -108,6 +108,14 @@ function loadGasRpc({
     setFrozenRows: () => {},
   });
   let draftSheetFake = draftRows === null ? null : makeDraftSheet(draftStore);
+  // Phase 25：_email 分頁 fake（appendEmailLog_ 找不到就 insertSheet 再 appendRow 表頭＋資料）
+  const emailSheetFake = {
+    getLastRow: () => emailLogRows.length,
+    getLastColumn: () => 0,
+    getRange: () => ({ getValues: () => [] }),
+    appendRow: (row) => emailLogRows.push([...row]),
+    setFrozenRows: () => {},
+  };
   const emptySheetFake = {
     getLastRow: () => 0,
     getLastColumn: () => 0,
@@ -120,7 +128,13 @@ function loadGasRpc({
       if (id === 'DRAFT_SHEET_ID') {
         return {
           getSheetByName: (name) =>
-            name === '_invites' ? inviteSheetFake : name === '_draft' ? draftSheetFake : null,
+            name === '_invites'
+              ? inviteSheetFake
+              : name === '_draft'
+                ? draftSheetFake
+                : name === '_email'
+                  ? emailSheetFake
+                  : null,
           insertSheet: (name) => {
             if (name === '_invites') {
               return inviteSheetFake;
@@ -129,12 +143,12 @@ function loadGasRpc({
               draftSheetFake = makeDraftSheet(draftStore);
               return draftSheetFake;
             }
+            if (name === '_email') {
+              return emailSheetFake;
+            }
             return emptySheetFake;
           },
         };
-      }
-      if (id === 'EMAIL_LOG_ID') {
-        return { getSheets: () => [{ appendRow: (row) => emailLogRows.push(row) }] };
       }
       if (id === REFER) {
         return { getSheets: () => [{ getDataRange: () => ({ getValues: () => referRows }) }] };
@@ -414,7 +428,15 @@ describe('sendInvite（發=重發=換email 同一支 upsert）', () => {
     // 信裡刻意不放任何網址（GAS 連結會觸發 outlook.com 等的釣魚過濾、整封被無聲丟棄）
     expect(ctx.sentEmails[0].body).not.toContain('?token=');
     expect(ctx.sentEmails[0].body).not.toContain('http');
+    // Phase 25：寄信登記進 _email 分頁（8 欄：ms/referSSID/type/subject/recipient/pkey/result/quotaLeft）
     expect(ctx.emailLogRows.length).toBe(1);
+    const emailRow = ctx.emailLogRows[0];
+    expect(emailRow.length).toBe(8);
+    expect(emailRow[1]).toBe(REFER); // referSSID
+    expect(emailRow[2]).toBe('invite'); // type
+    expect(emailRow[4]).toBe('user@example.com'); // recipient
+    expect(emailRow[5]).toBe('測試生甲'); // pkey（明文填寫者主鍵）
+    expect(emailRow[6]).toBe('ok'); // result
   });
 
   it('重發：append 新 token 快照、舊 token superseded 失效', () => {

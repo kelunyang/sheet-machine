@@ -147,7 +147,8 @@ function makeEnv({ props = {}, oldSheets = [], corruptAfterFlush = false } = {})
     'Session',
     `${source}\n;return {
       compactDraftRows_, compactInviteRows_, draftRebuildMinRows_, rebuildDraftSpreadsheet,
-      DRAFT_HEADER, INVITE_HEADER,
+      compactFileRows_, deadlineMapFromListRows_, fileLogRetentionMs_,
+      DRAFT_HEADER, INVITE_HEADER, FILE_HEADER,
     };`
   );
   const gas = factory(
@@ -172,7 +173,20 @@ function makeEnv({ props = {}, oldSheets = [], corruptAfterFlush = false } = {})
 
 // 純函數用：不需要 fake 環境的輕量載入
 const { gas: pure } = makeEnv();
-const { compactDraftRows_, compactInviteRows_, DRAFT_HEADER, INVITE_HEADER } = pure;
+const {
+  compactDraftRows_,
+  compactInviteRows_,
+  compactFileRows_,
+  deadlineMapFromListRows_,
+  DRAFT_HEADER,
+  INVITE_HEADER,
+  FILE_HEADER,
+} = pure;
+
+// _file 登記列（6 欄，欄序對齊 FILE_HEADER；虛構測試資料）
+function fileRow(referSSID, ms = 1700000000000) {
+  return [ms, referSSID, 'PSEUDO_HMAC', 'col-id-1', 'FILE_ID_' + referSSID, 'image/png'];
+}
 
 // 14 欄邀請列（欄序對齊 inviteRowOf_；虛構測試資料）
 function inviteRow(token, referSSID, primaryValue, signName, status) {
@@ -267,6 +281,114 @@ describe('compactInviteRows_（_invites 壓縮：每格最新列原樣快照）'
   it('表頭列被跳過；空表回空', () => {
     expect(compactInviteRows_([INVITE_HEADER])).toEqual([]);
     expect(compactInviteRows_([])).toEqual([]);
+  });
+});
+
+describe('deadlineMapFromListRows_（母表 A:O → referSSID 截止日對照）', () => {
+  it('B 欄 referSSID → D 欄截止日；空 referSSID 略過；後列勝出', () => {
+    const listRows = [
+      ['問卷甲', 'REF_1', 'REC_1', 1700000000000, /* … */],
+      ['', '', '', ''], // 空列略過
+      ['問卷乙', 'REF_2', 'REC_2', 1800000000000],
+      ['問卷甲改', 'REF_1', 'REC_1', 1750000000000], // 同 refer 後列勝出
+    ];
+    expect(deadlineMapFromListRows_(listRows)).toEqual({
+      REF_1: 1750000000000,
+      REF_2: 1800000000000,
+    });
+  });
+
+  it('空母表 → 空對照表', () => {
+    expect(deadlineMapFromListRows_([])).toEqual({});
+  });
+});
+
+describe('compactFileRows_（_file 截止後清理：只丟已截止＋逾保留期的列）', () => {
+  const RETENTION = 7 * 86400000; // 7 天（fileLogRetentionMs_ 預設）
+  const DUE = 1700000000000; // 某問卷截止日
+
+  it('跳過表頭列（首格 === FILE_HEADER[0]）', () => {
+    const rows = [FILE_HEADER, fileRow('REF_1')];
+    // REF_1 查無 → 資料列保留；表頭永遠不進 out
+    const out = compactFileRows_(rows, {}, DUE, RETENTION);
+    expect(out.length).toBe(1);
+    expect(out[0][1]).toBe('REF_1');
+  });
+
+  it('referSSID 在母表查無 → 保留（fail-safe，認不得不動）', () => {
+    const out = compactFileRows_([FILE_HEADER, fileRow('REF_UNKNOWN')], {}, DUE + RETENTION + 1, RETENTION);
+    expect(out.length).toBe(1);
+  });
+
+  it('截止日 parse 得 NaN → 保留（fail-safe）', () => {
+    const out = compactFileRows_(
+      [FILE_HEADER, fileRow('REF_1')],
+      { REF_1: '非數字' },
+      DUE + RETENTION + 999,
+      RETENTION
+    );
+    expect(out.length).toBe(1);
+  });
+
+  it('保留期邊界：截止+保留期「當下」仍保留、再過 1ms 才丟', () => {
+    // now === 截止 + 保留期：nowMs > dueMs + retentionMs 為 false → 保留
+    const keep = compactFileRows_([FILE_HEADER, fileRow('REF_1')], { REF_1: DUE }, DUE + RETENTION, RETENTION);
+    expect(keep.length).toBe(1);
+    // now === 截止 + 保留期 + 1：> 成立 → 丟棄
+    const drop = compactFileRows_(
+      [FILE_HEADER, fileRow('REF_1')],
+      { REF_1: DUE },
+      DUE + RETENTION + 1,
+      RETENTION
+    );
+    expect(drop.length).toBe(0);
+  });
+
+  it('未截止（now < 截止日）→ 保留；截止日字串型別也吃', () => {
+    const out = compactFileRows_(
+      [FILE_HEADER, fileRow('REF_1')],
+      { REF_1: DUE.toString() },
+      DUE - 1,
+      RETENTION
+    );
+    expect(out.length).toBe(1);
+  });
+
+  it('混合：已逾保留期的丟、未截止的與查無的留，順序保留', () => {
+    const rows = [
+      FILE_HEADER,
+      fileRow('REF_EXPIRED'), // 已截止逾保留期 → 丟
+      fileRow('REF_ACTIVE'), // 未截止 → 留
+      fileRow('REF_UNKNOWN'), // 查無 → 留
+    ];
+    const now = DUE + RETENTION + 100;
+    const out = compactFileRows_(
+      rows,
+      { REF_EXPIRED: DUE, REF_ACTIVE: now + 999999999 },
+      now,
+      RETENTION
+    );
+    expect(out.map((r) => r[1])).toEqual(['REF_ACTIVE', 'REF_UNKNOWN']);
+  });
+
+  it('空陣列與只有表頭都回空', () => {
+    expect(compactFileRows_([], {}, DUE, RETENTION)).toEqual([]);
+    expect(compactFileRows_([FILE_HEADER], {}, DUE, RETENTION)).toEqual([]);
+  });
+});
+
+describe('fileLogRetentionMs_（保留期讀取）', () => {
+  it('未設/非正整數/負數 → 預設 7 天；正整數照讀（回毫秒）', () => {
+    expect(makeEnv().gas.fileLogRetentionMs_()).toBe(7 * 86400000);
+    expect(makeEnv({ props: { fileLogRetentionDays: 'abc' } }).gas.fileLogRetentionMs_()).toBe(
+      7 * 86400000
+    );
+    expect(makeEnv({ props: { fileLogRetentionDays: '-3' } }).gas.fileLogRetentionMs_()).toBe(
+      7 * 86400000
+    );
+    expect(makeEnv({ props: { fileLogRetentionDays: '30' } }).gas.fileLogRetentionMs_()).toBe(
+      30 * 86400000
+    );
   });
 });
 
