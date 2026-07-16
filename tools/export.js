@@ -306,36 +306,37 @@ function exportSheet() {
       }
     }
   }
-  for(let i=0; i<headerCount; i++) {
-    if(i < recordArr.length) {
-      newSheet.appendRow(recordArr[i]);
-    }
+  let headerRows = recordArr.slice(0, Math.min(headerCount, recordArr.length));
+  if(headerRows.length > 0) {
+    newSheet.getRange(1, 1, headerRows.length, headerRows[0].length).setValues(headerRows);
   }
   recordArr.splice(0, headerCount);
   let resultArr = [];
-  let pirmaryKeys = _.uniq(_.map(recordArr, (row) => {
-    return row[2].toString();
-  }));
+  // 依主鍵一次分組（原本對每個主鍵各掃一次全表是 O(K×N)），injectRefer 的查表索引也一次建好
+  let grouped = _.groupBy(recordArr, (row) => { return row[2].toString(); });
+  let pirmaryKeys = _.keys(grouped);
+  let referCtx = buildReferContext_(headers, referArr);
   logger(sheetData[0].toString(), "原始資料有" + recordArr.length + "行，計算唯一值之後可以輸出" + pirmaryKeys.length + "行", listSS);
+  let dupMsgs = [];
   for(let i=0; i<pirmaryKeys.length; i++) {
-    let sameKey = _.filter(recordArr, (row) => {
-      return row[2].toString() === pirmaryKeys[i]
-    });
+    let sameKey = grouped[pirmaryKeys[i]];
     if(sameKey.length > 1) {
-      logger(sheetData[0].toString(), pirmaryKeys[i] + "填了" + sameKey.length + "次，程式會取出他最後一次填寫的結果", listSS);
+      dupMsgs.push(pirmaryKeys[i] + "填了" + sameKey.length + "次");
       let orderedRows = _.orderBy(sameKey, (key) => { return key[0] }, ['desc']);
-      if(orderedRows.length > 0) {
-        if(uniquePrimary) {
-          resultArr.push(injectRefer(pirmaryKeys[i], headers, orderedRows[0], referArr));
-        } else {
-          for(let k=0; k<orderedRows.length; k++) {
-            resultArr.push(injectRefer(pirmaryKeys[i], headers, orderedRows[k], referArr));
-          }
+      if(uniquePrimary) {
+        resultArr.push(injectRefer(pirmaryKeys[i], referCtx, orderedRows[0]));
+      } else {
+        for(let k=0; k<orderedRows.length; k++) {
+          resultArr.push(injectRefer(pirmaryKeys[i], referCtx, orderedRows[k]));
         }
       }
     } else if(sameKey.length === 1) {
-      resultArr.push(injectRefer(pirmaryKeys[i], headers, sameKey[0], referArr));
+      resultArr.push(injectRefer(pirmaryKeys[i], referCtx, sameKey[0]));
     }
+  }
+  if(dupMsgs.length > 0) {
+    // 彙總成一筆 log（原本每個重複主鍵 appendRow 一次，重複的人多時 API 開銷線性成長）
+    logger(sheetData[0].toString(), "有" + dupMsgs.length + "人重複填答，程式取最後一次填寫：" + dupMsgs.join("、"), listSS);
   }
   resultArr = _.orderBy(resultArr, (key) => { return key[0] }, ['asc']);
   if(resultArr.length > 0) {
@@ -374,20 +375,45 @@ function exportSheet() {
   }
 }
 
-function injectRefer(key, headers, row, data) { //應該在這裡，要根據簽名挪移位置，然後尋找檔案ID轉換成url
+// injectRefer 的查表索引，整場匯出建一次（原本每列重掃 headers、每列全掃名冊）：
+// pKeyPos＝主鍵欄位置；referMap＝主鍵值→名冊列（重複主鍵取第一列，與舊行為一致）；
+// headerByPos＝pos→欄位設定
+function buildReferContext_(headers, referArr) {
+  let pKeyHeaders = _.filter(headers, (h) => { return /P/.test(h.type); });
+  let ctx = {
+    headers: headers,
+    pKeyPos: pKeyHeaders.length > 0 ? pKeyHeaders[0].pos : -1,
+    referMap: {},
+    headerByPos: {}
+  };
+  for(let i=0; i<headers.length; i++) {
+    ctx.headerByPos[headers[i].pos] = headers[i];
+  }
+  if(ctx.pKeyPos > -1) {
+    for(let i=0; i<referArr.length; i++) {
+      let key = referArr[i][ctx.pKeyPos].toString();
+      if(!(key in ctx.referMap)) { ctx.referMap[key] = referArr[i]; }
+    }
+  }
+  return ctx;
+}
+
+// Drive 檔案連結用固定格式拼接、不打 DriveApp API（open?id= 會自動轉址到正確的檢視器）。
+// 檔案遺失時輸出的連結點開是 404，但匯出不會中斷（舊版 getFileById 遇壞檔會整場炸掉）
+function driveFileUrl_(fileID) {
+  return "https://drive.google.com/open?id=" + fileID;
+}
+
+function injectRefer(key, ctx, row) { //根據簽名挪移位置，然後把檔案ID轉換成url
   let returnRow = [];
   let dataFrom = 5;
-  let pKey = _.filter(headers, (h) => {
-    return /P/.test(h.type);
-  });
-  if(pKey.length > 0) {
-    let referRow = _.filter(data, (row) => {
-      return row[pKey[0].pos].toString() === key;
-    });
-    if(referRow.length > 0) {
-      for(let i=0; i< headers.length; i++) {
-        if(!/F/.test(headers[i].type)) {
-          row[dataFrom + headers[i].pos] = /L|N|M|P|G/.test(headers[i].format) ? "📝" + referRow[0][headers[i].pos].toString() : referRow[0][headers[i].pos].toString();
+  if(ctx.pKeyPos > -1) {
+    let referRow = ctx.referMap[key];
+    if(referRow !== undefined) {
+      for(let i=0; i<ctx.headers.length; i++) {
+        let h = ctx.headers[i];
+        if(!/F/.test(h.type)) {
+          row[dataFrom + h.pos] = /L|N|M|P|G/.test(h.format) ? "📝" + referRow[h.pos].toString() : referRow[h.pos].toString();
         }
       }
       returnRow.push(row[0]);
@@ -396,25 +422,13 @@ function injectRefer(key, headers, row, data) { //應該在這裡，要根據簽
       returnRow.push(row[4]);
       let signatures = row[3].toString() === "" ? [] : row[3].toString().split(";");
       for(let k=0; k<signatures.length; k++) {
-        let file = DriveApp.getFileById(signatures[k]);
-        returnRow.push(file.getUrl());
+        returnRow.push(driveFileUrl_(signatures[k]));
       }
       for(let k=dataFrom; k<row.length; k++) {
-        let columnConfig = _.filter(headers, (header) => {
-          return header.pos === k - dataFrom;
-        })
-        if(columnConfig.length > 0) {
-          if(/F/.test(columnConfig[0].type)) {
-            if(/F/.test(columnConfig[0].format)) {
-              if(row[k].toString() !== "") {
-                let file = DriveApp.getFileById(row[k].toString());
-                returnRow.push(file.getUrl());
-              } else {
-                returnRow.push("無檔案");
-              }
-            } else {
-              returnRow.push(row[k].toString());
-            }
+        let columnConfig = ctx.headerByPos[k - dataFrom];
+        if(columnConfig !== undefined) {
+          if(/F/.test(columnConfig.type) && /F/.test(columnConfig.format)) {
+            returnRow.push(row[k].toString() !== "" ? driveFileUrl_(row[k].toString()) : "無檔案");
           } else {
             returnRow.push(row[k].toString());
           }
