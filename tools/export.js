@@ -7,10 +7,20 @@
 // 需要的 ScriptProperties：exportStorage（匯出目的資料夾 ID）。舊的 listSheet 屬性已不再使用。
 
 const _ = LodashGS.load();
-const ui = SpreadsheetApp.getUi();
+// 時間觸發器（定時匯出）執行時沒有 UI，getUi() 會直接拋例外——全域常數是在任何函式
+// 執行前就求值的，不包起來的話定時匯出根本進不了函式。選單類功能才會用到 ui，
+// 定時路徑一律不碰（ui 為 null）
+const ui = (function () {
+  try {
+    return SpreadsheetApp.getUi();
+  } catch {
+    return null;
+  }
+})();
 const appProperties = PropertiesService.getScriptProperties();
 const loggerName = "執行紀錄";
 const LIST_SHEET_NAME = "問卷列表";
+const SCHEDULE_SHEET_NAME = "定時匯出";
 
 function onOpen() {
   ui.createMenu("問卷管理")
@@ -21,6 +31,9 @@ function onOpen() {
     .addItem("修改問卷內容（先點選要改的列）", "openReferForEdit")
     .addItem("輸出問卷（先點選要輸出的列）", "exportSheet")
     .addItem("檢查問卷格式（先點選要檢查的列）", "checkSheetFormat")
+    .addSeparator()
+    .addItem("定時匯出排程（新增／修改）", "openScheduleDialog")
+    .addItem("立即試跑定時匯出", "runScheduledExportNow")
     .addToUi();
   // 多帳號登入的已知坑：對話框內按鈕（google.script.run）一律以瀏覽器「預設帳號」
   // 執行，不是開表帳號——預設帳號沒權限就會炸 PERMISSION_DENIED，程式端救不了
@@ -35,7 +48,18 @@ function onOpen() {
 
 function logger(fileName, msg, ssObj) {
   var sheet = ssObj.getSheetByName(loggerName);
-  sheet.appendRow([Utilities.formatDate(new Date(), "GMT+8", "yyyy/MM/dd HH:mm:ss"), Session.getActiveUser().getEmail(), fileName, msg]);
+  // 分頁不存在就退回 console（定時觸發器沒有 UI，不該因為缺紀錄分頁整場炸掉）
+  if (sheet === null) {
+    console.log("[" + fileName + "] " + msg);
+    return;
+  }
+  var who;
+  try {
+    who = Session.getActiveUser().getEmail();
+  } catch {
+    who = "（觸發器）";
+  }
+  sheet.appendRow([Utilities.formatDate(new Date(), "GMT+8", "yyyy/MM/dd HH:mm:ss"), who, fileName, msg]);
 }
 
 // ===== 共用：選取列與 ID 解析 =====
@@ -261,10 +285,27 @@ function exportSheet() {
   if (isNaN(headerCount) || headerCount < 0) { headerCount = 2; }
   let uniqueResp = ui.alert("問卷匯出機器人", "同一人填多次時，只輸出最新一筆嗎？\n（「否」＝每一筆都輸出）", ui.ButtonSet.YES_NO);
   let uniquePrimary = uniqueResp === ui.Button.YES;
+  let result = runExport_(listSS, sheetData, { headerCount: headerCount, uniquePrimary: uniquePrimary });
+  if (!result.ok) {
+    ui.alert("「" + sheetData[0].toString() + "」" + result.message);
+    return;
+  }
+  ui.alert("「" + sheetData[0].toString() + "」輸出完成！\n原始資料有" + result.sourceCount + "行，輸出後為" + result.rowCount + "行！\n有" + result.lengthMismatch + "行長度和其他人對不起來，可能是簽名檔遺失，請自行打開輸出檔案之後檢查\n請記得自己刪掉數字前面的「📝」（為了避免數字前的0被吃掉）\n本次匯出耗時" + result.elapsed + "秒\n輸出的位置是" + result.folderName + "\\" + sheetData[0].toString() + "\\" + result.sheetName);
+}
+
+// 匯出核心：手動（exportSheet）與定時（scheduledExport）共用，完全不碰 ui。
+// options＝{headerCount, uniquePrimary}；回傳 {ok, message, sourceCount, rowCount,
+// lengthMismatch, elapsed, url, sheetName, folderName}
+function runExport_(listSS, sheetData, options) {
+  let headerCount = options.headerCount;
+  let uniquePrimary = options.uniquePrimary;
   let start = (new Date()).getTime();
   let writeSID = "";
-  let destFolder = DriveApp.getFolderById(appProperties.getProperty('exportStorage'));
-  let existCheck = DriveApp.searchFiles('parents in "' + appProperties.getProperty('exportStorage') + '" and title contains "' + sheetData[0].toString() + '"');
+  let exportStorage = appProperties.getProperty('exportStorage');
+  let destFolder = DriveApp.getFolderById(exportStorage);
+  // 精確比對檔名（原本 title contains 會誤中「數學測驗」vs「數學測驗補考」，
+  // 自動排程匯錯檔沒人會當場發現）；輸出檔就是以問卷名稱建立的，精確比對必中
+  let existCheck = DriveApp.searchFiles('parents in "' + exportStorage + '" and title = "' + sheetData[0].toString().replace(/"/g, '\\"') + '"');
   while (existCheck.hasNext()) {
     let file = existCheck.next();
     writeSID = file.getId();
@@ -295,9 +336,21 @@ function exportSheet() {
   let recordRange = recordSheet.getDataRange();
   let recordArr = recordRange.getValues();
   let newSS = writeSID === "" ? SpreadsheetApp.create(sheetData[0].toString()) : SpreadsheetApp.openById(writeSID);
+  if(writeSID === "") {
+    // 建完就搬進匯出資料夾（原本只在「有資料」時才搬，空表會留一份在雲端硬碟根目錄，
+    // 下次匯出因為搜不到而重建，等於每次空跑都掉一個孤兒檔）
+    DriveApp.getFileById(newSS.getId()).moveTo(destFolder);
+  }
   let now = new Date();
   let sheetName = "輸出日期：" + now.toLocaleString();
-  let newSheet = newSS.insertSheet(sheetName);
+  // 同一秒內重複輸出會撞名（insertSheet 重名直接 throw），補流水號
+  let dedup = 2;
+  while(newSS.getSheetByName(sheetName) !== null) {
+    sheetName = "輸出日期：" + now.toLocaleString() + "（" + dedup + "）";
+    dedup++;
+  }
+  // 放在第一個分頁：最新一次輸出永遠在最左邊，不用往右捲找
+  let newSheet = newSS.insertSheet(sheetName, 0);
   if(writeSID === "") {
     let newSheets = newSS.getSheets();
     for(let i=0; i<newSheets.length; i++) {
@@ -364,15 +417,23 @@ function exportSheet() {
     let newRange = newSheet.getRange(headerCount + 1,1,resultArr.length, maxRow);
     newRange.setValues(resultArr);
     SpreadsheetApp.flush();
-    if(writeSID === "") {
-      DriveApp.getFileById(newSS.getId()).moveTo(destFolder);
-    }
     let end = (new Date()).getTime();
     logger(sheetData[0].toString(), "輸出完成！耗時" + (end - start) / 1000 + "秒，總共輸出" + resultArr.length + "行", listSS);
-    ui.alert("「" + sheetData[0].toString() + "」輸出完成！\n原始資料有" + recordArr.length + "行，輸出後為" + resultArr.length + "行！\n有" + lengthnotMatch + "行長度和其他人對不起來，可能是簽名檔遺失，請自行打開輸出檔案之後檢查\n請記得自己刪掉數字前面的「📝」（為了避免數字前的0被吃掉）\n本次匯出耗時" + (end - start) / 1000 + '秒\n輸出的位置是' + destFolder.getName() + "\\" + sheetData[0].toString() + "\\" + "輸出日期：" + now.toLocaleString());
-  } else {
-    ui.alert("「" + sheetData[0].toString() + "」沒有可輸出的資料（扣掉標題列後是空的）");
+    return {
+      ok: true,
+      message: "輸出完成",
+      sourceCount: recordArr.length,
+      rowCount: resultArr.length,
+      lengthMismatch: lengthnotMatch,
+      elapsed: (end - start) / 1000,
+      fileId: newSS.getId(),
+      url: newSS.getUrl(),
+      sheetName: sheetName,
+      folderName: destFolder.getName()
+    };
   }
+  // 空表也把分頁留著（有標題列），代表「這次跑過但沒資料」
+  return { ok: false, message: "沒有可輸出的資料（扣掉標題列後是空的）", sourceCount: 0, rowCount: 0, lengthMismatch: 0, elapsed: ((new Date()).getTime() - start) / 1000, fileId: newSS.getId(), url: newSS.getUrl(), sheetName: sheetName, folderName: destFolder.getName() };
 }
 
 // injectRefer 的查表索引，整場匯出建一次（原本每列重掃 headers、每列全掃名冊）：
@@ -441,6 +502,568 @@ function injectRefer(key, ctx, row) { //根據簽名挪移位置，然後把檔�
     returnRow = row;
   }
   return returnRow;
+}
+
+// ===== 功能 7：定時匯出 =====
+// 「定時匯出」分頁一列一條排程，管理者自行掛時間觸發器跑 scheduledExport()（建議凌晨；
+// 程式不自建 trigger，比照 Code.js 的 rebuildDraftSpreadsheet／scanLoginLog）。
+// 每次觸發逐列判斷「頻率到了嗎」「上次匯出後有沒有新填答」，兩者都成立才真的匯出，
+// 匯完把時間／行數／結果回寫該列並寄通知信。H~K 欄由程式回寫，人不要手動改。
+
+const SCHEDULE_HEADER_ = [
+  "問卷列號", "問卷名稱（比對用）", "匯出頻率（幾天一次）", "匯出截止（日期或毫秒timestamp）",
+  "通知Email（多筆用;分隔）", "標題列數（留空＝2）", "只留最新一筆（是/否）",
+  "上次匯出時間（程式回寫）", "上次輸出行數（程式回寫）", "上次結果（程式回寫）", "排程狀態（程式回寫）"
+];
+const SCHEDULE_DONE_ = "已結束";
+// 停用＝人為喊停（禁刪列規範下不刪列，改用狀態欄；對話框按儲存即可恢復）
+const SCHEDULE_PAUSED_ = "已停用";
+const DAY_MS_ = 24 * 60 * 60 * 1000;
+// 頻率比對的寬限：排程固定凌晨跑，上次若是 03:00:05、今天 03:00:00 差一點點不到整日，
+// 沒有寬限就會被判「還沒到」而整天順延（每天漂移一次，最後排程等於停擺）
+const SCHEDULE_SLACK_MS_ = 60 * 60 * 1000;
+// 一次觸發最多跑這麼久就收工（GAS 單次執行上限 6 分鐘），沒輪到的排程留到下次觸發
+const SCHEDULE_MAX_RUN_MS_ = 4.5 * 60 * 1000;
+
+// 時間值寬鬆解析：設定表是給人填的（Sheets 日期選擇器會存成 Date 物件），
+// 但落地與比較一律換算成 ms timestamp（全系統慣例）
+function toMs_(value) {
+  if (value === null || value === undefined) { return null; }
+  if (value instanceof Date) {
+    let ms = value.getTime();
+    return isNaN(ms) ? null : ms;
+  }
+  if (typeof value === "number") { return isNaN(value) ? null : value; }
+  let text = value.toString().trim();
+  if (text === "") { return null; }
+  if (/^\d+$/.test(text)) { return parseInt(text); }
+  let parsed = (new Date(text)).getTime();
+  return isNaN(parsed) ? null : parsed;
+}
+
+// 紀錄表的填答概況：{count, latestMs}。只讀送出時間欄（A），不整張撈——
+// 判斷「有沒有新填答」不需要全表，真的要匯出時 runExport_ 才會完整讀
+function recordActivity_(recordSSID, headerCount) {
+  let sheet;
+  try {
+    sheet = SpreadsheetApp.openById(recordSSID).getSheets()[0];
+  } catch {
+    return null;
+  }
+  let count = sheet.getLastRow() - headerCount;
+  if (count <= 0) { return { count: 0, latestMs: null }; }
+  let stamps = sheet.getRange(headerCount + 1, 1, count, 1).getValues();
+  let latestMs = null;
+  for (let i = 0; i < stamps.length; i++) {
+    let ms = toMs_(stamps[i][0]);
+    if (ms !== null && (latestMs === null || ms > latestMs)) { latestMs = ms; }
+  }
+  return { count: count, latestMs: latestMs };
+}
+
+function scheduleTime_(ms) {
+  return Utilities.formatDate(new Date(ms), "GMT+8", "yyyy/MM/dd HH:mm");
+}
+
+function parseRecipients_(emailField) {
+  return _.filter(emailField.toString().split(/[;,\s]+/), (mail) => { return mail.trim() !== ""; });
+}
+
+// 通知信裡有檔案連結，收件者沒權限點開只會看到「你需要存取權」——匯完自動補上檢視權。
+// 已經是擁有者／編輯者／檢視者的人跳過（不重複授權、也不降權）。回傳結果描述
+function ensureViewerAccess_(fileID, recipients) {
+  if (recipients.length === 0) { return ""; }
+  let file;
+  try {
+    file = DriveApp.getFileById(fileID);
+  } catch (e) {
+    return "，檢視權確認失敗（" + e.message + "）";
+  }
+  let known = {};
+  try {
+    let existing = file.getViewers().concat(file.getEditors());
+    for (let i = 0; i < existing.length; i++) {
+      known[existing[i].getEmail().toLowerCase()] = true;
+    }
+    let owner = file.getOwner();
+    if (owner !== null) { known[owner.getEmail().toLowerCase()] = true; }
+  } catch (e) {
+    // 共用雲端硬碟等情境讀不到完整權限清單，就直接嘗試授權（addViewer 對已有權限者無副作用）
+    console.log("讀取既有權限失敗，改為直接授權：" + e.message);
+  }
+  let added = [];
+  let failed = [];
+  for (let i = 0; i < recipients.length; i++) {
+    if (known[recipients[i].toLowerCase()] === true) { continue; }
+    try {
+      file.addViewer(recipients[i]);
+      added.push(recipients[i]);
+    } catch (e) {
+      failed.push(recipients[i] + "（" + e.message + "）");
+    }
+  }
+  let note = "";
+  if (added.length > 0) { note += "，已開檢視權給 " + added.length + " 人"; }
+  if (failed.length > 0) { note += "，這些人開權限失敗需手動處理：" + failed.join("、"); }
+  return note;
+}
+
+// 通知信：只給統計與連結，不放任何填答內容（信件不是輸出通路）。回傳寄送結果描述
+function sendScheduleMail_(recipients, formName, result, finalRun, nextMs) {
+  if (recipients.length === 0) { return "（沒填通知Email，未寄信）"; }
+  let subject = "【問卷定時匯出】" + formName + (finalRun ? "（排程結束・最後一次匯出）" : "");
+  let lines = [
+    "問卷：" + formName,
+    "匯出時間：" + scheduleTime_((new Date()).getTime()),
+    ""
+  ];
+  if (result.ok) {
+    lines.push("原始資料 " + result.sourceCount + " 行，輸出 " + result.rowCount + " 行");
+    if (result.lengthMismatch > 0) {
+      lines.push("其中 " + result.lengthMismatch + " 行長度與其他人對不起來（可能是簽名檔遺失），請打開檔案確認");
+    }
+    lines.push("輸出分頁：" + result.sheetName + "（放在最前面）");
+    lines.push("檔案連結：" + result.url);
+    lines.push("");
+    lines.push("提醒：數字欄前面的「📝」是為了避免開頭的 0 被吃掉，使用前請自行去除。");
+  } else {
+    lines.push("這次沒有可輸出的資料：" + result.message);
+  }
+  lines.push("");
+  lines.push(finalRun
+    ? "本次為排程截止前的最後一次匯出，之後不會再自動匯出（要繼續請調整「定時匯出」分頁的截止時間並清掉「排程狀態」欄）。"
+    : "下次預定匯出時間：" + scheduleTime_(nextMs) + "（若期間沒有新填答則自動略過）");
+  try {
+    MailApp.sendEmail(recipients.join(","), subject, lines.join("\n"));
+    return "已通知 " + recipients.length + " 個信箱";
+  } catch (e) {
+    return "通知信寄送失敗：" + e.message;
+  }
+}
+
+// 單條排程的處理。回傳 {status: exported|skip|error, message}
+function runScheduleRow_(listSS, scheduleSheet, row, rowIndex) {
+  // 使用者若把右邊幾欄整個留白，getDataRange 讀回來的列會比表頭短，補齊避免 undefined
+  while (row.length < SCHEDULE_HEADER_.length) { row.push(""); }
+  let listRowIndex = parseInt(row[0]);
+  let registeredName = row[1].toString().trim();
+  // 整列空白＝使用者還沒填，安靜跳過
+  if (isNaN(listRowIndex) && registeredName === "" && row[4].toString().trim() === "") {
+    return { status: "skip", message: "" };
+  }
+  let note = function (text) {
+    scheduleSheet.getRange(rowIndex, 10).setValue(scheduleTime_((new Date()).getTime()) + " " + text);
+  };
+  let listSheet = listSS.getSheetByName(LIST_SHEET_NAME);
+  if (isNaN(listRowIndex) || listRowIndex < 2 || listRowIndex > listSheet.getLastRow()) {
+    note("問卷列號「" + row[0].toString() + "」不是有效的列號，這條排程沒有執行");
+    return { status: "error", message: "列號無效" };
+  }
+  let sheetData = listSheet.getRange(listRowIndex, 1, 1, 16).getValues()[0];
+  let actualName = sheetData[0].toString().trim();
+  if (actualName === "") {
+    note("問卷列表第 " + listRowIndex + " 列沒有表單名稱，這條排程沒有執行");
+    return { status: "error", message: "指到空列" };
+  }
+  // 列號認人的代價：列表一排序／插刪列就會指到別份問卷。用登記的名稱當防呆，
+  // 對不上寧可停手也不要自動匯錯卷（名稱空白＝第一次跑，順手補登記）
+  if (registeredName === "") {
+    scheduleSheet.getRange(rowIndex, 2).setValue(actualName);
+  } else if (registeredName !== actualName) {
+    note("問卷列表第 " + listRowIndex + " 列現在是「" + actualName + "」，與登記的「" + registeredName + "」對不上（列表可能被排序或插刪列），這條排程已停手，請修正列號後再清掉本欄");
+    return { status: "error", message: "列號與登記名稱對不上" };
+  }
+  let nowMs = (new Date()).getTime();
+  let status = row[10].toString().trim();
+  if (status === SCHEDULE_PAUSED_) { return { status: "skip", message: "已停用" }; }
+  let finished = status === SCHEDULE_DONE_;
+  let deadlineMs = toMs_(row[3]);
+  let finalRun = false;
+  if (deadlineMs !== null && nowMs >= deadlineMs) {
+    if (finished) { return { status: "skip", message: "排程已結束" }; }
+    // 截止後補做最後一次收尾匯出：不看頻率、也不看有沒有新填答
+    finalRun = true;
+  } else if (finished) {
+    // 截止時間被往後改了就自動復活
+    scheduleSheet.getRange(rowIndex, 11).setValue("");
+  }
+  let everyDays = parseInt(row[2]);
+  if (isNaN(everyDays) || everyDays < 1) { everyDays = 1; }
+  let lastMs = toMs_(row[7]);
+  if (!finalRun && lastMs !== null && nowMs - lastMs < everyDays * DAY_MS_ - SCHEDULE_SLACK_MS_) {
+    return { status: "skip", message: "還沒到下次匯出時間" };
+  }
+  let headerCount = parseInt(row[5]);
+  if (isNaN(headerCount) || headerCount < 0) { headerCount = 2; }
+  let uniquePrimary = row[6].toString().trim() !== "否";
+  let activity = recordActivity_(sheetData[2].toString().trim(), headerCount);
+  if (activity === null) {
+    note("打不開這份問卷的填入表（C 欄的新表單ID），這條排程沒有執行");
+    return { status: "error", message: "填入表打不開" };
+  }
+  let lastCount = parseInt(row[8]);
+  let hasNew = lastMs === null
+    || activity.count > (isNaN(lastCount) ? -1 : lastCount)
+    || (activity.latestMs !== null && activity.latestMs > lastMs);
+  if (activity.count === 0) {
+    if (!finalRun) { return { status: "skip", message: "還沒有任何填答" }; }
+  } else if (!finalRun && !hasNew) {
+    return { status: "skip", message: "上次匯出後沒有新填答" };
+  }
+  let result;
+  try {
+    result = runExport_(listSS, sheetData, { headerCount: headerCount, uniquePrimary: uniquePrimary });
+  } catch (e) {
+    note("匯出失敗：" + e.message);
+    logger(actualName, "定時匯出失敗：" + e.message, listSS);
+    return { status: "error", message: e.message };
+  }
+  let recipients = parseRecipients_(row[4]);
+  // 先補權限再寄信：信到的時候連結就點得開
+  let accessNote = ensureViewerAccess_(result.fileId, recipients);
+  let mailNote = sendScheduleMail_(recipients, actualName, result, finalRun, nowMs + everyDays * DAY_MS_);
+  let summary = scheduleTime_(nowMs) + " " +
+    (result.ok ? "輸出 " + result.rowCount + " 行（原始 " + result.sourceCount + " 行）" : result.message) +
+    accessNote + "，" + mailNote;
+  // H~K 一次寫回：上次匯出時間（ms）／上次輸出行數／結果描述／排程狀態
+  scheduleSheet.getRange(rowIndex, 8, 1, 4).setValues([[
+    nowMs,
+    activity.count,
+    summary,
+    finalRun ? SCHEDULE_DONE_ : ""
+  ]]);
+  logger(actualName, "定時匯出：" + summary, listSS);
+  return { status: result.ok ? "exported" : "skip", message: summary };
+}
+
+// 觸發器入口：管理者在 Apps Script 編輯器手動掛「時間驅動」觸發器指向這支
+function scheduledExport() {
+  let listSS = SpreadsheetApp.getActiveSpreadsheet();
+  let scheduleSheet = listSS.getSheetByName(SCHEDULE_SHEET_NAME);
+  if (scheduleSheet === null) {
+    console.log("沒有「" + SCHEDULE_SHEET_NAME + "」設定分頁，定時匯出略過");
+    return { done: 0, skipped: 0, failed: 0, pending: 0, message: "沒有設定分頁" };
+  }
+  let lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) {
+    console.log("上一輪定時匯出還在跑，本次略過");
+    return { done: 0, skipped: 0, failed: 0, pending: 0, message: "前一輪還在跑" };
+  }
+  try {
+    let startMs = (new Date()).getTime();
+    let rows = scheduleSheet.getDataRange().getValues();
+    let done = 0;
+    let skipped = 0;
+    let failed = 0;
+    let pending = 0;
+    for (let i = 1; i < rows.length; i++) {
+      if ((new Date()).getTime() - startMs > SCHEDULE_MAX_RUN_MS_) {
+        pending = rows.length - i;
+        break;
+      }
+      let outcome;
+      try {
+        outcome = runScheduleRow_(listSS, scheduleSheet, rows[i], i + 1);
+      } catch (e) {
+        // 單列炸掉不能拖垮整輪
+        outcome = { status: "error", message: e.message };
+        logger("定時匯出", "第 " + (i + 1) + " 列處理失敗：" + e.message, listSS);
+      }
+      if (outcome.status === "exported") { done++; }
+      else if (outcome.status === "error") { failed++; }
+      else { skipped++; }
+    }
+    let summary = "本輪結束：匯出 " + done + " 條、略過 " + skipped + " 條、失敗 " + failed + " 條" +
+      (pending > 0 ? "、時間不夠順延 " + pending + " 條到下次觸發" : "");
+    logger("定時匯出", summary, listSS);
+    return { done: done, skipped: skipped, failed: failed, pending: pending, message: summary };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// 設定分頁存取：不存在就建好表頭（人不必自己開分頁、不必知道欄位順序）
+function ensureScheduleSheet_(listSS) {
+  let sheet = listSS.getSheetByName(SCHEDULE_SHEET_NAME);
+  if (sheet !== null) { return sheet; }
+  sheet = listSS.insertSheet(SCHEDULE_SHEET_NAME);
+  sheet.appendRow(SCHEDULE_HEADER_);
+  sheet.getRange(1, 1, 1, SCHEDULE_HEADER_.length).setFontWeight("bold");
+  sheet.setFrozenRows(1);
+  sheet.setColumnWidths(1, SCHEDULE_HEADER_.length, 150);
+  return sheet;
+}
+
+// 選單：開排程對話框（問卷用下拉選、時間用日曆選——列號與 timestamp 都不必手打）
+function openScheduleDialog() {
+  let html = HtmlService.createHtmlOutput(scheduleDialogHtml_(scheduleDialogData())).setWidth(560).setHeight(720);
+  ui.showModalDialog(html, "定時匯出排程");
+}
+
+// 對話框資料：問卷清單（含預設帶入值）＋既有排程（以問卷列號為索引）
+function scheduleDialogData() {
+  let listSS = SpreadsheetApp.getActiveSpreadsheet();
+  let listSheet = listSS.getSheetByName(LIST_SHEET_NAME);
+  let listArr = listSheet.getDataRange().getValues();
+  let questionnaires = [];
+  for (let i = 1; i < listArr.length; i++) {
+    let name = listArr[i][0].toString().trim();
+    if (name === "") { continue; }
+    questionnaires.push({
+      listRow: i + 1,
+      name: name,
+      // 新排程的預設值：截止帶問卷的檢視截止（問卷都看不到了就不用再匯）、
+      // 通知信箱帶列上的管理員Email
+      defaultDeadlineMs: toMs_(listArr[i][4]),
+      defaultEmail: listArr[i][12].toString().trim()
+    });
+  }
+  let schedules = {};
+  let scheduleSheet = listSS.getSheetByName(SCHEDULE_SHEET_NAME);
+  if (scheduleSheet !== null) {
+    let rows = scheduleSheet.getDataRange().getValues();
+    for (let i = 1; i < rows.length; i++) {
+      let listRow = parseInt(rows[i][0]);
+      if (isNaN(listRow)) { continue; }
+      schedules[listRow] = {
+        scheduleRow: i + 1,
+        registeredName: rows[i][1].toString().trim(),
+        everyDays: parseInt(rows[i][2]),
+        deadlineMs: toMs_(rows[i][3]),
+        emails: rows[i][4].toString().trim(),
+        headerCount: rows[i][5].toString().trim(),
+        unique: rows[i][6].toString().trim() === "否" ? "否" : "是",
+        lastExportMs: toMs_(rows[i][7]),
+        lastResult: rows[i][9].toString().trim(),
+        status: rows[i][10].toString().trim()
+      };
+    }
+  }
+  return { questionnaires: questionnaires, schedules: schedules };
+}
+
+// 對話框存檔回呼。同一份問卷只會有一列排程（既有就更新，沒有才新增）
+function saveScheduleRow(payload) {
+  let listSS = SpreadsheetApp.getActiveSpreadsheet();
+  let listSheet = listSS.getSheetByName(LIST_SHEET_NAME);
+  let listRow = parseInt(payload.listRow);
+  if (isNaN(listRow) || listRow < 2 || listRow > listSheet.getLastRow()) {
+    return { ok: false, message: "請先選擇要排程的問卷" };
+  }
+  let name = listSheet.getRange(listRow, 1).getValue().toString().trim();
+  if (name === "") {
+    return { ok: false, message: "問卷列表第 " + listRow + " 列沒有表單名稱，請重新選擇" };
+  }
+  let everyDays = parseInt(payload.everyDays);
+  if (isNaN(everyDays) || everyDays < 1) {
+    return { ok: false, message: "匯出頻率要填 1 以上的整數（1＝每天）" };
+  }
+  let headerCount = parseInt(payload.headerCount);
+  if (payload.headerCount.toString().trim() === "") { headerCount = 2; }
+  if (isNaN(headerCount) || headerCount < 0) {
+    return { ok: false, message: "標題列數要填 0 以上的整數（留空＝2）" };
+  }
+  let deadlineMs = toMs_(payload.deadlineMs);
+  let emails = _.filter(payload.emails.toString().split(/[;,\s]+/), (mail) => { return mail.trim() !== ""; });
+  for (let i = 0; i < emails.length; i++) {
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(emails[i])) {
+      return { ok: false, message: "通知Email「" + emails[i] + "」看起來不是有效的信箱" };
+    }
+  }
+  let unique = payload.unique.toString().trim() === "否" ? "否" : "是";
+  let scheduleSheet = ensureScheduleSheet_(listSS);
+  let rows = scheduleSheet.getDataRange().getValues();
+  let targetRow = 0;
+  for (let i = 1; i < rows.length; i++) {
+    if (parseInt(rows[i][0]) === listRow) { targetRow = i + 1; break; }
+  }
+  // B 欄（比對用名稱）每次存檔都同步成當下名稱：改過問卷名稱後排程不會因為對不上而停手
+  let values = [listRow, name, everyDays, deadlineMs === null ? "" : deadlineMs, emails.join(";"), headerCount, unique];
+  if (targetRow === 0) {
+    scheduleSheet.appendRow(values.concat(["", "", "", ""]));
+    targetRow = scheduleSheet.getLastRow();
+  } else {
+    scheduleSheet.getRange(targetRow, 1, 1, values.length).setValues([values]);
+    // 存檔＝啟用：把「已停用」「已結束」清掉，讓調整過截止時間的排程重新開始跑
+    scheduleSheet.getRange(targetRow, 11).setValue("");
+  }
+  logger(name, "定時匯出排程存檔（設定表第 " + targetRow + " 列，每 " + everyDays + " 天）", listSS);
+  return { ok: true, message: "已儲存「" + name + "」的排程（設定表第 " + targetRow + " 列）" };
+}
+
+// 停用排程：照禁刪列規範不刪列，只把狀態欄寫成「已停用」（之後存檔即可恢復）
+function pauseScheduleRow(listRow) {
+  let listSS = SpreadsheetApp.getActiveSpreadsheet();
+  let scheduleSheet = listSS.getSheetByName(SCHEDULE_SHEET_NAME);
+  if (scheduleSheet === null) { return { ok: false, message: "還沒有任何排程" }; }
+  let rows = scheduleSheet.getDataRange().getValues();
+  for (let i = 1; i < rows.length; i++) {
+    if (parseInt(rows[i][0]) === parseInt(listRow)) {
+      scheduleSheet.getRange(i + 1, 11).setValue(SCHEDULE_PAUSED_);
+      logger(rows[i][1].toString(), "定時匯出排程已停用（設定表第 " + (i + 1) + " 列）", listSS);
+      return { ok: true, message: "已停用這條排程（資料列保留，之後按儲存即可恢復）" };
+    }
+  }
+  return { ok: false, message: "找不到這份問卷的排程" };
+}
+
+// 排程對話框 HTML：資料以 JSON 注入（跳脫 < 防 </script> 逃逸），比照設定對話框
+function scheduleDialogHtml_(data) {
+  let json = JSON.stringify(data).replace(/</g, "\\u003c");
+  return '<!DOCTYPE html><html><head><base target="_top"><style>' +
+    'body{font-family:Arial,"Microsoft JhengHei",sans-serif;font-size:13px;margin:12px;color:#333}' +
+    'label{display:block;margin-top:10px;font-weight:bold}' +
+    'input[type=text],input[type=number],input[type=datetime-local],select{width:100%;box-sizing:border-box;padding:5px;margin-top:3px;border:1px solid #bbb;border-radius:3px;font-size:13px}' +
+    '.hint{font-weight:normal;color:#888;font-size:12px}' +
+    '.row2{display:flex;gap:8px}.row2>div{flex:1}' +
+    '#state{margin-top:12px;padding:8px;border-radius:4px;background:#f1f3f4;white-space:pre-wrap;font-size:12px}' +
+    '#saveBtn{margin-top:14px;width:100%;padding:9px;background:#1a73e8;color:#fff;border:none;border-radius:4px;font-size:14px;cursor:pointer}' +
+    '#pauseBtn{margin-top:8px;width:100%;padding:7px;background:#fff;color:#c5221f;border:1px solid #c5221f;border-radius:4px;font-size:13px;cursor:pointer;display:none}' +
+    'button:disabled{opacity:.5}' +
+    '#msg{margin-top:8px;white-space:pre-wrap}.err{color:#c5221f}.ok{color:#188038}' +
+    '#tip{margin-top:14px;padding:8px;border-radius:4px;background:#e8f0fe;color:#174ea6;font-size:12px;white-space:pre-wrap}' +
+    // 可搜尋下拉：問卷一多，原生 select 只能一路捲
+    '.combo{position:relative}' +
+    '.combo-list{position:absolute;z-index:10;left:0;right:0;max-height:230px;overflow-y:auto;background:#fff;' +
+    'border:1px solid #bbb;border-radius:3px;box-shadow:0 2px 8px rgba(0,0,0,.25);display:none}' +
+    '.combo-list div{padding:6px 8px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+    '.combo-list div.active{background:#e8f0fe}' +
+    '.combo-list div.empty{color:#888;cursor:default}' +
+    '</style></head><body>' +
+    '<label>要定時匯出的問卷 <span class="hint">（輸入名稱或列號即時篩選，↑↓ 選擇、Enter 確定）</span>' +
+    '<div class="combo"><input type="text" id="pickText" autocomplete="off" placeholder="點這裡搜尋問卷…">' +
+    '<div class="combo-list" id="pickList"></div></div></label>' +
+    '<div class="row2">' +
+    '<div><label>匯出頻率 <span class="hint">（每幾天一次，1＝每天）</span><input type="number" id="everyDays" min="1"></label></div>' +
+    '<div><label>標題列數 <span class="hint">（留空＝2）</span><input type="number" id="headerCount" min="0"></label></div>' +
+    '</div>' +
+    '<label>匯出截止 <span class="hint">（到期會再補做最後一次匯出然後停止；留空＝不設限）</span><input type="datetime-local" id="deadline"></label>' +
+    '<label>同一人填多次時 <select id="unique"><option value="是">只輸出最新一筆</option><option value="否">每一筆都輸出</option></select></label>' +
+    '<label>通知Email <span class="hint">（多筆用分號分隔，留空＝不寄信）</span><input type="text" id="emails"></label>' +
+    '<div id="state"></div>' +
+    '<button id="saveBtn">儲存排程</button>' +
+    '<button id="pauseBtn">停用這條排程</button>' +
+    '<div id="msg"></div>' +
+    '<div id="tip">排程存好之後，請到「擴充功能 → Apps Script → 觸發條件」新增一個時間驅動觸發器，' +
+    '函式選「scheduledExport」、類型選日期計時器，建議設在凌晨。\n' +
+    '每次觸發只有「頻率到了」且「上次匯出後有新填答」才會真的匯出，其餘安靜略過。</div>' +
+    '<script>' +
+    'var DATA=' + json + ';' +
+    'function pad(n){return (n<10?"0":"")+n}' +
+    'function msToLocal(ms){if(ms===null||ms===undefined||isNaN(ms)){return ""}var d=new Date(ms);' +
+    'return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate())+"T"+pad(d.getHours())+":"+pad(d.getMinutes())}' +
+    'function fmt(ms){if(ms===null||ms===undefined||isNaN(ms)){return "—"}var d=new Date(ms);' +
+    'return d.getFullYear()+"/"+pad(d.getMonth()+1)+"/"+pad(d.getDate())+" "+pad(d.getHours())+":"+pad(d.getMinutes())}' +
+    'var box=document.getElementById("pickText");' +
+    'var list=document.getElementById("pickList");' +
+    'var selectedRow=null;var active=-1;' +
+    'function label(q){return (DATA.schedules[q.listRow]?"［已排程］":"［未排程］")+" 第"+q.listRow+"列・"+q.name}' +
+    'function find(listRow){var found=null;DATA.questionnaires.forEach(function(q){' +
+    'if(q.listRow===parseInt(listRow)){found=q}});return found}' +
+    // 已選中的項目原樣顯示在輸入框裡，所以「文字剛好等於選中項」時視同沒有關鍵字、列出全部
+    'function matches(){var kw=box.value.trim().toLowerCase();' +
+    'var picked=find(selectedRow);if(picked!==null&&box.value===label(picked)){kw=""}' +
+    'return DATA.questionnaires.filter(function(q){return kw===""||label(q).toLowerCase().indexOf(kw)>-1})}' +
+    'function openList(){' +
+    '  var items=matches();list.innerHTML="";active=-1;' +
+    '  if(items.length===0){var e=document.createElement("div");e.className="empty";e.textContent="沒有符合的問卷";list.appendChild(e)}' +
+    '  else{items.forEach(function(q){var d=document.createElement("div");d.textContent=label(q);' +
+    '    d.setAttribute("data-row",q.listRow);' +
+    // mousedown 才選：click 之前 input 會先 blur，等到 click 選單已經收起來了
+    '    d.addEventListener("mousedown",function(ev){ev.preventDefault();choose(q.listRow)});list.appendChild(d)})}' +
+    '  list.style.display="block"}' +
+    'function closeList(){list.style.display="none";active=-1}' +
+    'function choose(listRow){selectedRow=parseInt(listRow);var q=find(selectedRow);' +
+    'box.value=q===null?"":label(q);closeList();load()}' +
+    'function setActive(delta){var nodes=list.querySelectorAll("div[data-row]");if(nodes.length===0){return}' +
+    '  active=(active+delta+nodes.length)%nodes.length;' +
+    '  for(var i=0;i<nodes.length;i++){nodes[i].className=(i===active?"active":"")}' +
+    '  nodes[active].scrollIntoView({block:"nearest"})}' +
+    'box.addEventListener("focus",openList);' +
+    'box.addEventListener("input",openList);' +
+    'box.addEventListener("blur",function(){setTimeout(closeList,150)});' +
+    'box.addEventListener("keydown",function(ev){' +
+    '  if(ev.key==="ArrowDown"){ev.preventDefault();if(list.style.display!=="block"){openList()}setActive(1)}' +
+    '  else if(ev.key==="ArrowUp"){ev.preventDefault();setActive(-1)}' +
+    '  else if(ev.key==="Enter"){var nodes=list.querySelectorAll("div[data-row]");' +
+    '    if(list.style.display==="block"&&nodes.length>0){ev.preventDefault();' +
+    '      choose(nodes[active>-1?active:0].getAttribute("data-row"))}}' +
+    '  else if(ev.key==="Escape"){closeList()}});' +
+    'function load(){' +
+    '  var state=document.getElementById("state");' +
+    '  var q=find(selectedRow);' +
+    '  document.getElementById("msg").textContent="";' +
+    '  if(q===null){' +
+    '    document.getElementById("saveBtn").disabled=true;' +
+    '    document.getElementById("pauseBtn").style.display="none";' +
+    '    state.textContent=DATA.questionnaires.length===0' +
+    '      ?"「' + LIST_SHEET_NAME + '」裡還沒有任何問卷，請先新增問卷再來設定排程。"' +
+    '      :"請在上方搜尋並選擇要排程的問卷（可輸入問卷名稱或列號）。目前共 "+DATA.questionnaires.length+" 份問卷。";' +
+    '    return}' +
+    '  document.getElementById("saveBtn").disabled=false;' +
+    '  var listRow=q.listRow;' +
+    '  var s=DATA.schedules[listRow];' +
+    '  if(s){' +
+    '    document.getElementById("everyDays").value=isNaN(s.everyDays)?1:s.everyDays;' +
+    '    document.getElementById("headerCount").value=s.headerCount===""?2:s.headerCount;' +
+    '    document.getElementById("deadline").value=msToLocal(s.deadlineMs);' +
+    '    document.getElementById("emails").value=s.emails;' +
+    '    document.getElementById("unique").value=s.unique;' +
+    '    document.getElementById("pauseBtn").style.display=s.status==="已停用"?"none":"";' +
+    '    state.textContent="設定表第 "+s.scheduleRow+" 列｜狀態："+(s.status===""?"進行中":s.status)+"\\n"+' +
+    '      "上次匯出："+fmt(s.lastExportMs)+"\\n"+(s.lastResult===""?"（還沒有執行紀錄）":s.lastResult);' +
+    '  }else{' +
+    '    document.getElementById("everyDays").value=1;' +
+    '    document.getElementById("headerCount").value=2;' +
+    '    document.getElementById("deadline").value=msToLocal(q.defaultDeadlineMs);' +
+    '    document.getElementById("emails").value=q.defaultEmail;' +
+    '    document.getElementById("unique").value="是";' +
+    '    document.getElementById("pauseBtn").style.display="none";' +
+    '    state.textContent="這份問卷還沒有排程。截止時間已預設帶入問卷的檢視截止、通知信箱帶入列上的管理員Email，可自行調整。";' +
+    '  }' +
+    '}' +
+    'load();' +
+    'document.getElementById("saveBtn").onclick=function(){' +
+    '  var msg=document.getElementById("msg");msg.textContent="";msg.className="";' +
+    '  var deadline=document.getElementById("deadline").value;' +
+    '  var payload={listRow:selectedRow,everyDays:document.getElementById("everyDays").value,' +
+    '    headerCount:document.getElementById("headerCount").value,' +
+    '    deadlineMs:deadline===""?"":new Date(deadline).getTime(),' +
+    '    emails:document.getElementById("emails").value,unique:document.getElementById("unique").value};' +
+    '  var btn=this;btn.disabled=true;btn.textContent="儲存中…";' +
+    '  google.script.run.withSuccessHandler(function(result){' +
+    '    btn.disabled=false;btn.textContent="儲存排程";' +
+    '    msg.textContent=result.message;msg.className=result.ok?"ok":"err";' +
+    // 存檔後重讀一次資料，讓「［未排程］」標記與上次結果即時更新（選中的問卷維持不變）
+    '    if(result.ok){google.script.run.withSuccessHandler(function(fresh){DATA=fresh;' +
+    '      var q=find(selectedRow);if(q!==null){box.value=label(q)}' +
+    '      load();msg.textContent=result.message;msg.className="ok"}).scheduleDialogData()}' +
+    '  }).withFailureHandler(function(err){btn.disabled=false;btn.textContent="儲存排程";' +
+    '    msg.textContent="儲存失敗："+err.message;msg.className="err"}).saveScheduleRow(payload);' +
+    '};' +
+    'document.getElementById("pauseBtn").onclick=function(){' +
+    '  if(!confirm("停用後這份問卷就不會再自動匯出（設定資料會保留，之後按儲存即可恢復）。確定嗎？")){return}' +
+    '  var msg=document.getElementById("msg");var btn=this;btn.disabled=true;btn.textContent="處理中…";' +
+    '  google.script.run.withSuccessHandler(function(result){' +
+    '    btn.disabled=false;btn.textContent="停用這條排程";' +
+    '    msg.textContent=result.message;msg.className=result.ok?"ok":"err";' +
+    '    if(result.ok){btn.style.display="none";' +
+    '      google.script.run.withSuccessHandler(function(fresh){DATA=fresh;load();' +
+    '        msg.textContent=result.message;msg.className="ok"}).scheduleDialogData()}' +
+    '  }).withFailureHandler(function(err){btn.disabled=false;btn.textContent="停用這條排程";' +
+    '    msg.textContent="停用失敗："+err.message;msg.className="err"}).pauseScheduleRow(selectedRow);' +
+    '};' +
+    '</script></body></html>';
+}
+
+// 選單：立刻跑一次定時匯出（掛觸發器前先試跑驗證設定）
+function runScheduledExportNow() {
+  let go = ui.alert("立即試跑定時匯出",
+    "會照「" + SCHEDULE_SHEET_NAME + "」分頁的設定跑一輪（頻率沒到或沒有新填答的會略過）。\n要繼續嗎？",
+    ui.ButtonSet.YES_NO);
+  if (go !== ui.Button.YES) { return; }
+  let outcome = scheduledExport();
+  ui.alert("定時匯出試跑結果", outcome.message + "\n\n各列詳細結果請看「" + SCHEDULE_SHEET_NAME + "」分頁的「上次結果」欄。", ui.ButtonSet.OK);
 }
 
 // ===== 功能 3：檢查問卷格式 =====
@@ -1010,7 +1633,9 @@ function settingsDialogHtml_(data) {
     'fields.forEach(function(f){document.getElementById(f).value=DATA[f]});' +
     'document.getElementById("due").value=msToLocal(DATA.dueMs);' +
     'document.getElementById("view").value=msToLocal(DATA.viewMs);' +
-    '["modify","visible","writeAllowed","randomQ"].forEach(function(f){document.getElementById(f).value=DATA[f]==="否"?"否":"是"});' +
+    // 帶入值比照 Code.js 真值判定：modify 空白＝是（≠否 才 false），其餘三欄空白＝否（＝是 才 true）
+    'document.getElementById("modify").value=DATA.modify==="否"?"否":"是";' +
+    '["visible","writeAllowed","randomQ"].forEach(function(f){document.getElementById(f).value=DATA[f]==="是"?"是":"否"});' +
     '["loginTip","comment","submitTip","loginfailTip"].forEach(mdEditor);' +
     'document.getElementById("saveBtn").onclick=function(){' +
     '  var msg=document.getElementById("msg");msg.textContent="";' +
