@@ -41,6 +41,15 @@
     </div>
     <div class="tl-flag tl-flag--end" aria-hidden="true"><i class="fa-solid fa-flag-checkered"></i></div>
   </div>
+  <!-- 小人的開場台詞（Phase 27）：接手原本填寫 drawer 頂端 alert 的「共 N 題」。
+       進場 5 秒後浮出、6 秒後自動淡出，點一下可提前關。
+       故意做成 .field-timeline 的手足而非子元素——軌道容器有 overflow 裁切（題目多時自己捲），
+       氣泡放進去會被切掉；因此對齊整條軌道的中線左側，不追小人的逐點位置 -->
+  <Transition name="tl-bubble">
+    <div v-if="bubbleVisible && items.length > 1" class="tl-bubble" @click="hideBubble()">
+      共 {{ items.length }} 題，這條軸會標記你的填答進度與格式狀態
+    </div>
+  </Transition>
 </template>
 
 <script setup>
@@ -369,6 +378,21 @@ watch(
   }
 );
 
+// ===== 小人開場台詞（Phase 27）=====
+// 進場 5 秒後浮出、再 6 秒自動淡出（點一下可提前關）。只在元件生命週期內講一次——
+// 每次開問卷 drawer 算一次，不落地 localStorage（換裝置/重登都會再看到一次，成本很低）
+const BUBBLE_DELAY_MS = 5000;
+const BUBBLE_SHOW_MS = 6000;
+const bubbleVisible = ref(false);
+let bubbleInTimer = null;
+let bubbleOutTimer = null;
+
+function hideBubble() {
+  bubbleVisible.value = false;
+  clearTimeout(bubbleOutTimer);
+  bubbleOutTimer = null;
+}
+
 onMounted(() => {
   drawWalker();
   window.addEventListener('scroll', onScroll, { capture: true, passive: true });
@@ -376,6 +400,10 @@ onMounted(() => {
     setupObserver();
     updateCurrent();
   });
+  bubbleInTimer = setTimeout(() => {
+    bubbleVisible.value = true;
+    bubbleOutTimer = setTimeout(hideBubble, BUBBLE_SHOW_MS);
+  }, BUBBLE_DELAY_MS);
 });
 
 onBeforeUnmount(() => {
@@ -385,6 +413,8 @@ onBeforeUnmount(() => {
     io = null;
   }
   stopStepping();
+  clearTimeout(bubbleInTimer);
+  clearTimeout(bubbleOutTimer);
 });
 </script>
 
@@ -412,6 +442,73 @@ onBeforeUnmount(() => {
 
 .field-timeline::-webkit-scrollbar {
   display: none;
+}
+
+/* 小人台詞氣泡：固定在軌道左側、垂直置中（軌道本身也是 fixed 置中）。
+   右側小三角指向軌道；色走主題語意變數，不寫死 hex */
+.tl-bubble {
+  position: fixed;
+  right: 36px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 31;
+  max-width: 60vw;
+  padding: 8px 12px;
+  border: 1px solid var(--el-border-color);
+  border-radius: 8px;
+  background: var(--el-bg-color-overlay);
+  box-shadow: var(--el-box-shadow-light);
+  color: var(--el-text-color-primary);
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+@media (pointer: fine) {
+  .tl-bubble {
+    right: 50px;
+    max-width: 260px;
+  }
+}
+
+.tl-bubble::after {
+  content: '';
+  position: absolute;
+  right: -6px;
+  top: 50%;
+  transform: translateY(-50%) rotate(45deg);
+  width: 10px;
+  height: 10px;
+  background: var(--el-bg-color-overlay);
+  border-right: 1px solid var(--el-border-color);
+  border-top: 1px solid var(--el-border-color);
+}
+
+.tl-bubble-enter-active,
+.tl-bubble-leave-active {
+  transition:
+    opacity 0.35s ease,
+    transform 0.35s ease;
+}
+
+.tl-bubble-enter-from,
+.tl-bubble-leave-to {
+  opacity: 0;
+  transform: translateY(-50%) translateX(8px);
+}
+
+/* 尊重系統減少動態：直接出現/消失，不做位移淡入 */
+@media (prefers-reduced-motion: reduce) {
+  .tl-bubble-enter-active,
+  .tl-bubble-leave-active {
+    transition: none;
+  }
+
+  .tl-bubble-enter-from,
+  .tl-bubble-leave-to {
+    opacity: 1;
+    transform: translateY(-50%);
+  }
 }
 
 .timeline-inner {

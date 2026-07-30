@@ -2650,34 +2650,118 @@ function saveFile_(referSSID, recordSSID, token, columnID, fileObj) {
   };
 }
 
-function duplicateSubmits(recordSSID, qPkey) {
-  let recordSS = SpreadsheetApp.openById(recordSSID);
-  let recordSheet = recordSS.getSheets()[0];
-  let recordRange = recordSheet.getDataRange();
-  let recordArr = recordRange.getValues();
-  let userRecords = _.filter(recordArr, (arr) => {
-    return arr[2].toString() === qPkey;
+// ===== 「查詢我填答了沒」（需認證的唯讀查詢）=====
+// 背景：原本要知道「我送出了沒」只能走完整登入（readRecord），但登入成功會直接進入填寫問卷的
+// drawer，填答狀態被埋在整份問卷上方。這支只回自己的送出統計（次數／每次時間／最後一次簽名），
+// 不發 token、不寫任何資料、不回答案內容與主鍵值。
+// **認證骨架完全沿用 readRecord_**（冷卻檢查 → authRecord → recordLoginAttempt_ → O 欄「開放進入」
+// 判斷），不可另開一條沒有防線的認證路徑——否則就成了 Phase 21 防枚舉的旁路（攻擊者改打這支即可
+// 無限試）。開放條件與登入同規則：O 欄非「是」一律拒絕；已截止（dueDate 過）仍可查，比照登入的
+// 檢視模式。
+function mySubmitStatus(referSSID, recordSSID, auth) {
+  return logged_('mySubmitStatus', () => mySubmitStatus_(referSSID, recordSSID, auth));
+}
+
+function mySubmitStatus_(referSSID, recordSSID, auth) {
+  let nowMs = (new Date()).getTime();
+  let loginId = draftKey_(referSSID, auth);
+  let pseudonym = loginPseudonym_(referSSID, auth);
+  if(pseudonym !== null) {
+    let throttle = checkLoginThrottle_(referSSID, pseudonym, nowMs);
+    if(!throttle.allowed) {
+      // 一致化回應：與 readRecord_ 同一個形狀，前端共用倒數顯示；不洩漏主鍵值在不在名冊
+      return { throttled: true, cooldownSeconds: Math.ceil(throttle.cooldownRemainMs / 1000) };
+    }
+  }
+  let passed = authRecord(referSSID, auth);
+  if(pseudonym !== null) { recordLoginAttempt_(referSSID, pseudonym, loginId, passed, nowMs); }
+  if(!passed) { return false; }
+  let listSS = SpreadsheetApp.openById(appProperties.getProperty('listSheetID'));
+  let listSheet = listSS.getSheets()[0];
+  let listArr = listSheet.getRange("A:O").getValues();
+  let currentSheet = _.filter(listArr, (sheet) => {
+    return sheet[1].toString().trim() === referSSID && sheet[2].toString().trim() === recordSSID;
   });
-  let returnArr = userRecords.length > 0 ? userRecords[userRecords.length - 1] : [];
+  // O 欄＝「開放進入」，與 readRecord_ 同一道判斷（不新增可存取面）
+  if(currentSheet.length === 0) { return false; }
+  if(currentSheet[0][14].toString().trim() !== "是") { return false; }
+  // 主鍵值一律由伺服器端判定（Gmail 主鍵取 Session），不信前端傳來的值
+  let serverPkey = draftKey_(referSSID, auth);
+  if(serverPkey === null) { return false; }
+  if(getUserRow(referSSID, auth).length === 0) { return false; }
+  let recordSS = SpreadsheetApp.openById(recordSSID);
+  let recordArr = recordSS.getSheets()[0].getDataRange().getValues();
+  let summary = summarizeUserRecords_(recordArr, serverPkey);
+  let signatures = [];
+  for(let i=0; i<summary.signIDs.length; i++) {
+    signatures.push(signatureDataUrl_(summary.signIDs[i]));
+  }
   return {
-    length: userRecords.length,
-    modified: returnArr.length > 0 ? returnArr[1] : "",
-    lastTick: returnArr.length > 0 ? returnArr[0] : "",
-    pkey: maskString(qPkey)
+    length: summary.length,
+    lastTick: summary.lastTick,
+    modified: summary.modified,
+    history: summary.history,
+    signatures: signatures,
+    // 該問卷有沒有簽名格（G 欄；已截止問卷 getQList_ 會清空前端的簽名名稱，故這裡自己判一次）
+    hasSignatureSlot: currentSheet[0][6].toString().trim() !== "",
+    // 最後一次送出的答案（欄位名＋值），給查詢 drawer 的「下載我上次填寫的結果」用。
+    // 這是**本人自己的資料**、認證強度與 readRecord 相同（同一組認證欄位＋同一套冷卻/稽核），
+    // 故回傳自己的答案與 readRecord 的既有行為一致；仍不回主鍵值、不發 token
+    lastAnswers: answersFromRecordRow_(getHeaders(referSSID), summary.lastRow)
   };
 }
 
-function latestSubmits(recordSSID) {
-  let recordSS = SpreadsheetApp.openById(recordSSID);
-  let recordSheet = recordSS.getSheets()[0];
-  let totalRange = recordSheet.getDataRange();
-  let totalArr = totalRange.getValues();
-  let latestArr = _.last(totalArr);
+// 純函數：某主鍵在紀錄表的送出統計。紀錄表欄位語意比照 latestRecordRowFor_／readRecord_——
+// A 欄＝tick(ms)、B 欄＝是否為修改、C 欄＝主鍵值、D 欄＝簽名 fileID（以 ; 串接）。
+// signIDs 只取最後一列（＝最後一次送出的簽名），呼叫端才轉 data URL（純函數不碰 GAS 全域）。
+// 無紀錄回 length:0＋空陣列
+function summarizeUserRecords_(recordArr, pkeyValue) {
+  let userRecords = _.filter(recordArr, (arr) => {
+    return arr[2].toString() === pkeyValue.toString();
+  });
+  let history = userRecords.map((row) => {
+    return {
+      tick: parseInt(row[0].toString(), 10),
+      modified: /true/i.test(row[1].toString())
+    };
+  });
+  let last = userRecords.length > 0 ? userRecords[userRecords.length - 1] : null;
+  let signIDs = [];
+  if(last !== null && last[3].toString().trim() !== "") {
+    signIDs = _.filter(last[3].toString().trim().split(";"), (id) => {
+      return id.toString().trim() !== "";
+    });
+  }
   return {
-    tick: latestArr.length > 0 ? latestArr[0].toString() : 0,
-    modified: latestArr.length > 0 ? latestArr[1].toString() : false,
-    pkey: latestArr.length > 0 ? maskString(latestArr[2].toString()) : ""
+    length: userRecords.length,
+    lastTick: last !== null ? parseInt(last[0].toString(), 10) : 0,
+    modified: last !== null ? /true/i.test(last[1].toString()) : false,
+    history: history,
+    signIDs: signIDs,
+    lastRow: last
   };
+}
+
+// 純函數：把紀錄列還原成「欄位名稱＋你填寫的值」清單（給查詢 drawer 的下載鈕用）。
+// 只取可填欄（type 含 F，比照前端 lastSubmit 的 filter）；值在紀錄列的位置＝pos+5。
+// 檔案欄的值落地是 fileID，這裡**拼接** Drive 連結不走 DriveApp（每格一次 API 呼叫太貴，
+// 沿用匯出效能修復的做法）；非檔案欄沿用 readRecord_ 的 📝 資料標記剝除
+function answersFromRecordRow_(headers, row) {
+  if(row === null || row === undefined) { return []; }
+  let answers = [];
+  for(let i=0; i<headers.length; i++) {
+    let column = headers[i];
+    if(!/F/.test(column.type)) { continue; }
+    let cell = row[column.pos + 5];
+    let value = (cell === null || cell === undefined) ? "" : cell.toString().trim();
+    if(value !== "" && formatDetector('F', 'F', column)) {
+      value = 'https://drive.google.com/file/d/' + value + '/view';
+    } else {
+      value = value.replace(/📝/, "");
+    }
+    answers.push({ name: column.name, value: value });
+  }
+  return answers;
 }
 
 function maskString(str) {

@@ -28,6 +28,9 @@ export function useDraft({
 }) {
   const draftEnabled = ref(false);
   const draftSaving = ref(false);
+  // 雲端有草稿的時間（ms，0＝沒有）：給 topbar 的「遠端備份」tag 用。
+  // 登入時探到就記，**不論使用者要不要載入**——雲端有就是有（Phase 27）
+  const onlineDraftAt = ref(0);
 
   // 手動按鈕：上傳目前填寫進度
   async function saveDraftOnline() {
@@ -56,6 +59,7 @@ export function useDraft({
       let sealed = await sealDraft(payload, draftKeys.value.enc);
       let result = await gasRun('saveDraft', currentSheet[0].refer, authToken.value, sealed);
       if (result && result.success) {
+        onlineDraftAt.value = dayjs().valueOf();
         ElMessage.success(
           '已線上暫存！換裝置用同一組身分登入即可還原（簽名需重簽）。暫存會被系統定期清理，請勿當作長期保存'
         );
@@ -88,6 +92,7 @@ export function useDraft({
       let sealed = await sealDraft(payload, draftKeys.value.enc);
       let result = await gasRun('saveDraft', currentSheet[0].refer, authToken.value, sealed);
       if (result && result.success) {
+        onlineDraftAt.value = dayjs().valueOf();
         return true;
       }
       if (result && result.tokenExpired) {
@@ -122,6 +127,8 @@ export function useDraft({
     if (!draft || !draft.payload) {
       return;
     }
+    // 雲端確實有草稿——先記下時間給「遠端備份」tag（下面解不開或使用者不載入都不影響這個事實）
+    onlineDraftAt.value = draft.updatedAt || 0;
     let importData;
     try {
       // smd1 密文前端解；非 smd1 直接當 JSON 解析（防呆，比照後端 decode 的殘留分支）。
@@ -174,6 +181,7 @@ export function useDraft({
   return {
     draftEnabled,
     draftSaving,
+    onlineDraftAt,
     saveDraftOnline,
     saveDraftForInvite,
     checkOnlineDraft,

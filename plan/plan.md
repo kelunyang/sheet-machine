@@ -2201,6 +2201,142 @@ plan/issue.md（「三哨兵關係」一節）。
 
 ---
 
+## Phase 26：「查詢我填答了沒」需認證的唯讀查詢＋`LatestDialog` 死碼退役（2026-07-30 設計定案；同日實作完成，未部署——待端對端實機驗證）
+
+### 動機
+
+1. **流程不明顯**：要知道「我到底送出了沒」，唯一路徑是走完整登入（`readRecord`）——但登入成功
+   會直接把人丟進填寫問卷的 drawer（`columnDialog`），填答狀態那條 el-alert 混在整份問卷上方。
+   使用者只想查一次「填幾次、最後何時、簽名長怎樣」，不想被推進填寫流程。
+2. **舊查詢是死碼＋沒認證**：`LatestDialog.vue` 只有 App.vue 的 `defineExpose({ viewLatest })`
+   保留函式，模板零按鈕呼叫（元件註解自承「目前列表頁按鈕停用中」）。它獨佔的 `duplicateSubmits`
+   **不驗身分**——知道別人的主鍵值就能查別人填過沒；`latestSubmits` 則把最後填寫者的遮罩主鍵
+   吐給所有人。既然要做需認證的版本，舊的兩支一併退役。
+
+### 定案表
+
+| 決策點 | 選擇 |
+|---|---|
+| 入口 | 登入 drawer 內原本「查看填答率統計」那一列**切成兩顆並排按鈕**（統計／查詢我填答了沒），窄螢幕 flex-wrap 疊起 |
+| 認證欄位 | **沿用上方 authDB 已填的欄位**，不重畫一份輸入框；按鈕 `:disabled="checkAuth()"`（與登入鈕同一套空值/格式檢查），Gmail 主鍵模式下值由 `loginGmail` 取得 |
+| 開放條件 | **與登入同規則**：名冊 O 欄「開放進入」非「是」一律拒絕；已截止（dueDate 過）仍可查（比照登入的檢視模式）——查填答紀錄正是截止後最想知道的事 |
+| 防線 | **認證骨架完全沿用 `readRecord_`**：`checkLoginThrottle_` → `authRecord` → `recordLoginAttempt_`（`_logins` 稽核＋冷卻計數＋per-refer 橫向警報照走）。不可另開沒有防線的認證路徑，否則成為 Phase 21 防枚舉的旁路 |
+| 回傳範圍 | 次數／每次送出時間／最後一次時間與是否為修改／最後一次紀錄列上的簽名圖。**不發 token／draftKeys**（這支不寫任何東西、不需 session），不回主鍵值、不回答案內容 |
+| 舊 RPC | `duplicateSubmits`／`latestSubmits`／`LatestDialog.vue`／`viewLatest`／`pkeyName` 全部移除 |
+
+### 實作規格
+
+1. **後端** `mySubmitStatus(referSSID, recordSSID, auth)`（擺在 `duplicateSubmits` 原址，`logged_` 包起）：
+   冷卻被擋回 `{ throttled, cooldownSeconds }`（與 `readRecord_` 同形狀，前端共用倒數說法）；
+   `authRecord` 未過回 `false`；O 欄非「是」回 `false`；主鍵值一律 `draftKey_` 伺服器端判定、
+   `getUserRow` 確認在名冊；簽名走既有私有函數 `signatureDataUrl_`（**絕不做成收 fileID 的 RPC**）。
+   回 `{ length, lastTick, modified, history:[{tick,modified}], signatures:[dataURL], hasSignatureSlot }`。
+2. **純函數** `summarizeUserRecords_(recordArr, pkeyValue)`：紀錄表欄位語意比照 `latestRecordRowFor_`
+   （A=tick、B=modified、C=主鍵值、D=簽名 fileID 以 `;` 串接）；`signIDs` 只取最後一列、濾空值，
+   呼叫端才轉 data URL（純函數不碰 GAS 全域，可 vitest）。
+3. **前端** `src/components/MyStatusDrawer.vue`：`direction="btt" size="100%"` ＋ `.drawer-flow-title`
+   （現行彈窗規範）；`defineExpose({ open })`，`open(auth)` 收 App 傳來的 `plainClone(authDB.value)`。
+   **必掛 loading 小遊戲**（`beginLoading('查詢你的填答紀錄中')` ＋ `finally endLoading()`）——
+   這支要驗身分＋掃整份紀錄表＋逐張讀 Drive 簽名圖，等待時間與 `compareSheets` 同級。
+   顯示三塊：總結 alert／`el-timeline` 每次送出時間（超過 5 次只列最近 3 次、其餘收進 `el-collapse`）／
+   最後一次的簽名圖（標題取 `allSignNames`，已截止問卷該陣列被 `getQList_` 清空 → 退回「簽名 N」）。
+   關閉清空結果，避免殘留上一次查詢。
+4. **App.vue**：`viewMyStatus()` 三行（比照 `viewStat()`）；`.login-query-row` 兩顆按鈕
+   `flex: 1 1 240px`；移除 `LatestDialog` import／元件／`viewLatest`／`defineExpose`／`pkeyName`。
+5. **測試** `tests/mySubmitStatus.test.js`（9 例）：`summarizeUserRecords_` 的無紀錄／多筆順序／
+   signIDs 切割，以及 `mySubmitStatus_` 的認證通過內容（含「回傳 JSON 不含主鍵值、無 token/draftKeys」）、
+   認證失敗記 `_logins`、連錯滿 `loginFailMax` 後回 throttled 且該次不進 `_logins`、O 欄=否拒絕、
+   無簽名格時 `hasSignatureSlot=false`。
+
+### 誠實邊界
+
+- 這支與登入共用同一組冷卻計數：**在這裡連錯也會鎖住登入**（刻意——不然它就是繞過防線的第二扇門）。
+- `compareSheets` 語意未動（仍是不需認證的群組填答率），只改它所在那一列的 UI。
+- 簽名圖只取**最後一次送出**那列的 fileID；歷史各次的簽名不回（紀錄表舊列的 fileID 仍在，但沒有
+  「回看每次簽名」的需求，多讀 Drive 只會更慢）。
+
+### 驗收
+
+- `npm run lint`、`npm test`（417 綠）、`npm run build` 全過。
+- 實機：填對認證欄位 → 按「查詢我填答了沒」→ 次數／每次時間／簽名正確且**沒有進入填寫 drawer**；
+  沒填過的人顯示「還沒送出過」；連錯 5 次 → 顯示冷卻倒數且 `_logins` 有對應失敗列；
+  名冊 O 欄改「否」→ 查詢一併被拒。
+
+---
+
+## Phase 27：填寫狀態上 topbar——會自己縮圖的狀態 tag 群＋FieldTimeline 小人開場台詞（2026-07-30 設計定案；同日實作完成，未部署——待端對端實機驗證）
+
+### 動機
+
+填寫問卷 drawer 頂端那條「填寫狀態」el-alert（`你填過了N次，最後一次是…`）佔掉兩三行、字級 1.5em，
+而且內容有一半是廢話（「如果你沒有要更新可以不用一直來填寫」）。Phase 26 讓「我填了沒」在登入頁
+就查得到之後，這條 alert 的資訊價值只剩「次數／最後時間／有沒有備份」——那是**狀態指示**，
+該用 tag 表達並收進 sticky 控制列，把內容區完全讓給題目。
+
+### 定案表
+
+| 決策點 | 選擇 |
+|---|---|
+| 位置 | `FormToolbar` 內。**桌機：暫存 ▾ → tags → 下載上次結果 → 鎖定/修改 全部同一列**（`.form-toolbar__row` 寬度貼齊內容、不獨佔一列）；**手機：暫存 ▾ 與 tags 整寬左右對開**，下載與鎖定各佔一列 |
+| 手機收合 | tag 群同時渲染進 `CollapsibleControls` 的 **`#peek` 插槽**——往下捲收合後仍露在 handle 上方（不被遮住），與展開態共用同一個 computed |
+| 空狀態 | 沒送出過又沒備份＝**一顆 tag 都不出**（不做「未上傳」的空狀態 tag） |
+| 舊 alert | 整條移除（App.vue 填寫 drawer 內）；「共 N 題」改由 FieldTimeline 小人台詞承載 |
+
+### 三顆 tag 與兩態動畫
+
+| tag | 條件 | 展開態（0–60 秒） | 縮圖態（60 秒後） | tooltip（兩態都有） |
+|---|---|---|---|---|
+| 已送出 | `submitCount > 0` | `✓ 已填過 N 次`（success） | `✓N`（icon＋數字） | 最後一次送出：<時間> |
+| 本機備份 | `tempFound` | `📱 本機備份`（warning，`fa-mobile-screen`） | 只剩 icon | 瀏覽器自動存檔，檔案欄位不會存、換裝置看不到（有時間就附上） |
+| 遠端備份 | `onlineDraftAt > 0` | `☁ 遠端備份`（primary，`fa-cloud`） | 只剩 icon | 雲端暫存於 <時間>，同身分換裝置可還原 |
+
+- **打勾語意**：`submitCount > 0` 才有這顆 tag，icon 固定 `fa-circle-check`＝「真的上傳過」。
+- **動畫**：tag 內 `<span class="tag-label">` 走 `max-width: 8em → 0` ＋ `opacity: 1 → 0` 的 0.4s
+  transition（不用 `display:none`，才收得平滑；`overflow:hidden` + `white-space:nowrap` 防換行抖動）。
+  icon 與數字永不消失——縮圖後仍是可辨識的一顆 el-tag。
+- **計時**：每顆 tag 各自一個 60 秒 timer，從「該 tag 出現」起算；**狀態變化重新展開並重新計時**
+  （按下線上暫存後「遠端備份」重新亮文字 60 秒，不然使用者看不出變化）；`onBeforeUnmount` 清 timer。
+- **想回頭看**：縮圖態點一下（桌機 hover 也算）暫時展開 5 秒再自動收回。
+- **`prefers-reduced-motion`**：不做 transition，60 秒後直接切縮圖態（結果一致、無動畫）。
+
+### 需要新增的 state（目前不存在）
+
+- `useDraft` 回傳新的 `onlineDraftAt`：`checkOnlineDraft` 探到 payload 就記 `draft.updatedAt`
+  （**不論使用者載不載入**，雲端有就是有）；`saveDraftOnline`／`saveDraftForInvite` 成功記當下時間。
+- App.vue 的 `localDraftAt`：watch 寫入 localStorage 後記時間。`utils/tempStorage.js` 的 queue
+  **沒有時間戳**，所以登入時載到的舊暫存無時間 → tooltip 只說「有本機存檔」不給時間。
+- 傳給 toolbar：`submit-count`（`requestCount.length`）、`last-submit-at`（`requestCount.lastTick`）、
+  `temp-found`、`local-draft-at`、`online-draft-at`。
+
+### FieldTimeline 小人開場台詞（取代「共 N 題」）
+
+- 掛載後 5 秒，在小人左側浮出氣泡（絕對定位跟著 `walkerTop` 走）：
+  **「共 N 題，這條軸會標記你的填答進度與格式狀態」**（N 取 FieldTimeline 自己的 `questions.length`）。
+- 顯示 6 秒自動淡出，點一下可提前關；每次開問卷 drawer 算一次（不落地 localStorage）；
+  題數 <2 時 timeline 本身不 render、自然沒台詞；手機 `max-width: 60vw` 不超出畫面；
+  `prefers-reduced-motion` 不做淡入淡出但照樣顯示。
+- App.vue 的 `totalInputs` computed 在 alert 移除後只剩台詞用途 → 一併退役。
+
+### 查詢 drawer 也能下載上次結果（Phase 26 的 MyStatusDrawer 補強）
+
+- `mySubmitStatus` 增回 `lastAnswers`（欄位名＋值，只取 type 含 F 的可填欄，純函數
+  `answersFromRecordRow_`）：**本人自己的資料**、認證強度與 `readRecord` 相同（同一組認證欄位、
+  同一套冷卻與 `_logins` 稽核），故回傳自己的答案與既有行為一致；仍不回主鍵值、不發 token。
+- 檔案欄的 Drive 連結**用字串拼接**（`https://drive.google.com/file/d/<id>/view`）不走 DriveApp——
+  每格一次 API 呼叫太貴（沿用匯出效能修復的做法）；非檔案欄沿用 `readRecord_` 的 📝 標記剝除。
+- MyStatusDrawer footer 加「下載我上次填寫的結果」（走既有 `utils/formatters` 的 `downloadCSV`，
+  CSV 格式與填寫 drawer 的「下載上次結果」一致）——使用者在同一個 drawer 就能看簽名＋拿檔案，
+  不必為了下載而登入進填寫流程。填寫 drawer 的那顆按鈕保留（兩邊都有）。
+
+### 驗收
+
+- `npm run lint`、`npm test`、`npm run build` 全過。
+- 實機四種組合：未填過無 tag／已填過／本機備份／遠端備份；60 秒後三顆都縮圖、點一下暫時展開；
+  按下線上暫存後「遠端備份」重新亮文字；手機往下捲確認 tag 從 peek 露出；
+  小人台詞 5 秒後出現、6 秒後自動消失。
+
+---
+
 ## 部署原則（每次都適用）
 
 - clasp 用工作帳號登入（`npx clasp show-authorized-user` 先確認）

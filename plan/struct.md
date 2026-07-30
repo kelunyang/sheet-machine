@@ -47,6 +47,11 @@ Sheet Machine 是一個基於 Google Apps Script 和 Vue.js 的動態表單系�
 │  │ writeRecord │   │  saveFile   │   │   compareSheets     │   │
 │  │  寫入紀錄   │   │  上傳檔案   │   │    統計填寫率        │   │
 │  └─────────────┘   └─────────────┘   └─────────────────────┘   │
+│                                                                 │
+│                    ┌─────────────────────────────────────────┐  │
+│                    │            mySubmitStatus               │  │
+│                    │  查自己填了幾次／最後時間／簽名（需認證）  │  │
+│                    └─────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
           │                 │                    │
           ▼                 ▼                    ▼
@@ -525,9 +530,10 @@ sheet-machine/
 │   │   ├── FileUploadDrawer.vue   # 檔案上傳 drawer（自打 saveFile RPC）
 │   │   ├── TempTransferDrawers.vue # 匯出/匯入暫存檔 drawer
 │   │   ├── StatDialog.vue         # 填答率統計
-│   │   ├── LatestDialog.vue       # 最後填寫者查詢
+│   │   ├── MyStatusDrawer.vue     # 查詢我填答了沒（需認證的唯讀查詢）（Phase 26）
 │   │   ├── JwtCountdownBar.vue    # 登入時效倒數條（sticky 嵌入各主 drawer、警告態點擊續約）
-│   │   ├── FormToolbar.vue        # 填問卷 drawer 的 sticky 控制列（暫存▾/下載/編輯雙態鈕）
+│   │   ├── FormToolbar.vue        # 填問卷 drawer 的 sticky 控制列（暫存▾/下載/編輯雙態鈕/狀態 tag）
+│   │   ├── FormStatusTags.vue     # 填寫狀態 tag 群（已填過 N 次/本機備份/遠端備份，60 秒後縮成 icon）（Phase 27）
 │   │   ├── SignatureToolbar.vue   # 簽名確認 drawer 的 sticky 控制列（下一個/清除/遠端簽名/更新邀請）
 │   │   ├── CollapsibleControls.vue # 手機用可收合外殼：包住 toolbar 按鈕群，往下捲收成 handle（Phase 22）
 │   │   ├── InviteeSignDialog.vue  # 受邀簽名者完整流程（read-only 問卷 + 單格簽名）
@@ -635,7 +641,15 @@ sticky 條（JwtCountdownBar/FormToolbar）捲動時才能越過標題升到 y=0
 - **TempTransferDrawers**：匯出/匯入暫存檔的兩個 drawer。加密金鑰＝id 假名（draftKeys.id）＋
   使用者密碼（Phase 20）；匯入解密失敗自動 fallback 舊格式金鑰（主鍵值＋密碼）再試一次，
   匯入成功以 tempStorage.saveQueue 加密存回。
-- **StatDialog / LatestDialog**：填答率統計、最後填寫者查詢。
+- **StatDialog**：填答率統計（`compareSheets`，不需認證的群組統計）。
+- **MyStatusDrawer**（Phase 26）：「查詢我填答了沒」——登入頁上與填答率統計並排的第二顆按鈕，
+  走需認證的 `mySubmitStatus`。認證欄位沿用登入頁上方已填的 authDB（不重畫輸入框，按鈕
+  `:disabled="checkAuth()"`），只顯示自己的送出次數／每次送出時間（超過 5 次收進 el-collapse）／
+  最後一次的簽名圖，不進填寫問卷的 drawer。查詢期間掛 loading 小遊戲（驗身分＋掃整份紀錄表＋
+  逐張讀 Drive 簽名圖，與 compareSheets 同級的等待）。被冷卻時顯示倒數（與登入共用同一組計數）。
+  footer 另有「下載我上次填寫的結果」（Phase 27）：`mySubmitStatus` 的 `lastAnswers`＋既有
+  `downloadCSV`，CSV 格式與填寫 drawer 的「下載上次結果」一致——看簽名與拿檔案在同一個 drawer 完成，
+  不必為了下載而登入進填寫流程。
 - **JwtCountdownBar**：登入時效倒數條，嵌入式元件：各主 drawer body 頂部以
   `.drawer-sticky-top` sticky 釘住，捲動時升到視窗最頂 y=0、警告態點擊續約。
 - **FormToolbar**：填問卷 drawer 的 sticky 控制列：JWT 條＋「暫存 ▾」dropdown
@@ -644,6 +658,18 @@ sticky 條（JwtCountdownBar/FormToolbar）捲動時才能越過標題升到 y=0
   內容流零按鈕。主流程 el-steps 步驟條已退役（Phase 13）——「我在哪」由
   `.drawer-flow-title` 承載、「後面還有簽名」的預告在 footer 主按鈕文案「完成填寫，前往簽名」。
   按鈕群（JWT 條除外）包在 CollapsibleControls 內，手機可收合（見下）。
+  Phase 27：**桌機**「暫存 ▾ → 狀態 tag 群 → 下載上次結果 → 鎖定/修改」全部同一列
+  （`.form-toolbar__row` 寬度貼齊內容、不獨佔一列）；**手機**該列變成整寬左右對開
+  （暫存靠左、tag 靠右），下載與鎖定各佔一列。tag 群同時渲染進 CollapsibleControls 的 `#peek`，
+  收合後仍露在 handle 上方。
+- **FormStatusTags**（Phase 27）：填寫狀態 tag 群，取代原本填寫 drawer 頂端那條 1.5em 的
+  「填寫狀態」el-alert。三顆：`✓ 已填過 N 次`（success，`submitCount>0` 才出＝真的上傳過）／
+  `本機備份`（warning）／`遠端備份`（primary）；都沒有就一顆不出。**兩態**：出現 60 秒後
+  `.status-tag__label` 以 `max-width 8em→0`＋opacity 收掉，只留 icon 與次數數字（`is-shrunk`）；
+  縮圖態點一下（桌機 hover 也行）暫時展開 5 秒；tooltip（最後送出時間／雲端暫存時間）兩態都有。
+  重新展開的訊號走每顆 tag 的 `sig`（離散狀態：次數、onlineDraftAt）而**不是 tooltip 文字**——
+  本機存檔時間每次打字都在動，拿它當訊號會讓那顆 tag 永遠縮不回去。
+  `prefers-reduced-motion` 時不做 transition。
 - **CollapsibleControls**（Phase 22）：手機用的可收合外殼，`<slot>` 包住 FormToolbar／SignatureToolbar
   的按鈕群那個 `__controls` div（JWT 條留外層、永遠可見）。只在**手機（≤768px，`matchMedia`）**
   啟用：進場展開，往下捲題目/簽名（`scrollTop` 遞增且 >32px，捲動容器＝`rootRef.closest('.el-drawer__body')`）
@@ -675,6 +701,10 @@ sticky 條（JwtCountdownBar/FormToolbar）捲動時才能越過標題升到 y=0
   主題變數，OTP 用 6 碼 3-3 分組 numeric，填滿 @complete 自動送出。
 - **FieldTimeline**：右側固定點線導航，一題一點：灰=未填/綠=已填/紅=格式錯，
   點擊捲動到 formfield-&lt;tid&gt; 錨點；自 scoringSystem StageTimeline 移植的無動畫精簡版。
+  Phase 27 新增**小人開場台詞**：進場 5 秒後浮出氣泡「共 N 題，這條軸會標記你的填答進度與格式狀態」
+  （接手退役的「共 N 題」alert），6 秒後自動淡出、點一下提前關。氣泡是 `.field-timeline` 的
+  **手足而非子元素**——軌道容器有 overflow 裁切（題目多時自己捲），放進去會被切掉；
+  故對齊整條軌道中線的左側，不追小人的逐點位置。
 - **SheetCard**：問卷列表卡片，取代舊 el-table（Phase 14）：版面骨架挪用
   scoringSystem-cf ProjectCard——標題＋靜態流程看板串「開始(建立日期)→填寫/檢視→
   簽名×n(有簽名格才出現)→結束」，起訖日期掛在格子外下方。看板串走灰＋磚紅（起訖框/

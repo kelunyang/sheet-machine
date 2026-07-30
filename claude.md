@@ -82,7 +82,7 @@ dev（`npm run dev`）由 Vite 從 node_modules 解析、不注入 import map（
 |------|------|
 | `README.md` | 對外安裝／維運入口：系統架構、雙 GAS 專案部署步驟、**ScriptProperties 完整清單（兩專案各一張表）**、loading 小遊戲換主題/關閉指引（含小人共用說明）、文件導覽。給第一次拿到專案的人看 |
 | `src/App.vue` | 主元件：狀態編排、對話框流程、GAS 呼叫 |
-| `src/components/` | UI 元件：FormField（左側狀態邊界條：細線＋頂端狀態圖示）、FieldValueSwitch（答案來源 el-segmented：預設值/你上次的/暫存/你現在填的，切了自動帶入）、SubmitDiffDrawer、DiffText、SheetCard、FormToolbar、SignatureToolbar、JwtCountdownBar、FieldTimeline、LifecycleTimeline、InviteeSignDialog、PinCodeInput、MultiSelectDrawer、FileUploadDrawer、TempTransferDrawers、ConfirmDrawer、LoadingGame、Stat/LatestDialog、ErrorAlert、AppFooter（版權列單一來源）——各元件職責與彈窗規範（全站零 el-dialog、drawer 方向、`.drawer-flow-title`）見 plan/struct.md「前端元件細節」 |
+| `src/components/` | UI 元件：FormField（左側狀態邊界條：細線＋頂端狀態圖示）、FieldValueSwitch（答案來源 el-segmented：預設值/你上次的/暫存/你現在填的，切了自動帶入）、SubmitDiffDrawer、DiffText、SheetCard、FormToolbar、FormStatusTags（填寫狀態 tag 群：已填過 N 次／本機備份／遠端備份，60 秒後縮成 icon）、SignatureToolbar、JwtCountdownBar、FieldTimeline、LifecycleTimeline、InviteeSignDialog、PinCodeInput、MultiSelectDrawer、FileUploadDrawer、TempTransferDrawers、ConfirmDrawer、LoadingGame、StatDialog、MyStatusDrawer（查詢我填答了沒，需認證的唯讀查詢）、ErrorAlert、AppFooter（版權列單一來源）——各元件職責與彈窗規範（全站零 el-dialog、drawer 方向、`.drawer-flow-title`）見 plan/struct.md「前端元件細節」 |
 | `src/composables/` | 有狀態共用邏輯：useCrypto、useGasRpc、useDraft、useInvites、useSignatures、useJwtSession、useConfirmDrawer（全站禁用 ElMessageBox）、useLoadingGame——細節見 plan/struct.md |
 | `src/utils/` | 純函數：columnRules、columnPrep、tempQueue、tempStorage、draftCipher、sentinels、fieldChips、submitDiff、markdown、multiSelect、formatters、jwt、timeline、sheetFlow、pixelSprites——細節見 plan/struct.md |
 | `src/theme/colors.config.js` | 主題配色單一來源（含 WCAG 實測對比度）；`vite.config.js` 的插件在建置時據此生成 `src/styles/_theme-generated.scss`（gitignored），手寫樣式層在 `src/styles/_theme.scss`，改色只改 config |
@@ -244,6 +244,11 @@ formatDetector('F', 'F', column)  // format=F, type=F
   限流判斷。**誠實邊界**：cache 驅逐＝計數歸零（防線暫鬆非破口、`_logins` 一筆不漏）；`_logins` 明文保護全靠
   draftSheetID 永不分享（管理者責任）；無 IP 下橫向枚舉只能偵測＋人工斷，根治靠
   認證欄位的熵（管理者建名冊時的選擇）
+- **`mySubmitStatus`（Phase 26，2026-07-30）**：「查詢我填答了沒」的唯讀 RPC，**認證骨架必須完全沿用
+  `readRecord_`**（`checkLoginThrottle_` → `authRecord` → `recordLoginAttempt_` → 名冊 O 欄「開放進入」
+  判斷）——任何新增的認證入口都不能自己另寫一套，否則就是 Phase 21 防枚舉的旁路（攻擊者改打新的那支
+  即可無限試）。它與登入共用同一組冷卻計數（在這支連錯也會鎖住登入，刻意）；不發 token／draftKeys、
+  不回主鍵值與答案內容，簽名一律走私有 `signatureDataUrl_`
 - **檔案欄 fileID 歸屬驗證（Phase 23，2026-07-14 實作完成，規格見 plan/plan.md Phase 23）**：舊版
   writeRecord 對檔案欄**原樣採用前端傳來的 fileID 且不驗歸屬**（可把他人 fileID 掛進自己的紀錄，
   回條信的 `DriveApp.getFileById` 還會轉成可開的 URL），根因是上傳的 fileID 從來沒地方登記。

@@ -25,6 +25,10 @@
         :draft-saving="draftSaving"
         :view-only="viewOnly"
         :has-last-submit="lastSubmit.length > 0"
+        :submit-count="requestCount.length"
+        :last-submit-at="requestCount.lastTick"
+        :local-draft-at="localDraftAt"
+        :online-draft-at="onlineDraftAt"
         v-model:enable-modify="enableModify"
         @renew="handleRenewClick"
         @save-draft="saveDraftOnline()"
@@ -39,16 +43,8 @@
           </template>
         </el-alert>
         <ErrorAlert :message="scriptError.message" />
-        <el-alert title="填寫狀態" type="info" show-icon v-if="scriptError.message === ''">
-          <template #default>
-            <span style="font-size: 1.5em" v-if="requestCount.length > 0">
-              你填過了{{ requestCount.length }}次，最後一次是在{{ dateConverter(requestCount.lastTick) }}填的{{ tempFound ? "，本機有你之前沒送出的存檔（檔案欄位不會存檔），已載入" : "，系統會在下面顯示你上次填寫的結果" }}，如果你沒有要更新可以不用一直來填寫，關閉視窗即可
-            </span>
-            <span style="font-size: 1.5em" v-if="requestCount.length === 0">
-              共 {{ totalInputs.true }} 題，你沒有填過{{ tempFound ? "，但本機有你之前沒送出的存檔（檔案欄位不會存檔），已載入" : "，系統會自動暫存你輸入的結果，請放心輸入" }}
-            </span>
-          </template>
-        </el-alert>
+        <!-- 「填寫狀態」el-alert 已退役（Phase 27）：次數／最後送出時間／本機與遠端備份
+             全部搬進上方 FormToolbar 的狀態 tag 群，「共 N 題」交給 FieldTimeline 的開場台詞 -->
         <FieldTimeline v-if="!viewOnly" :columns="columnDB" />
         <FormField
           v-for="dataColumn in columnDB"
@@ -332,9 +328,14 @@
         <div class="alertWord" v-if="authColumn.status !== ''">{{ authColumn.status }}</div>
         <div class="captionWord" v-if="authColumn.status === ''">{{ formatHelper(authColumn) }}</div>
       </el-space>
-      <el-button v-if="authtypeCheck()" class="ma1 pa1 xs12" size="large" type="danger" :disabled="checkAuth()" v-show="!loginStatus" v-on:click="loginView()">{{ checkAuth() ? "格式錯誤或有空值，修正後才可以送出" : "送出認證以" + viewTip + "表單" }}</el-button>
+      <!-- 認證後的兩條路並排（都吃上方同一組認證欄位）：紅色＝登入後進去填寫、
+           藍色＝只查自己填了沒（不進填寫 drawer）。窄螢幕由 .login-action-row 的 flex-wrap 疊起 -->
+      <div class="login-action-row" v-show="!loginStatus">
+        <el-button v-if="authtypeCheck()" class="ma1 pa1" size="large" type="danger" :disabled="checkAuth()" v-on:click="loginView()">{{ checkAuth() ? "格式錯誤或有空值，修正後才可以送出" : "登入後" + viewTip + "表單" }}</el-button>
+        <el-button class="ma1 pa1" size="large" type="primary" :disabled="checkAuth()" v-on:click="viewMyStatus()">{{ checkAuth() ? "填好上面的認證欄位才能查詢" : "查詢是否填寫" }}</el-button>
+      </div>
       <el-button v-if="saveSuccessed" class="ma1 pa2 xs12" size="large" type="success" v-on:click="downloadResult()">下載你剛剛填寫的結果</el-button>
-      <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="viewStat()" v-if="!loginStatus">查看填答率統計 </el-button>
+      <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="viewStat()" v-if="!loginStatus">查看填答率統計</el-button>
       <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="sendContact()" v-show="!loginStatus" v-if="contactEmail !== ''">Email給問卷負責人</el-button>
       <AppFooter />
     </el-space>
@@ -465,8 +466,14 @@
     @imported="tempFound = true"
     @renew="handleRenewClick"
   />
-  <LatestDialog ref="latestDialogRef" :sheet="currentSheet" :pkey-name="pkeyName" />
   <StatDialog ref="statDialogRef" :sheet="currentSheet" :sheet-name="currentQuery" />
+  <MyStatusDrawer
+    ref="myStatusDrawerRef"
+    :sheet="currentSheet"
+    :sheet-name="currentQuery"
+    :signature-names="allSignNames"
+    :login-fail-tip="currentSheet ? currentSheet.loginfailTip : ''"
+  />
   <InviteeSignDialog ref="inviteeDialogRef" @closed="handleInviteeClosed" />
   <ConfirmDrawer />
   <LoadingGame v-if="loadingGameVisible" />
@@ -492,8 +499,8 @@ import ErrorAlert from './components/ErrorAlert.vue';
 import MultiSelectDrawer from './components/MultiSelectDrawer.vue';
 import FileUploadDrawer from './components/FileUploadDrawer.vue';
 import TempTransferDrawers from './components/TempTransferDrawers.vue';
-import LatestDialog from './components/LatestDialog.vue';
 import StatDialog from './components/StatDialog.vue';
+import MyStatusDrawer from './components/MyStatusDrawer.vue';
 import JwtCountdownBar from './components/JwtCountdownBar.vue';
 import InviteeSignDialog from './components/InviteeSignDialog.vue';
 import PinCodeInput from './components/PinCodeInput.vue';
@@ -522,6 +529,8 @@ import { useLoadingGame, beginLoading } from './composables/useLoadingGame';
 
 // ===== 基本狀態 =====
 const tempFound = ref(false);
+// 本機自動存檔的時間（ms，0＝不知道/沒有）：給 topbar「本機備份」tag 的 tooltip 用（Phase 27）
+const localDraftAt = ref(0);
 const sheetLoaded = ref(false);
 const currentUID = ref('');
 const currentSID = ref('');
@@ -535,7 +544,6 @@ const submitTip = ref('');
 const contactEmail = ref('');
 const writeAllowed = ref(false);
 const remainEmail = ref(0);
-const pkeyName = ref('');
 const loginStatus = ref(false);
 const googleStatus = ref(undefined);
 const saveSuccessed = ref(undefined);
@@ -586,8 +594,8 @@ const fileDrawer = reactive({ show: false, column: null });
 
 // template refs
 const tempTransfer = ref(null); // TempTransferDrawers
-const latestDialogRef = ref(null); // LatestDialog
 const statDialogRef = ref(null); // StatDialog
+const myStatusDrawerRef = ref(null); // MyStatusDrawer（查詢我填答了沒）
 const signaturePad = ref(null); // el-carousel
 const inviteeDialogRef = ref(null); // InviteeSignDialog
 
@@ -635,6 +643,7 @@ const {
 const {
   draftEnabled,
   draftSaving,
+  onlineDraftAt,
   saveDraftOnline,
   saveDraftForInvite,
   checkOnlineDraft,
@@ -671,11 +680,7 @@ const {
 const HTMLConverter = htmlConverter;
 
 // ===== computed =====
-const totalInputs = computed(() => {
-  return _.countBy(columnDB.value, (column) => {
-    return /F/.test(column.type);
-  });
-});
+// totalInputs（「共 N 題」）已退役（Phase 27）：題數改由 FieldTimeline 的開場台詞自己算
 
 const viewTip = computed(() => {
   return viewOnly.value ? '檢視' : '檢視&填寫';
@@ -728,6 +733,11 @@ watch(
       saveQueue(draftKeys.value, tempQueue);
       // 有欄位的值與原始值（savedContent）不同才算有暫存
       tempFound.value = hasFilledData(tempQueue, newValue);
+      // 「本機備份」tag 的時間（Phase 27）：tempStorage 的 queue 沒有時間戳，
+      // 只有本次登入期間自己存的才知道時間（登入時載到的舊暫存留 0＝tag 只說「有」）
+      if (tempFound.value) {
+        localDraftAt.value = dayjs().valueOf();
+      }
     }
   },
   { deep: true }
@@ -908,10 +918,6 @@ async function openSheet(sid) {
           authDB.value = [gmailPrimary];
         }
       }
-      let pkey = findPrimaryKey(headers);
-      if (pkey !== undefined) {
-        pkeyName.value = pkey.name;
-      }
       writeTick.value = 0;
       loginDialog.show = true;
       sheetsDialog.show = false;
@@ -921,14 +927,14 @@ async function openSheet(sid) {
   }
 }
 
-// 最後填寫者查詢對話框（LatestDialog）的進入點；目前列表頁按鈕停用中，保留供還原
-function viewLatest() {
-  latestDialogRef.value.open();
-}
-defineExpose({ viewLatest });
-
 function viewStat() {
   statDialogRef.value.open();
+}
+
+// 「查詢我填答了沒」的進入點：沿用登入頁上方已填的認證欄位（與 loginView 傳給 readRecord
+// 同一份 plainClone），只查自己的送出統計、不進填寫問卷的 drawer
+function viewMyStatus() {
+  myStatusDrawerRef.value.open(plainClone(authDB.value));
 }
 
 // ===== 驗證與流程控制 =====
@@ -1698,6 +1704,21 @@ onMounted(() => {
 
 .formFooter__buttons .el-button {
   flex: 1 1 auto;
+  margin-left: 0;
+}
+
+/* 登入頁的兩條路（登入後填寫／查詢是否填寫）：桌機並排各半，
+   窄螢幕由 flex-wrap 疊成兩列（flex-basis 讓長文案按鈕先換行、不被壓扁）。
+   填答率統計不在這一列，維持自己整寬一列 */
+.login-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+.login-action-row .el-button {
+  flex: 1 1 240px;
+  min-width: 0;
   margin-left: 0;
 }
 

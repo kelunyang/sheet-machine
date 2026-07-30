@@ -2,6 +2,40 @@
 
 ## 待處理
 
+### 28. 填寫狀態上 topbar：會自己縮圖的狀態 tag 群＋FieldTimeline 小人開場台詞（2026-07-30 設計定案，規格見 plan.md Phase 27）✅
+
+**2026-07-30 實作完成（未部署）**：新增 `FormStatusTags.vue`（三顆 tag＋60 秒縮圖動畫，重新展開訊號走
+離散 `sig` 不走 tooltip 文字——本機存檔時間每次打字都在動）、FormToolbar 加 `.form-toolbar__row`
+左右對開＋`#peek` 也放一份、`useDraft` 新增 `onlineDraftAt`、App.vue 新增 `localDraftAt` 並移除
+「填寫狀態」alert 與 `totalInputs`、FieldTimeline 加小人開場台詞氣泡（手足元素避開軌道 overflow 裁切）。
+lint／test（417 綠）／build（184.31 KB）全過。
+
+- 填寫 drawer 頂端那條 1.5em 的「填寫狀態」alert 整條移除，資訊改成 FormToolbar 內與「暫存 ▾」
+  同列左右對開的三顆 tag：`✓ 已填過 N 次`／`本機備份`／`遠端備份`（沒送出過又沒備份＝零 tag）。
+- tag 兩態：出現 60 秒後文字縮掉只留 icon（＋次數數字），狀態變化重新展開並重新計時，
+  縮圖態點一下暫時展開 5 秒；tooltip 兩態都保留（最後送出時間／雲端暫存時間）。
+- 手機：tag 群同時渲染進 `CollapsibleControls` 的 `#peek`，往下捲收合後仍露在 handle 上方。
+- 新 state：`useDraft` 的 `onlineDraftAt`（探到雲端草稿或暫存成功就記，不論使用者載不載入）、
+  App.vue 的 `localDraftAt`（tempStorage 的 queue 沒時間戳，舊暫存只能顯示「有」）。
+- 「共 N 題」改由 FieldTimeline 小人載入 5 秒後的氣泡台詞承載，6 秒後自動淡出；`totalInputs` 退役。
+
+### 27. 「查詢我填答了沒」需認證的唯讀查詢＋`LatestDialog` 死碼退役（2026-07-30 設計定案，規格見 plan.md Phase 26）✅
+
+**2026-07-30 實作完成（未部署）**：Code.js 新增 `mySubmitStatus`（`logged_` 包，認證骨架完全沿用
+`readRecord_`：`checkLoginThrottle_` → `authRecord` → `recordLoginAttempt_` → 名冊 O 欄「開放進入」
+判斷；不發 token/draftKeys、不回主鍵值與答案內容）＋純函數 `summarizeUserRecords_`（次數／每次時間／
+最後一次 modified／最後一列簽名 fileID）；簽名走既有 `signatureDataUrl_`。前端新增
+`MyStatusDrawer.vue`（btt 100%、`.drawer-flow-title`、**掛 loading 小遊戲**、el-timeline 每次送出時間
+超過 5 次收 collapse、簽名圖標題取 allSignNames 退回「簽名 N」），登入頁「查看填答率統計」那列切成
+兩顆並排按鈕（`.login-query-row`，第二顆 `:disabled="checkAuth()"` 沿用上方已填的認證欄位、不重畫
+輸入框）。退役 `duplicateSubmits`／`latestSubmits`／`LatestDialog.vue`／`viewLatest`／`pkeyName`。
+測試新增 `tests/mySubmitStatus.test.js`（9 例，含「連錯滿 loginFailMax 回 throttled 且該次不進
+`_logins`」與「回傳 JSON 不含主鍵值」）；lint／test（417 綠）／build 全過。
+
+- 動機：原本知道「我送出了沒」只能走完整登入，而登入成功直接進填寫 drawer，狀態被埋在問卷上方。
+- 舊 `duplicateSubmits` **不驗身分**（知道別人主鍵值就能查別人填過沒）且入口早已停用＝死碼，一併退役。
+- 刻意取捨：與登入共用同一組冷卻計數（在這裡連錯也鎖登入）——不然它就是繞過 Phase 21 的第二扇門。
+
 ### 26. email 紀錄搬進暫存表 `_email` 分頁：emailLog property 退役＋五種信全記（2026-07-17 設計定案，規格見 plan.md Phase 25）✅
 
 **2026-07-17 實作完成（未部署）**：Code.js 新增 `EMAIL_SHEET_NAME`/`EMAIL_HEADER`（8 欄）＋
