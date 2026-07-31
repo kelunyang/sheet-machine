@@ -76,7 +76,7 @@ function selectedListRow_(listSS) {
     ui.alert("你點選的是標題列，請點選第 2 列起的問卷資料列");
     return null;
   }
-  let row = sheet.getRange(rowIndex, 1, 1, 16).getValues()[0];
+  let row = sheet.getRange(rowIndex, 1, 1, 15).getValues()[0];
   if (row[0].toString().trim() === "") {
     ui.alert("第 " + rowIndex + " 列沒有表單名稱，請點選有資料的列");
     return null;
@@ -153,26 +153,22 @@ function buildRecordSheet_(referSS, referID, formName) {
   return { recordSS: recordSS, protectWarning: protectWarning };
 }
 
-// 掛上問卷列表新列：固定ID＝現有最大值+1，顯示／開放進入預設「否」。回傳 {rowIndex, fixedId, dueMs, viewMs}
+// 掛上問卷列表新列：顯示／開放進入預設「否」。回傳 {rowIndex, dueMs, viewMs}
+// 問卷列表為 A~O 共 15 欄（舊「固定ID」欄已於 2026-07-31 整欄刪除，原 O/P 前移成 N/O）。
+// 問卷識別一律用 B 欄 refer（Drive ID，本身就唯一，深連結 ?sheet= 用它）。
 function appendListRow_(listSS, formName, referID, recordID, days) {
   let nowMs = (new Date()).getTime();
   let dueMs = nowMs + days * 24 * 60 * 60 * 1000;
   let viewMs = dueMs + 14 * 24 * 60 * 60 * 1000;
   let listSheet = listSS.getSheetByName(LIST_SHEET_NAME);
-  let listArr = listSheet.getDataRange().getValues();
-  let maxFixedId = 0;
-  for (let i = 1; i < listArr.length; i++) {
-    let fixedId = parseInt(listArr[i][13]);
-    if (!isNaN(fixedId) && fixedId > maxFixedId) { maxFixedId = fixedId; }
-  }
   listSheet.appendRow([
     formName, referID, recordID, dueMs, viewMs,
     "是", "",
     "請依照各欄位說明填寫", "請輸入認證資料登入", "已收到你的填答，感謝", "登入失敗，請確認輸入的資料",
-    "否", Session.getActiveUser().getEmail(), maxFixedId + 1, "否", "否"
+    "否", Session.getActiveUser().getEmail(), "否", "否"
   ]);
-  logger(formName, "新增問卷（列 " + listSheet.getLastRow() + "，固定ID " + (maxFixedId + 1) + "）", listSS);
-  return { rowIndex: listSheet.getLastRow(), fixedId: maxFixedId + 1, dueMs: dueMs, viewMs: viewMs };
+  logger(formName, "新增問卷（列 " + listSheet.getLastRow() + "）", listSS);
+  return { rowIndex: listSheet.getLastRow(), dueMs: dueMs, viewMs: viewMs };
 }
 
 // ===== 功能 1：新增問卷 =====
@@ -359,16 +355,35 @@ function runExport_(listSS, sheetData, options) {
       }
     }
   }
+  // 標題列先取出來但不能直接貼：資料列會被 injectRefer 重排（簽名檔ID 一格拆成 n 格
+  // URL、非題目欄位整欄丟掉），照抄的表頭跟資料對不齊——簽名格 1 格時剛好巧合對上，
+  // 2 格以上整排答案往右錯一格。下面算出簽名格數後用同一套排法重組表頭。
   let headerRows = recordArr.slice(0, Math.min(headerCount, recordArr.length));
-  if(headerRows.length > 0) {
-    newSheet.getRange(1, 1, headerRows.length, headerRows[0].length).setValues(headerRows);
-  }
   recordArr.splice(0, headerCount);
+  // 簽名格數取全表最大值，每列一律補滿（沒簽的補「無簽名」），讓每一列與表頭同寬同序
+  let sigCount = 0;
+  for(let i=0; i<recordArr.length; i++) {
+    let cell = recordArr[i][3] === undefined ? "" : recordArr[i][3].toString();
+    let n = cell === "" ? 0 : cell.split(";").length;
+    if(n > sigCount) { sigCount = n; }
+  }
+  let referCtx = buildReferContext_(headers, referArr);
+  referCtx.sigCount = sigCount;
+  // getDataRange 回來的陣列是矩形，全表同寬；表頭與資料列共用同一組來源欄索引
+  let recordWidth = recordArr.length > 0 ? recordArr[0].length
+    : (headerRows.length > 0 ? headerRows[0].length : SIG_COL_ + 1);
+  referCtx.dataCols = exportDataCols_(referCtx, recordWidth);
+  if(headerRows.length > 0) {
+    let mappedHeaders = [];
+    for(let i=0; i<headerRows.length; i++) {
+      mappedHeaders.push(remapHeaderRow_(headerRows[i], referCtx));
+    }
+    newSheet.getRange(1, 1, mappedHeaders.length, mappedHeaders[0].length).setValues(mappedHeaders);
+  }
   let resultArr = [];
   // 依主鍵一次分組（原本對每個主鍵各掃一次全表是 O(K×N)），injectRefer 的查表索引也一次建好
   let grouped = _.groupBy(recordArr, (row) => { return row[2].toString(); });
   let pirmaryKeys = _.keys(grouped);
-  let referCtx = buildReferContext_(headers, referArr);
   logger(sheetData[0].toString(), "原始資料有" + recordArr.length + "行，計算唯一值之後可以輸出" + pirmaryKeys.length + "行", listSS);
   let dupMsgs = [];
   for(let i=0; i<pirmaryKeys.length; i++) {
@@ -413,7 +428,9 @@ function runExport_(listSS, sheetData, options) {
         }
       }
     }
-    logger(sheetData[0].toString(), "長度對不起來的資料有" + lengthnotMatch + "條，如果大於0請檢查寫入表的資料和程式碼是否正確（簽名檔遺失？）", listSS);
+    // 簽名格補滿之後每列本來就同寬，這裡只是最後一道防線；真的大於 0 代表寫入表結構
+    // 有預期外的狀況（欄數不一致），不再是「簽名檔遺失」那種常態
+    logger(sheetData[0].toString(), "長度對不起來的資料有" + lengthnotMatch + "條，如果大於0代表寫入表的欄數不一致，請檢查資料和程式碼是否正確", listSS);
     let newRange = newSheet.getRange(headerCount + 1,1,resultArr.length, maxRow);
     newRange.setValues(resultArr);
     SpreadsheetApp.flush();
@@ -465,41 +482,68 @@ function driveFileUrl_(fileID) {
   return "https://drive.google.com/open?id=" + fileID;
 }
 
+// 紀錄表固定欄：0 送出時間／1 有效／2 主鍵／3 簽名檔ID／4 分組，題目答案從 5 起
+const DATA_FROM_ = 5;
+const SIG_COL_ = 3;
+
+// 輸出時要保留的來源欄索引（題目區）：對照表單有設定就只留有設定的欄
+// （type 不在 /G|O|C|A|P|F/ 的欄不輸出），沒設定（degenerate）就整段原樣輸出。
+// 表頭與資料列共用這份索引，才不會因為「資料丟欄、表頭沒丟」而錯位。
+function exportDataCols_(ctx, width) {
+  let cols = [];
+  let filtered = ctx.headers.length > 0;
+  for(let k=DATA_FROM_; k<width; k++) {
+    if(!filtered || ctx.headerByPos[k - DATA_FROM_] !== undefined) { cols.push(k); }
+  }
+  return cols;
+}
+
+// 把紀錄表的標題列改成輸出用排法：固定欄拿掉簽名檔ID（值改由後面的 URL 欄承接）、
+// 插入 sigCount 個簽名欄、題目區只留 dataCols。有寫東西的那一列（欄位名稱列）給
+// 「簽名檔連結N」，其餘（欄位ID列）留空。
+function remapHeaderRow_(headerRow, ctx) {
+  let cell = (i) => { return headerRow[i] === undefined ? "" : headerRow[i]; };
+  let mapped = [cell(0), cell(1), cell(2), cell(4)];
+  let labeled = cell(SIG_COL_).toString().trim() !== "";
+  for(let k=0; k<ctx.sigCount; k++) {
+    mapped.push(labeled ? "簽名檔連結" + (k + 1) : "");
+  }
+  for(let k=0; k<ctx.dataCols.length; k++) {
+    mapped.push(cell(ctx.dataCols[k]));
+  }
+  return mapped;
+}
+
 function injectRefer(key, ctx, row) { //根據簽名挪移位置，然後把檔案ID轉換成url
-  let returnRow = [];
-  let dataFrom = 5;
+  // 名冊回填：主鍵查得到才做（查不到就照填答者原本填的值輸出），
+  // 但排法一律走同一套——原本查不到名冊會整列吐紀錄表的原始排法，混在輸出裡欄位全錯開
   if(ctx.pKeyPos > -1) {
     let referRow = ctx.referMap[key];
     if(referRow !== undefined) {
       for(let i=0; i<ctx.headers.length; i++) {
         let h = ctx.headers[i];
         if(!/F/.test(h.type)) {
-          row[dataFrom + h.pos] = /L|N|M|P|G/.test(h.format) ? "📝" + referRow[h.pos].toString() : referRow[h.pos].toString();
+          row[DATA_FROM_ + h.pos] = /L|N|M|P|G/.test(h.format) ? "📝" + referRow[h.pos].toString() : referRow[h.pos].toString();
         }
       }
-      returnRow.push(row[0]);
-      returnRow.push(row[1]);
-      returnRow.push(row[2]);
-      returnRow.push(row[4]);
-      let signatures = row[3].toString() === "" ? [] : row[3].toString().split(";");
-      for(let k=0; k<signatures.length; k++) {
-        returnRow.push(driveFileUrl_(signatures[k]));
-      }
-      for(let k=dataFrom; k<row.length; k++) {
-        let columnConfig = ctx.headerByPos[k - dataFrom];
-        if(columnConfig !== undefined) {
-          if(/F/.test(columnConfig.type) && /F/.test(columnConfig.format)) {
-            returnRow.push(row[k].toString() !== "" ? driveFileUrl_(row[k].toString()) : "無檔案");
-          } else {
-            returnRow.push(row[k].toString());
-          }
-        }
-      }
-    } else {
-      returnRow = row;
     }
-  } else {
-    returnRow = row;
+  }
+  let cell = (i) => { return row[i] === undefined ? "" : row[i]; };
+  let returnRow = [cell(0), cell(1), cell(2), cell(4)];
+  let signatures = cell(SIG_COL_).toString() === "" ? [] : cell(SIG_COL_).toString().split(";");
+  // 固定補滿 sigCount 格：少簽的人補「無簽名」，不再讓後面的答案整排往左縮
+  for(let k=0; k<ctx.sigCount; k++) {
+    let sig = k < signatures.length ? signatures[k].toString().trim() : "";
+    returnRow.push(sig !== "" ? driveFileUrl_(sig) : "無簽名");
+  }
+  for(let i=0; i<ctx.dataCols.length; i++) {
+    let k = ctx.dataCols[i];
+    let columnConfig = ctx.headerByPos[k - DATA_FROM_];
+    if(columnConfig !== undefined && /F/.test(columnConfig.type) && /F/.test(columnConfig.format)) {
+      returnRow.push(cell(k).toString() !== "" ? driveFileUrl_(cell(k).toString()) : "無檔案");
+    } else {
+      returnRow.push(cell(k).toString());
+    }
   }
   return returnRow;
 }
@@ -659,7 +703,7 @@ function runScheduleRow_(listSS, scheduleSheet, row, rowIndex) {
     note("問卷列號「" + row[0].toString() + "」不是有效的列號，這條排程沒有執行");
     return { status: "error", message: "列號無效" };
   }
-  let sheetData = listSheet.getRange(listRowIndex, 1, 1, 16).getValues()[0];
+  let sheetData = listSheet.getRange(listRowIndex, 1, 1, 15).getValues()[0];
   let actualName = sheetData[0].toString().trim();
   if (actualName === "") {
     note("問卷列表第 " + listRowIndex + " 列沒有表單名稱，這條排程沒有執行");
@@ -1104,7 +1148,7 @@ function checkSheetFormat() {
 // 對話框用的檢查回呼（google.script.run）：回純文字報告
 function runCheckForRowIndex(rowIndex) {
   let listSS = SpreadsheetApp.getActiveSpreadsheet();
-  let row = listSS.getSheetByName(LIST_SHEET_NAME).getRange(rowIndex, 1, 1, 16).getValues()[0];
+  let row = listSS.getSheetByName(LIST_SHEET_NAME).getRange(rowIndex, 1, 1, 15).getValues()[0];
   let report = runFullCheck_(row);
   logger(row[0].toString(), "格式檢查：錯誤 " + report.errors.length + " 條、警告 " + report.warnings.length + " 條", listSS);
   if (report.errors.length === 0 && report.warnings.length === 0) {
@@ -1115,7 +1159,7 @@ function runCheckForRowIndex(rowIndex) {
 
 // 問卷列表單列的設定檢查（布林欄、時間戳）
 function checkListRow_(row, report) {
-  let boolColumns = [[5, "F 預設修改"], [11, "L 顯示"], [14, "O 開放進入"], [15, "P 亂數出題"]];
+  let boolColumns = [[5, "F 預設修改"], [11, "L 顯示"], [13, "N 開放進入"], [14, "O 亂數出題"]];
   for (let i = 0; i < boolColumns.length; i++) {
     let value = row[boolColumns[i][0]].toString().trim();
     if (value !== "是" && value !== "否" && value !== "") {
@@ -1458,8 +1502,8 @@ function checkRecordAlignment_(recordSSID, referSS, report) {
 // ===== 功能 4：修改問卷設定 =====
 
 // 對點選列開設定對話框：時間用 datetime-local 日曆選（存回毫秒 timestamp）、
-// 布林欄用下拉，不用再手查 timestamp。B/C/N（對照表單ID/新表單ID/固定ID）唯讀——
-// 換表等於換問卷，請走「新增問卷」。
+// 布林欄用下拉，不用再手查 timestamp。B/C（對照表單ID/新表單ID）唯讀——
+// 換表等於換問卷，請走「新增問卷」。存檔整列覆寫 A~O 共 15 欄（舊「固定ID」欄已刪除）。
 function editSheetSettings() {
   let listSS = SpreadsheetApp.getActiveSpreadsheet();
   let selected = selectedListRow_(listSS);
@@ -1480,9 +1524,8 @@ function editSheetSettings() {
     loginfailTip: row[10].toString(),
     visible: row[11].toString().trim(),
     email: row[12].toString(),
-    fixedId: row[13].toString(),
-    writeAllowed: row[14].toString().trim(),
-    randomQ: row[15].toString().trim()
+    writeAllowed: row[13].toString().trim(),
+    randomQ: row[14].toString().trim()
   };
   let html = HtmlService.createHtmlOutput(settingsDialogHtml_(data)).setWidth(560).setHeight(780);
   ui.showModalDialog(html, "修改問卷設定：" + data.name);
@@ -1492,7 +1535,7 @@ function editSheetSettings() {
 function saveSheetSettings(data) {
   let listSS = SpreadsheetApp.getActiveSpreadsheet();
   let sheet = listSS.getSheetByName(LIST_SHEET_NAME);
-  let current = sheet.getRange(data.rowIndex, 1, 1, 16).getValues()[0];
+  let current = sheet.getRange(data.rowIndex, 1, 1, 15).getValues()[0];
   // 防呆：開視窗到存檔之間列被動過（排序、插刪列）就拒寫，避免寫到別份問卷
   if (current[1].toString().trim() !== data.refer.toString().trim()) {
     return { ok: false, message: "這一列的內容已經變動（對照表單ID對不上），可能有人排序或插刪列，請關閉視窗重新點選" };
@@ -1525,11 +1568,10 @@ function saveSheetSettings(data) {
     data.loginfailTip.toString(),
     data.visible,
     data.email.toString().trim(),
-    current[13], // N 固定ID 唯讀（深連結用，改了舊連結會斷）
     data.writeAllowed,
     data.randomQ
   ];
-  sheet.getRange(data.rowIndex, 1, 1, 16).setValues([newRow]);
+  sheet.getRange(data.rowIndex, 1, 1, 15).setValues([newRow]);
   logger(data.name.toString().trim(), "修改問卷設定（列 " + data.rowIndex + "）", listSS);
   return { ok: true, message: "已儲存" };
 }
@@ -1619,17 +1661,14 @@ function settingsDialogHtml_(data) {
     '<label>填寫完畢備註語 <span class="hint">（支援 markdown）</span><textarea id="submitTip"></textarea></label>' +
     '<label>登入失敗備註語 <span class="hint">（支援 markdown）</span><textarea id="loginfailTip"></textarea></label>' +
     '<label>管理員Email<input type="text" id="email"></label>' +
-    '<div class="row2">' +
-    '<div><label>固定ID <span class="hint">（唯讀）</span><input type="text" id="fixedId" class="readonly" readonly></label></div>' +
-    '<div><label>對照表單ID <span class="hint">（唯讀，換表請走新增問卷）</span><input type="text" id="refer" class="readonly" readonly></label></div>' +
-    '</div>' +
+    '<label>對照表單ID <span class="hint">（唯讀，換表請走新增問卷）</span><input type="text" id="refer" class="readonly" readonly></label>' +
     '<button id="saveBtn">儲存</button><div id="msg"></div>' +
     '<script>' +
     'var DATA = ' + json + ';' +
     MD_EDITOR_JS_ +
     'function pad(n){return (n<10?"0":"")+n}' +
     'function msToLocal(ms){if(isNaN(ms)||ms===null){return ""}var d=new Date(ms);return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate())+"T"+pad(d.getHours())+":"+pad(d.getMinutes())}' +
-    'var fields=["name","signatures","loginTip","comment","submitTip","loginfailTip","email","fixedId","refer"];' +
+    'var fields=["name","signatures","loginTip","comment","submitTip","loginfailTip","email","refer"];' +
     'fields.forEach(function(f){document.getElementById(f).value=DATA[f]});' +
     'document.getElementById("due").value=msToLocal(DATA.dueMs);' +
     'document.getElementById("view").value=msToLocal(DATA.viewMs);' +
@@ -1667,7 +1706,7 @@ function openFieldWizard() {
   if (sheet.getName() === LIST_SHEET_NAME) {
     let rowIndex = sheet.getActiveRange().getRow();
     if (rowIndex >= 2) {
-      let row = sheet.getRange(rowIndex, 1, 1, 16).getValues()[0];
+      let row = sheet.getRange(rowIndex, 1, 1, 15).getValues()[0];
       if (row[0].toString().trim() !== "" && /^[-\w]+$/.test(row[1].toString().trim())) {
         context.referID = row[1].toString().trim();
         context.formName = row[0].toString().trim();
@@ -2035,4 +2074,69 @@ function columnLetter_(index) {
 function maskValue_(value) {
   if (value.length <= 2) { return value; }
   return value.substring(0, 1) + "***" + value.substring(value.length - 1);
+}
+
+// ===== 一次性遷移：刪除舊「固定ID」欄（2026-07-31） =====
+
+// 舊版問卷列表是 A~P 共 16 欄，N 欄為「固定ID」（給 URL 參數直開問卷用的短代號）。
+// 該設計已無用武之地——深連結帶的一直是 B 欄 refer，且系統包在 Google Sites 裡帶不了
+// URL 參數——故整欄刪除，原 O（開放進入）、P（亂數出題）前移成 N、O，全表變 15 欄。
+//
+// 這是全系統唯一一處 deleteColumn，刻意的一次性例外：禁刪的鐵律是為了「列」（位移會
+// 錯位到別人的資料、難復原），這裡動的是欄、對象是每個管理者一份的設定表、由人手動
+// 離峰執行、且執行前後都能肉眼核對。不要拿它當「以後可以刪列/刪欄」的先例。
+//
+// 用法：在問卷列表試算表的 Apps Script 編輯器手動執行 dropFixedIdColumn()，看執行紀錄。
+// 冪等：已遷移過會直接回報並跳過。表頭對不上一律停手（fail-safe，不猜）。
+//
+// ⚠️ 部署順序：這支與新版 src/Code.js **必須同時到位**。只做一邊會讓欄位索引錯開，
+// 後端把「開放進入」讀成別欄的值 → 全部問卷變成無法登入填寫。建議流程：
+// 先關閉入口（或挑離峰）→ 跑這支 → 立刻 clasp push + 部署新版 web app → 實測登入。
+function dropFixedIdColumn() {
+  let listSS = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = listSS.getSheetByName(LIST_SHEET_NAME);
+  if (sheet === null) {
+    console.log("找不到「" + LIST_SHEET_NAME + "」分頁，沒有動作");
+    return;
+  }
+  let lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) {
+    console.log("有其他程序在跑，本次沒有動作");
+    return;
+  }
+  try {
+    let lastColumn = sheet.getLastColumn();
+    let header = sheet.getRange(1, 1, 1, Math.max(lastColumn, 1)).getValues()[0];
+    let nameAt = function (index) {
+      return header[index] === undefined ? "" : header[index].toString().trim();
+    };
+    // 已遷移：N 欄就是「開放進入」
+    if (nameAt(13) === "開放進入" && nameAt(14) === "亂數出題") {
+      console.log("這份問卷列表已經是新版 15 欄格式（N 開放進入、O 亂數出題），沒有動作");
+      return;
+    }
+    // 未遷移的樣子：N 固定ID、O 開放進入、P 亂數出題。三者有一個對不上就停手
+    if (nameAt(13) !== "固定ID" || nameAt(14) !== "開放進入" || nameAt(15) !== "亂數出題") {
+      console.log("表頭與預期不符，為避免刪錯欄已停手。目前 N/O/P 欄標題是「" +
+        nameAt(13) + "」／「" + nameAt(14) + "」／「" + nameAt(15) +
+        "」，預期「固定ID」／「開放進入」／「亂數出題」。請人工確認後再處理");
+      return;
+    }
+    sheet.deleteColumn(14); // N 欄（1-based 第 14 欄）
+    SpreadsheetApp.flush();
+    // 刪完立刻回頭核對，沒對上就大聲喊（此時資料已動，只能靠人工還原）
+    let after = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 1)).getValues()[0];
+    let afterN = after[13] === undefined ? "" : after[13].toString().trim();
+    let afterO = after[14] === undefined ? "" : after[14].toString().trim();
+    if (afterN !== "開放進入" || afterO !== "亂數出題") {
+      console.error("刪欄後表頭核對失敗！現在 N/O 欄是「" + afterN + "」／「" + afterO +
+        "」，請立刻用試算表的版本紀錄（檔案 → 版本紀錄）還原並回報");
+      return;
+    }
+    logger("（全表）", "一次性遷移：刪除 N 欄「固定ID」，開放進入/亂數出題前移為 N/O", listSS);
+    console.log("完成：已刪除「固定ID」欄，問卷列表現在是 A~O 共 15 欄。" +
+      "請立刻部署新版 web app（src/Code.js），並實測一份問卷能正常登入");
+  } finally {
+    lock.releaseLock();
+  }
 }
