@@ -2328,9 +2328,29 @@ plan/issue.md（「三哨兵關係」一節）。
   CSV 格式與填寫 drawer 的「下載上次結果」一致）——使用者在同一個 drawer 就能看簽名＋拿檔案，
   不必為了下載而登入進填寫流程。填寫 drawer 的那顆按鈕保留（兩邊都有）。
 
+### 查詢 drawer 的活動時間線：送出＋登入合併倒序（2026-07-31 補）
+
+- `mySubmitStatus` 增回 `logins`／`loginLogAvailable`／`loginLogTruncated`：本人在這份問卷的
+  登入嘗試（`{tick, success}`，新到舊）。資料源是 Phase 21 的 `_logins` 稽核表，**回的是本人自己的
+  嘗試紀錄**，認證強度與 `readRecord` 相同；不回帳號值本身（前端已知是誰在查）。
+- 讀取成本上限刻意寫死：`myLoginHistory_` 只回掃 `_logins` **最後 3000 列**（純 append 保證列不位移，
+  尾端就是最近的）、最多回 **50 筆**；更早的登入不顯示（`loginLogTruncated` 交前端說明）——
+  這是成本上限不是資料遺失，稽核仍以整張 `_logins` 為準。純函數 `filterLoginRows_` 由尾往前掃、
+  湊滿即停手，時間欄非數字的列（表頭殘留、髒資料）跳過。
+- `draftSheetID` 未設或 `_logins` 不存在＝`loginLogAvailable:false`（靜默降級，比照 `appendLoginLog_`
+  的「未設則不記」），時間線只剩送出紀錄。
+- 前端 MyStatusDrawer 把 `history`（送出）與 `logins` 合併成**一條倒序 el-timeline**：
+  送出＝實心點（首次 success／修改 primary，FA `fa-paper-plane`／`fa-pen-to-square`）、
+  登入＝空心點（成功 info `fa-right-to-bracket`／失敗 danger `fa-triangle-exclamation`）；
+  同毫秒時送出排在登入之上（送出必定發生在該次登入之後）。簽名維持在時間線之後（最後展示）。
+- 說明文字寫明「本次查詢本身也算一次登入嘗試」——查詢走的就是 `recordLoginAttempt_`，
+  使用者會在自己的時間線最上面看到剛剛這一筆，不說明會被當成異常。
+
 ### 驗收
 
 - `npm run lint`、`npm test`、`npm run build` 全過。
+- 查詢 drawer：時間線最新在上、送出與登入交錯正確；連錯幾次後再查，失敗列以紅色空心點出現；
+  未啟用線上暫存的環境確認只剩送出紀錄且說明文字對應。
 - 實機四種組合：未填過無 tag／已填過／本機備份／遠端備份；60 秒後三顆都縮圖、點一下暫時展開；
   按下線上暫存後「遠端備份」重新亮文字；手機往下捲確認 tag 從 peek 露出；
   小人台詞 5 秒後出現、6 秒後自動消失。

@@ -36,6 +36,13 @@ lint／test（417 綠）／build（184.31 KB）全過。
 - 舊 `duplicateSubmits` **不驗身分**（知道別人主鍵值就能查別人填過沒）且入口早已停用＝死碼，一併退役。
 - 刻意取捨：與登入共用同一組冷卻計數（在這裡連錯也鎖登入）——不然它就是繞過 Phase 21 的第二扇門。
 
+**2026-07-31 補：查詢 drawer 加登入紀錄，時間線改「送出＋登入」合併倒序**——`mySubmitStatus`
+增回 `logins`／`loginLogAvailable`／`loginLogTruncated`（`myLoginHistory_` 讀 `_logins`，尾端回掃
+3000 列上限、最多 50 筆；純函數 `filterLoginRows_` 由尾往前掃、湊滿即停）；MyStatusDrawer 合併成
+一條 el-timeline（最新在上，>12 筆時只列最近 8 筆、其餘收 collapse；送出實心點／登入空心點，
+圖示走 FA），簽名維持在時間線之後。說明文字寫明「本次查詢本身也算一次登入嘗試」。
+測試 +3 例（filterLoginRows_ 過濾／limit／髒列跳過）；lint／test（422 綠）／build 全過。
+
 ### 26. email 紀錄搬進暫存表 `_email` 分頁：emailLog property 退役＋五種信全記（2026-07-17 設計定案，規格見 plan.md Phase 25）✅
 
 **2026-07-17 實作完成（未部署）**：Code.js 新增 `EMAIL_SHEET_NAME`/`EMAIL_HEADER`（8 欄）＋

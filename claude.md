@@ -248,7 +248,9 @@ formatDetector('F', 'F', column)  // format=F, type=F
   `readRecord_`**（`checkLoginThrottle_` → `authRecord` → `recordLoginAttempt_` → 名冊 O 欄「開放進入」
   判斷）——任何新增的認證入口都不能自己另寫一套，否則就是 Phase 21 防枚舉的旁路（攻擊者改打新的那支
   即可無限試）。它與登入共用同一組冷卻計數（在這支連錯也會鎖住登入，刻意）；不發 token／draftKeys、
-  不回主鍵值與答案內容，簽名一律走私有 `signatureDataUrl_`
+  不回主鍵值，簽名一律走私有 `signatureDataUrl_`。回傳的 `lastAnswers`（下載上次結果用）與 `logins`
+  （本人在 `_logins` 的登入嘗試，供查詢 drawer 的倒序活動時間線；`myLoginHistory_` 回掃尾端 3000 列、
+  最多 50 筆，draftSheetID 未設＝靜默降級）都是**本人自己的資料**，認證強度與 `readRecord` 相同
 - **檔案欄 fileID 歸屬驗證（Phase 23，2026-07-14 實作完成，規格見 plan/plan.md Phase 23）**：舊版
   writeRecord 對檔案欄**原樣採用前端傳來的 fileID 且不驗歸屬**（可把他人 fileID 掛進自己的紀錄，
   回條信的 `DriveApp.getFileById` 還會轉成可開的 URL），根因是上傳的 fileID 從來沒地方登記。

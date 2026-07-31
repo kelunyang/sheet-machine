@@ -65,6 +65,13 @@ function loadGas({ recordRows = [], listRow = makeListRow(), draftEnabled = true
   const loginSheetFake = {
     getLastRow: () => loginRows.length,
     getDataRange: () => ({ getValues: () => loginRows.map((r) => [...r]) }),
+    // myLoginHistory_ 的尾端回掃（列號 1-based，含表頭語意）
+    getRange: (row, col, numRows, numCols) => ({
+      getValues: () =>
+        loginRows
+          .slice(row - 1, row - 1 + numRows)
+          .map((r) => [...r].slice(col - 1, col - 1 + numCols)),
+    }),
     appendRow: (row) => loginRows.push([...row]),
     setFrozenRows: () => {},
   };
@@ -127,7 +134,7 @@ function loadGas({ recordRows = [], listRow = makeListRow(), draftEnabled = true
     'ScriptApp',
     'Session',
     'CacheService',
-    `${source}\n;return { mySubmitStatus_, summarizeUserRecords_, answersFromRecordRow_, deriveDraftKey_, loginFailMax_ };`
+    `${source}\n;return { mySubmitStatus_, summarizeUserRecords_, answersFromRecordRow_, filterLoginRows_, deriveDraftKey_, loginFailMax_ };`
   );
   const gas = factory(
     { load: () => _ },
@@ -200,6 +207,36 @@ describe('純函數：summarizeUserRecords_', () => {
     ];
     expect(gas.summarizeUserRecords_(rows, PKEY).signIDs).toEqual(['SIGN_A', 'SIGN_B']);
     expect(gas.summarizeUserRecords_([makeRecordRow(1000)], PKEY).signIDs).toEqual([]);
+  });
+});
+
+describe('純函數：filterLoginRows_（查詢 drawer 的登入時間線）', () => {
+  // _logins 列：A ms／B refer／C 明文帳號值／D 結果
+  const rows = [
+    [1000, REFER, PKEY, '失敗'],
+    [2000, 'OTHER_REFER', PKEY, '成功'],
+    [3000, REFER, 'OTHER_USER', '成功'],
+    [4000, REFER, PKEY, '成功'],
+    ['timestamp 時間(ms)', REFER, PKEY, '成功'],
+  ];
+
+  it('只回同一問卷同一帳號的列，且由新到舊', () => {
+    const { gas } = loadGas();
+    expect(gas.filterLoginRows_(rows, REFER, PKEY, 50)).toEqual([
+      { tick: 4000, success: true },
+      { tick: 1000, success: false },
+    ]);
+  });
+
+  it('limit 生效（湊滿就停手，保留最新的幾筆）', () => {
+    const { gas } = loadGas();
+    expect(gas.filterLoginRows_(rows, REFER, PKEY, 1)).toEqual([{ tick: 4000, success: true }]);
+  });
+
+  it('時間欄非數字的列（表頭殘留）跳過，查無資料回空陣列', () => {
+    const { gas } = loadGas();
+    expect(gas.filterLoginRows_(rows, REFER, PKEY, 50).some((r) => isNaN(r.tick))).toBe(false);
+    expect(gas.filterLoginRows_(rows, REFER, 'NOBODY', 50)).toEqual([]);
   });
 });
 

@@ -27,31 +27,34 @@
           </span>
         </template>
       </el-alert>
-      <!-- 每次填寫時間 -->
-      <template v-if="result !== null && result.length > 0">
-        <div class="qTitle">每次送出的時間</div>
+      <!-- 送出與登入合併的倒序時間線（最新在最上面） -->
+      <template v-if="result !== null && events.length > 0">
+        <div class="qTitle">你的活動紀錄（最新在上）</div>
+        <div class="captionWord">{{ logNote }}</div>
         <el-timeline>
           <el-timeline-item
-            v-for="item in recentHistory"
-            :key="item.no"
+            v-for="item in recentEvents"
+            :key="item.key"
             :timestamp="dateConverter(item.tick)"
             placement="top"
-            :type="item.modified ? 'primary' : 'success'"
+            :type="item.type"
+            :hollow="item.kind === 'login'"
           >
-            第 {{ item.no }} 次{{ item.modified ? '（修改）' : '（首次送出）' }}
+            <i class="fa-solid event-icon" :class="item.icon"></i>{{ item.text }}
           </el-timeline-item>
         </el-timeline>
-        <el-collapse v-if="olderHistory.length > 0">
-          <el-collapse-item :title="'展開較早的 ' + olderHistory.length + ' 次送出'" name="older">
+        <el-collapse v-if="olderEvents.length > 0">
+          <el-collapse-item :title="'展開較早的 ' + olderEvents.length + ' 筆紀錄'" name="older">
             <el-timeline>
               <el-timeline-item
-                v-for="item in olderHistory"
-                :key="item.no"
+                v-for="item in olderEvents"
+                :key="item.key"
                 :timestamp="dateConverter(item.tick)"
                 placement="top"
-                :type="item.modified ? 'primary' : 'success'"
+                :type="item.type"
+                :hollow="item.kind === 'login'"
               >
-                第 {{ item.no }} 次{{ item.modified ? '（修改）' : '（首次送出）' }}
+                <i class="fa-solid event-icon" :class="item.icon"></i>{{ item.text }}
               </el-timeline-item>
             </el-timeline>
           </el-collapse-item>
@@ -113,28 +116,61 @@ const show = ref(false);
 const result = ref(null);
 const errorMessage = ref('');
 
-// 每次送出時間：預設只列最近 3 次，較早的收進 el-collapse（送很多次的人不會被灌滿畫面）；
-// 5 次以內全部直接列出（收合反而多一次點擊）
-const RECENT_MAX = 3;
-const HISTORY_INLINE_MAX = 5;
+// 活動時間線：送出（寫入紀錄表）與登入嘗試合併成一條，最新在上。
+// 預設只列最近 8 筆，更早的收進 el-collapse（登入紀錄筆數多，不然會灌滿畫面）；
+// 12 筆以內全部直接列出（收合反而多一次點擊）
+const RECENT_MAX = 8;
+const EVENTS_INLINE_MAX = 12;
 
-// 後端 history 是時間順（紀錄表列序），標號後反轉成「最新在上」
-const numbered = computed(() => {
+// 後端 history 是時間順（紀錄表列序），先標「第 N 次」再合併；logins 後端已是新到舊
+const events = computed(() => {
   if (result.value === null) {
     return [];
   }
-  return result.value.history.map((item, index) => ({ ...item, no: index + 1 })).reverse();
+  const submits = result.value.history.map((item, index) => ({
+    key: 's' + index,
+    kind: 'submit',
+    tick: item.tick,
+    type: item.modified ? 'primary' : 'success',
+    icon: item.modified ? 'fa-pen-to-square' : 'fa-paper-plane',
+    text: '第 ' + (index + 1) + ' 次送出' + (item.modified ? '（修改）' : '（首次送出）'),
+  }));
+  const logins = (result.value.logins || []).map((item, index) => ({
+    key: 'l' + index,
+    kind: 'login',
+    tick: item.tick,
+    type: item.success ? 'info' : 'danger',
+    icon: item.success ? 'fa-right-to-bracket' : 'fa-triangle-exclamation',
+    text: item.success ? '登入／查詢成功' : '登入／查詢失敗（認證欄位不符）',
+  }));
+  // 同一毫秒時讓送出排在登入之上（送出必定發生在該次登入之後）
+  return submits
+    .concat(logins)
+    .sort((a, b) => b.tick - a.tick || (a.kind === 'submit' ? -1 : 1));
 });
 
-const recentHistory = computed(() =>
-  numbered.value.length <= HISTORY_INLINE_MAX
-    ? numbered.value
-    : numbered.value.slice(0, RECENT_MAX)
+const recentEvents = computed(() =>
+  events.value.length <= EVENTS_INLINE_MAX ? events.value : events.value.slice(0, RECENT_MAX)
 );
 
-const olderHistory = computed(() =>
-  numbered.value.length <= HISTORY_INLINE_MAX ? [] : numbered.value.slice(RECENT_MAX)
+const olderEvents = computed(() =>
+  events.value.length <= EVENTS_INLINE_MAX ? [] : events.value.slice(RECENT_MAX)
 );
+
+// 時間線的說明文字：登入紀錄的來源與邊界（沒開線上暫存就沒有 _logins 可查；
+// 回掃列數有上限，更早的登入不會出現；這次查詢本身也算一次登入嘗試）
+const logNote = computed(() => {
+  if (result.value === null) {
+    return '';
+  }
+  if (!result.value.loginLogAvailable) {
+    return '這份問卷沒有啟用登入紀錄，時間線只列出你送出的紀錄。';
+  }
+  return (
+    '登入／查詢的成功與失敗都會被記錄，本次查詢本身也算一次。' +
+    (result.value.loginLogTruncated ? '較早的登入紀錄不在此列出。' : '')
+  );
+});
 
 // 有送出過且後端回了答案才給下載（沒送出過沒東西可下載）
 const canDownload = computed(
@@ -207,6 +243,11 @@ function close() {
 .formFooter__buttons .el-button {
   flex: 1 1 auto;
   margin-left: 0;
+}
+/* 時間線每一列的類型圖示（走 FA，不用 emoji）：顏色跟著 el-timeline-item 的文字色 */
+.event-icon {
+  margin-right: 6px;
+  color: var(--el-text-color-secondary);
 }
 .sign-list {
   display: flex;

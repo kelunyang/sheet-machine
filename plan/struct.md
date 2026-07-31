@@ -644,8 +644,10 @@ sticky 條（JwtCountdownBar/FormToolbar）捲動時才能越過標題升到 y=0
 - **StatDialog**：填答率統計（`compareSheets`，不需認證的群組統計）。
 - **MyStatusDrawer**（Phase 26）：「查詢我填答了沒」——登入頁上與填答率統計並排的第二顆按鈕，
   走需認證的 `mySubmitStatus`。認證欄位沿用登入頁上方已填的 authDB（不重畫輸入框，按鈕
-  `:disabled="checkAuth()"`），只顯示自己的送出次數／每次送出時間（超過 5 次收進 el-collapse）／
-  最後一次的簽名圖，不進填寫問卷的 drawer。查詢期間掛 loading 小遊戲（驗身分＋掃整份紀錄表＋
+  `:disabled="checkAuth()"`），只顯示自己的送出次數／**送出與登入合併的倒序活動時間線**
+  （最新在上，超過 12 筆時只列最近 8 筆、其餘收進 el-collapse）／最後一次的簽名圖（在時間線之後），
+  不進填寫問卷的 drawer。登入紀錄來自 `_logins`（`mySubmitStatus` 的 `logins`，尾端回掃上限 3000 列、
+  最多回 50 筆；draftSheetID 未設＝`loginLogAvailable:false`，時間線只剩送出紀錄）。查詢期間掛 loading 小遊戲（驗身分＋掃整份紀錄表＋
   逐張讀 Drive 簽名圖，與 compareSheets 同級的等待）。被冷卻時顯示倒數（與登入共用同一組計數）。
   footer 另有「下載我上次填寫的結果」（Phase 27）：`mySubmitStatus` 的 `lastAnswers`＋既有
   `downloadCSV`，CSV 格式與填寫 drawer 的「下載上次結果」一致——看簽名與拿檔案在同一個 drawer 完成，

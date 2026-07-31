@@ -2696,12 +2696,17 @@ function mySubmitStatus_(referSSID, recordSSID, auth) {
   for(let i=0; i<summary.signIDs.length; i++) {
     signatures.push(signatureDataUrl_(summary.signIDs[i]));
   }
+  let loginLog = myLoginHistory_(referSSID, serverPkey);
   return {
     length: summary.length,
     lastTick: summary.lastTick,
     modified: summary.modified,
     history: summary.history,
     signatures: signatures,
+    // 自己的登入紀錄（新到舊）：與送出紀錄合併成一條倒序時間線給前端
+    logins: loginLog.rows,
+    loginLogAvailable: loginLog.available,
+    loginLogTruncated: loginLog.truncated,
     // 該問卷有沒有簽名格（G 欄；已截止問卷 getQList_ 會清空前端的簽名名稱，故這裡自己判一次）
     hasSignatureSlot: currentSheet[0][6].toString().trim() !== "",
     // 最後一次送出的答案（欄位名＋值），給查詢 drawer 的「下載我上次填寫的結果」用。
@@ -2762,6 +2767,44 @@ function answersFromRecordRow_(headers, row) {
     answers.push({ name: column.name, value: value });
   }
   return answers;
+}
+
+// 「我的登入紀錄」：讀 _logins 給查詢 drawer 的倒序時間線用（本人的紀錄，認證強度同 readRecord）。
+// _logins 是全問卷共用的純 append 稽核表、會長到很長，故**只回掃最後 MY_LOGIN_SCAN_ROWS 列**
+// （純 append 保證列不位移，尾端就是最近的），再往前的登入不顯示（truncated 交前端說明），
+// 這是刻意的成本上限、不是資料遺失（稽核仍以整張 _logins 為準）。
+// draftSheetID 未設或分頁不存在＝功能靜默降級（available:false），比照 appendLoginLog_ 的靜默不記。
+const MY_LOGIN_SCAN_ROWS = 3000; // 單次查詢回掃的列數上限
+const MY_LOGIN_MAX = 50;         // 最多回給前端幾筆
+function myLoginHistory_(referSSID, account) {
+  if(!draftEnabled_()) { return { rows: [], available: false, truncated: false }; }
+  let draftSS = SpreadsheetApp.openById(appProperties.getProperty('draftSheetID'));
+  let sheet = draftSS.getSheetByName(LOGIN_SHEET_NAME);
+  if(sheet === null) { return { rows: [], available: false, truncated: false }; }
+  let lastRow = sheet.getLastRow();
+  if(lastRow < 2) { return { rows: [], available: true, truncated: false }; }
+  let startRow = Math.max(2, lastRow - MY_LOGIN_SCAN_ROWS + 1); // 第 1 列是凍結表頭
+  let values = sheet.getRange(startRow, 1, lastRow - startRow + 1, 4).getValues();
+  return {
+    rows: filterLoginRows_(values, referSSID, account, MY_LOGIN_MAX),
+    available: true,
+    truncated: startRow > 2
+  };
+}
+
+// 純函數：從 _logins 列（A ms／B refer／C 明文帳號值／D 結果）挑出某人某問卷的登入嘗試，
+// **由尾往前掃**（新到舊）並在湊滿 limit 筆時停手；時間欄非數字的列（表頭殘留、髒資料）跳過
+function filterLoginRows_(rows, referSSID, account, limit) {
+  let out = [];
+  for(let i=rows.length-1; i>=0 && out.length < limit; i--) {
+    let row = rows[i];
+    if(row[1].toString().trim() !== referSSID.toString().trim()) { continue; }
+    if(row[2].toString().trim() !== account.toString().trim()) { continue; }
+    let tick = parseInt(row[0].toString(), 10);
+    if(isNaN(tick)) { continue; }
+    out.push({ tick: tick, success: row[3].toString().trim() === "成功" });
+  }
+  return out;
 }
 
 function maskString(str) {
