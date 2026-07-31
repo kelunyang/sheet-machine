@@ -29,7 +29,7 @@ function makeListRow({ dueDate, writeAllowed = '是', signatures = '學生;家�
   row[3] = dueDate === undefined ? Date.now() + 30 * DAY : dueDate;
   row[6] = signatures;
   row[12] = 'admin@example.com';
-  row[14] = writeAllowed;
+  row[13] = writeAllowed;
   return row;
 }
 

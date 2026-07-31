@@ -148,7 +148,7 @@ function renewToken(referSSID, recordSSID, token) {
     let now = (new Date()).getTime();
     let dueDate = parseInt(currentSheet[0][3].toString());
     if(now > dueDate) { return { renewed: false, message: "表單已過期，無法續約" }; }
-    if(currentSheet[0][14].toString().trim() === "否") { return { renewed: false, message: "表單已關閉，無法續約" }; }
+    if(currentSheet[0][13].toString().trim() === "否") { return { renewed: false, message: "表單已關閉，無法續約" }; }
     if(claims.invite !== undefined) {
       if(!inviteTokenValid_(claims.invite)) { return { tokenExpired: true }; }
       let sheet = inviteSheet_();
@@ -173,7 +173,7 @@ function getAnnouncement() {
 }
 
 // 問卷結構表（refer，B 欄的試算表 ID）的 Drive 建立時間（ms）：前端生命週期時間軸
-// 的起點。注意 N 欄的 sheetID 只是問卷識別字串（前端暫存 key），不是 Drive ID。
+// 的起點。要的是 B 欄 refer（舊版曾誤用「固定ID」欄，該欄已於 2026-07-31 整欄刪除）。
 // 建立時間永不變，CacheService 快取到期（上限 6 小時）重讀一次即可；
 // 單表失敗回 0（前端時間軸退化隱藏），不能讓一張表壞掉拖垮整個 getQList
 function sheetCreatedAt_(referSSID) {
@@ -195,7 +195,7 @@ function sheetCreatedAt_(referSSID) {
 function getQList_() {
   let listSS = SpreadsheetApp.openById(appProperties.getProperty('listSheetID'));
   let listSheet = listSS.getSheets()[0];
-  let listRange = listSheet.getRange("A:P");
+  let listRange = listSheet.getRange("A:O");
   let listArr = listRange.getValues();
   let lists = [];
   if(listArr.length > 1) {
@@ -217,9 +217,8 @@ function getQList_() {
               submitTip: row[9].toString().trim(),
               loginfailTip: row[10].toString().trim(),
               email: row[12].toString().trim(),
-              sheetID: row[13].toString().trim(),
-              writeAllowed: row[14].toString().trim() === "是" ? true : false,
-              randomQ: row[15].toString().trim() === "是" ? true : false
+              writeAllowed: row[13].toString().trim() === "是" ? true : false,
+              randomQ: row[14].toString().trim() === "是" ? true : false
             });
           }
         }
@@ -974,7 +973,7 @@ function sendInvite(referSSID, recordSSID, token, signName, email, force) {
     let now = (new Date()).getTime();
     let dueDate = parseInt(listRow[3].toString());
     if(now > dueDate) { return { success: false, message: "表單已過期，無法發出邀請" }; }
-    if(listRow[14].toString().trim() === "否") { return { success: false, message: "表單已關閉，無法發出邀請" }; }
+    if(listRow[13].toString().trim() === "否") { return { success: false, message: "表單已關閉，無法發出邀請" }; }
     let signNames = listRow[6].toString().trim() === "" ? [] : listRow[6].toString().trim().split(";");
     if(!_.includes(signNames, signName)) { return { success: false, message: "這份表單沒有「" + signName + "」這個簽名格" }; }
     if(!/^\w+((-\w+)|(\.\w+))*@[A-Za-z0-9]+((\.|-)[A-Za-z0-9]+)*\.[A-Za-z]+$/.test(email)) {
@@ -1148,7 +1147,7 @@ function resolveActiveInvite_(token) {
   let now = (new Date()).getTime();
   let dueDate = parseInt(listRow[3].toString());
   if(now > dueDate) { return null; }
-  if(listRow[14].toString().trim() === "否") { return null; }
+  if(listRow[13].toString().trim() === "否") { return null; }
   let status = inviteStatusFor_(invite, now);
   if(status === 'expired' || status === 'revoked' || status === 'consumed') { return null; }
   return { invite: invite, listRow: listRow, dueDate: dueDate, now: now, status: status };
@@ -1312,7 +1311,7 @@ function submitInviteSignature(sessionToken, blobDataURL) {
       let listRow = listRowFor_(invite.referSSID, invite.recordSSID);
       if(listRow === null) { return { success: false, message: "找不到這份表單" }; }
       let dueDate = parseInt(listRow[3].toString());
-      if(now > dueDate || listRow[14].toString().trim() === "否") {
+      if(now > dueDate || listRow[13].toString().trim() === "否") {
         return { success: false, message: "表單已關閉或過期，無法送出簽名" };
       }
       let status = inviteStatusFor_(invite, now);
@@ -1696,7 +1695,7 @@ function readRecord_(referSSID, recordSSID, auth) {
     });
     let signatures = [];
     if(currentSheet.length > 0) {
-      if(currentSheet[0][14].toString().trim() === "是") {
+      if(currentSheet[0][13].toString().trim() === "是") {
         let headers = getHeaders(referSSID);
         let pkeys = _.filter(headers, (header) => {
           return /P/.test(header.type);
@@ -2123,7 +2122,7 @@ function writeRecord_(referSSID, recordSSID, token, record, accept, signatures, 
       errorLog.push("表單已過時");
       //}
     }
-    if(currentSheet[0][14].toString().trim() === "否") {
+    if(currentSheet[0][13].toString().trim() === "否") {
       proceedWrite = false;
       errorLog.push("表單關閉，不允許寫入");
     }
@@ -2684,7 +2683,7 @@ function mySubmitStatus_(referSSID, recordSSID, auth) {
   });
   // O 欄＝「開放進入」，與 readRecord_ 同一道判斷（不新增可存取面）
   if(currentSheet.length === 0) { return false; }
-  if(currentSheet[0][14].toString().trim() !== "是") { return false; }
+  if(currentSheet[0][13].toString().trim() !== "是") { return false; }
   // 主鍵值一律由伺服器端判定（Gmail 主鍵取 Session），不信前端傳來的值
   let serverPkey = draftKey_(referSSID, auth);
   if(serverPkey === null) { return false; }

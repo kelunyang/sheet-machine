@@ -28,7 +28,7 @@ function makeListRow() {
   row[3] = Date.now() + 30 * DAY;
   row[6] = ''; // 無簽名格
   row[12] = 'admin@example.com';
-  row[14] = '是';
+  row[13] = '是';
   return row;
 }
 

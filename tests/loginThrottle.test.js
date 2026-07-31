@@ -26,7 +26,7 @@ function makeListRow() {
   row[1] = REFER;
   row[2] = RECORD;
   row[12] = ADMIN;
-  row[14] = '是';
+  row[13] = '是';
   return row;
 }
 

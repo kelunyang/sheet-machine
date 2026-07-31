@@ -145,7 +145,9 @@ Sheet Machine 是一個基於 Google Apps Script 和 Vue.js 的動態表單系�
 ```
 
 舊結構（key=明文主鍵值、value=明文 `[{uid, queue}]` 陣列、一人一條含多問卷）已退役，
-登入時 `migrateLegacyEntry` 一次性搬家並清除明文。
+登入時 `purgeLegacyEntry` 一次性清除明文。（原本會先把舊 queue 搬進假名 key 再清，
+但搬家要靠條目裡的 `uid`＝問卷列表舊「固定ID」欄認問卷；該欄已於 2026-07-31 整欄刪除，
+搬家隨之拿掉，只留清除——舊表已退役無人依賴那批暫存，但明文個資該清還是要清。）
 
 ### 匯出檔案格式 (.smtemp)
 
@@ -175,8 +177,8 @@ AES-256-GCM 加密後的 Base64 字串，解密後：
   → 後端讀取 listSheet
   → 過濾有效問卷（未過期、已啟用）
   → 逐表附掛 createdAt（問卷結構表 B 欄 refer 的 Drive 建立時間，CacheService
-    快取 6 小時，失敗回 0；供前端生命週期時間軸當起點。N 欄 sheetID 只是
-    前端暫存 key、不是 Drive ID）
+    快取 6 小時，失敗回 0；供前端生命週期時間軸當起點。要的是 B 欄 refer——
+    舊版曾誤用「固定ID」欄，該欄已於 2026-07-31 整欄刪除）
   → 回傳 sheets 陣列
 ```
 
@@ -542,7 +544,7 @@ sheet-machine/
 │   │   ├── SheetCard.vue          # 問卷列表卡片（靜態流程看板串，急迫度靠結束節點日期色）
 │   │   ├── LifecycleTimeline.vue  # 問卷/邀請生命週期橫向時間軸（像素小人標當前時間）
 │   │   ├── ConfirmDrawer.vue      # ElMessageBox 的 drawer 替代品（單例掛 App.vue）
-│   │   ├── LoadingGame.vue        # 8-bit loading 遊戲卡（RPC 等待時浮出）
+│   │   ├── LoadingGame.vue        # 8-bit loading 遊戲卡（RPC 等待時浮出，隨機 2D/3D）
 │   │   └── AppFooter.vue          # 版權列單一來源（dayjs 自動年份、FA 愛心/github 圖示）
 │   ├── composables/
 │   │   ├── useCrypto.js           # 匯出檔 AES-256-GCM 加解密（smv2 + 舊格式相容）
@@ -567,7 +569,10 @@ sheet-machine/
 │   │   ├── jwt.js                 # 前端 JWT 解碼（僅供 UI 倒數，不驗簽）
 │   │   ├── timeline.js            # 生命週期時間軸純函數（四態/百分比/倒數文字）
 │   │   ├── sheetFlow.js           # 問卷卡片純函數（看板串組成＋結束節點急迫度日期色）
-│   │   ├── pixelSprites.js        # 像素小人素材（LifecycleTimeline 與 LoadingGame 共用）
+│   │   ├── pixelSprites.js        # 像素小人素材（站姿4幀/蹲姿2幀/正面2幀，三個元件共用）
+│   │   ├── loadingArt.js          # loading 遊戲道具/尺寸/校園段寬（兩種 renderer 單一來源）
+│   │   ├── loadingScene2d.js      # loading 2D renderer 工廠（240x80 像素緩衝）
+│   │   ├── loadingScene3d.js      # loading 3D renderer 工廠（three.js voxel，動態 import）
 │   │   └── markdown.js            # marked + DOMPurify（HTMLConverter）
 │   ├── theme/colors.config.js     # 主題配色單一來源（改色只改這裡）
 │   ├── styles/                    # _theme.scss 手寫層（_theme-generated.scss 為建置時生成）
@@ -726,8 +731,12 @@ sticky 條（JwtCountdownBar/FormToolbar）捲動時才能越過標題升到 y=0
 - **LoadingGame**：8-bit loading 遊戲卡：RPC 等待時浮出畫面腰部，兩個制服小人在校園
   跑步跨欄＋WASD/觸控彩蛋；血條式計分 100 起跳、加分物件可穿戴、歸零出記分板、
   「資料傳輸中」兼事件看板；卡下兩個 el-switch 存 localStorage——loading 結束不關遊戲
-  （加班模式）/不要再看到遊戲（極簡文字卡）；原生 canvas 零依賴，顏色對映
-  colors.config.js，狀態在 useLoadingGame。
+  （加班模式）/不要再看到遊戲（極簡文字卡）；顏色對映 colors.config.js，狀態在
+  useLoadingGame。元件本身只做**模擬＋狀態編排＋生命週期**，畫面交給兩個 renderer 工廠：
+  每次掛載擲骰（各半）決定 utils/loadingScene2d（像素 canvas）或 utils/loadingScene3d
+  （three.js voxel、側面正交鏡頭、DOM 疊 HUD/記分板）；three 是**動態 import**，抽中 3D
+  時先照跑 2D、模組到位才切，載不到就整場留 2D（CDN 掛掉不會白畫面）。兩者共用
+  utils/loadingArt 的道具/段寬與同一份 pixelSprites，蹲下走獨立蹲姿圖不砍列（見 issue.md）。
 - **AppFooter**：版權列單一來源（原 App.vue 兩處硬編碼合一）：`Developer: Kelunyang@LKSH {年}
   · by claude since 2026 with ♥ · github`，年份 `dayjs().format('YYYY')` 自動取當年、跨年不必手改，
   愛心與 github 走 FontAwesome（`fa-solid fa-heart`／`fa-brands fa-github`，github 連結不變），

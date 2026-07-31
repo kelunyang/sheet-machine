@@ -105,6 +105,9 @@ const CDN_IMPORT_MAP = {
     // diff2html 的 CSS 走 index.html 的 jsDelivr <link>，**版本要與這裡同步**
     diff: 'https://esm.sh/diff@9.0.0',
     diff2html: 'https://esm.sh/diff2html@3.4.56',
+    // loading 小遊戲的 3D 模式（utils/loadingScene3d.js）：只在抽中 3D 時被
+    // 動態 import，載不到就整場留在 2D，不會像其他 library 那樣掛掉就白畫面
+    three: 'https://esm.sh/three@0.169.0',
   },
 }
 

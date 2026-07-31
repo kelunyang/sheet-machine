@@ -142,6 +142,58 @@
   `=== "N"` 精確比對，把既有欄位從 `N` 改成 `ND` 會讓原本的可空行為直接消失
   （電話三擇一的空欄位會開始報格式錯誤）。
 
+## 問卷列表舊「固定ID」欄已整欄刪除，不要復活（2026-07-31）
+
+- **原意**：給 URL 參數直接開指定問卷用的短代號（`export.js` 新增問卷時自動配「現有最大值+1」）。
+- **為什麼沒用**：(1) 深連結 `?sheet=` 從頭到尾帶的是 **B 欄 refer**（Drive ID，本身就唯一，
+  `Code.js` doGet 注入 `__SM_SHEET_REFER__`、前端 `item.refer === refer` 比對），固定ID 沒參與過；
+  (2) 系統實際包在 Google Sites 裡，**根本沒法帶 URL 參數**，這個設計目的已不存在；
+  (3) 前端列表項的 `id` 是每次載入現場 `uuidv4()` 產的，也與它無關。
+- **退役前最後一個讀取點**：`App.vue` 的 `currentUID` → `tempStorage.migrateLegacyEntry` 的
+  `entry.uid` 比對（Phase 20 前的明文 localStorage 搬家）。舊表已退役、無人依賴那批暫存，
+  故搬家整段拿掉，只留 **`purgeLegacyEntry(明文主鍵值)`** 無條件清除舊明文條目——
+  **清明文個資這件事不能一起砍**（殘留在瀏覽器的是明文個資）。
+- **現況**：問卷列表是 **A~O 共 15 欄**，原 O（開放進入）、P（亂數出題）前移成 **N、O**。
+  `getQList_` 的 `writeAllowed`/`randomQ` 讀 index 13/14，所有 `listRow[14] === "否"` 這類
+  判斷一律改成 13。要新增讀取欄位前先確認你數的是新版欄序。
+- **既有試算表的遷移**：`tools/export.js` 的一次性 `dropFixedIdColumn()`（Apps Script 編輯器
+  手動跑、ScriptLock、冪等、表頭對不上就停手、刪完回頭核對）。**這是全系統唯一一處
+  `deleteColumn`**——禁刪的鐵律是為了「列」（位移會錯位到別人的資料、難復原），這裡動的是
+  欄、對象是每個管理者一份的設定表、人工離峰執行、前後可肉眼核對。**不要拿它當以後可以
+  刪列/刪欄的先例。**
+- **⚠️ 部署順序（會全站中斷）**：遷移工具與新版 `src/Code.js` **必須同時到位**。只做一邊
+  欄位索引就錯開一格，後端把「開放進入」讀成別欄的值 → **所有問卷都變成無法登入填寫**
+  （不是靜默錯誤，是全站擋人）。流程：挑離峰 → 跑 `dropFixedIdColumn()` → 立刻
+  `npm run gpush` + 部署新版 web app → 實測一份問卷能登入。
+- **不要**因為看到「有欄位沒人讀」就把它接回去或拿它當識別鍵——要識別問卷一律用 B 欄 refer。
+
+## Loading 遊戲的蹲姿要獨立畫，不要拿站姿砍列（2026-07-31）
+
+- **舊做法**：`drawSprite(..., squashTop)` 蹲下時砍掉站姿頂端 3 列，3D 版則是 `scale.y`
+  壓扁。兩種都是**把頭削掉/擠掉**，看起來很怪（使用者回報）。
+- **現況**：`pixelSprites.js` 另外匯出 `BOY_DUCK`/`GIRL_DUCK`（12 寬 12 列，正好比站姿
+  `STAND_H`=15 矮 3px，維持「站著撞頭、蹲下鑽過藍鵲」的判定不變），頭是完整的、只是壓低
+  前傾、大腿/膝/小腿/鞋各一列。`drawSprite` 的 `squashTop` 參數**已移除**，簽名是
+  `(ctx, rows, x, y, override)`。3D 也用同一份蹲姿 voxel，不做壓扁。
+- 要改角色造型記得**站姿 4 幀＋蹲姿 2 幀＋正面 2 幀**都要有；兩個 timeline 只取側面
+  frame 0/1，側面加幀不影響它們。
+
+## Loading 遊戲隨機 2D/3D，three 是唯一動態 import 的 library（2026-07-31）
+
+- `LoadingGame.vue` 每次掛載擲一次骰（`want3d = Math.random() < 0.5`）決定用
+  `loadingScene2d.js`（像素）還是 `loadingScene3d.js`（three.js voxel，側面正交鏡頭）。
+- **three 走動態 `import('three')`**，不是頂層 import——這是刻意的：其他 CDN library 掛掉
+  等於整頁白畫面，而 three 掛掉只會讓這一場 loading 留在 2D（`tryStart3d` catch 住、
+  `want3d = false`）。抽中 3D 時也是**先照常跑 2D**，模組到位才切，不會卡住 loading 回饋。
+- 兩種 renderer 共用 `loadingArt.js` 的道具/尺寸/`SEGMENT_WIDTHS`，與同一份
+  `pixelSprites.js`——3D 直接把像素圖堆成 voxel。**改美術要想到另一種模式**：段寬對不齊
+  兩邊校園就會不一樣。
+- 3D 的 HUD/記分板是 DOM 疊層（`.loading-game-hud3d`/`.loading-game-board3d`），不畫進
+  canvas；它們自帶 `display`，所以樣式裡有一條 `.loading-game-stage [hidden] { display: none !important; }`
+  ——拿掉的話隱形疊層會擋住點擊（demo 階段踩過）。
+- `loadingScene3d.js` 的 `dispose()` 一定要在 `stopGame()` 叫（走訪 scene 收 geometry/
+  material/貼圖 + `renderer.dispose()`）——loading 卡是反覆掛載/卸載的，不收會累積 GPU 資源。
+
 ## 匯出的表頭要跟著資料一起重排，不能照抄紀錄表（2026-07-31）
 
 - **踩過的坑**：`tools/export.js` 的 `runExport_` 舊碼把紀錄表前 N 列**原樣貼**成輸出表頭，

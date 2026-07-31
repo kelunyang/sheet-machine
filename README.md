@@ -62,16 +62,23 @@ npm run build      # 產生 dist/index.html（GAS 部署格式）
 
 1. 新建一份 Google 試算表（這就是母表）。
 2. 把**第一個分頁改名為 `問卷列表`**（名稱必須一模一樣）。
-3. 在第 1 列填 **16 欄標題（A:P）**——web app 把第 1 列當標題略過、第 2 列起才是問卷：
+3. 在第 1 列填 **15 欄標題（A:O）**——web app 把第 1 列當標題略過、第 2 列起才是問卷：
 
    > A 表單名稱｜B 對照表單ID｜C 新表單ID｜D 填表截止日期Timestamp｜E 檢視截止時間Timestamp｜
    > F 預設修改｜G 簽名｜H 登入後說明｜I 登入前說明｜J 填寫完畢備註語｜K 登入失敗備註語｜
-   > L 顯示｜M 管理員Email｜N 固定ID｜O 開放進入｜P 亂數出題
+   > L 顯示｜M 管理員Email｜N 開放進入｜O 亂數出題
 
    各欄語意（timestamp 用毫秒、布林填「是/否」等）見 [`plan/dataformat.md`](plan/dataformat.md) 第 1 節。
 4. 記下這份試算表的 **Sheet ID**（網址 `/d/` 後那段），等一下要填進 web app 專案的 `listSheetID`。
 
 > 資料列不必手動填——建好空表頭即可，之後全用下面步驟 3(B) 的「問卷管理」選單新增問卷。
+
+> ⚠️ **從 2026-07-31 之前的版本升級**：舊版母表在 M 與「開放進入」之間多一欄 **N 固定ID**（A~P 共 16 欄），
+> 該欄已整欄刪除、原 O/P 前移成 N/O。既有母表請在**問卷列表容器綁定專案**的 Apps Script 編輯器
+> 手動執行一次 `dropFixedIdColumn()`（冪等、表頭對不上會自動停手）。
+> **這支與新版 web app 必須同時到位**——只做一邊欄位索引會錯開一格，後端把「開放進入」讀成別欄的值，
+> 所有問卷都會變成無法登入填寫。建議流程：挑離峰 → 跑 `dropFixedIdColumn()` → 立刻 `npm run gpush`
+> 並部署新版 web app → 實測一份問卷能正常登入。
 
 ### 3. 準備兩個 GAS 專案
 
@@ -186,7 +193,22 @@ npm test           # Vitest 純函數測試（可離線）
 ## 五、Loading 小遊戲：改主題或關掉
 
 首屏與 RPC 等待時會跳一個 8-bit 小遊戲（`src/components/LoadingGame.vue`，
-獨立預覽檔 `demoloading.html`）。**目前主題是「林口高中」專屬**——校舍/圖書館/科學館建築、
+獨立預覽檔 `demoloading.html`）。遊戲**每次出現會隨機用 2D 像素或 3D voxel 呈現**（各半），
+兩種模式跑同一份遊戲邏輯與同一份像素圖：
+
+| 檔案 | 職責 |
+|------|------|
+| `src/components/LoadingGame.vue` | 模擬（物理/障礙/計分/AI）、輸入、生命週期、抽 2D/3D |
+| `src/utils/loadingArt.js` | 道具 sprite、尺寸常數、校園段落寬度——**兩種模式的單一來源** |
+| `src/utils/loadingScene2d.js` | 2D renderer：240x80 像素緩衝放大 3 倍，含 `SEGMENT_DRAWS` 背景段 |
+| `src/utils/loadingScene3d.js` | 3D renderer：three.js voxel、側面正交鏡頭 |
+| `src/utils/pixelSprites.js` | 小人 sprite（**三個元件共用**，見下方警告） |
+
+three.js 走 CDN 且**只在抽中 3D 時動態 import**，載不到就整場留在 2D（不會白畫面）。
+只想留 2D 的話：把 `LoadingGame.vue` 的 `onMounted` 裡 `want3d = Math.random() < 0.5;`
+改成 `want3d = false;` 即可（`loadingScene3d.js` 與 three 依賴可一併移除）。
+
+**目前主題是「林口高中」專屬**——校舍/圖書館/科學館建築、
 制服小人、射擊隊外套、天文望遠鏡等，別的單位拿去多半要改或關掉。使用者已有兩個內建開關
 （遊戲卡上的「我不要再看到遊戲了」「載入完成也不結束遊戲」，存 localStorage），
 但那是**每個使用者自己選**；下面是**部署者**層級的改法。
@@ -217,23 +239,32 @@ npm test           # Vitest 純函數測試（可離線）
 
 ### 選項 B：換成你自己的主題（丟給 LLM 改）
 
-`LoadingGame.vue` 的畫面全是純函數 canvas 繪圖（像素 sprite 字串 + `SEGMENTS` 背景段），
-很適合請 LLM 重畫。可以把整個 `src/components/LoadingGame.vue` 和 `src/utils/pixelSprites.js`
-餵給你的 LLM，附上這段提示：
+畫面全是資料驅動的繪圖（像素 sprite 字串 + 背景段函數），很適合請 LLM 重畫。
+把 `src/utils/loadingArt.js`、`src/utils/loadingScene2d.js`、`src/utils/loadingScene3d.js`
+和 `src/utils/pixelSprites.js` 餵給你的 LLM（遊戲邏輯在 `LoadingGame.vue`，通常不用動），
+附上這段提示：
 
-> 這是一個 Vue 3 `<script setup>` 元件，用 canvas 畫一個 8-bit 橫向跑酷 loading 小遊戲，
-> 目前主題是「林口高中」（校園建築、制服小人、跨欄/小黑狗/台灣藍鵲障礙、書包/外套/氣手槍/
-> 天文望遠鏡加分物件）。請把**美術主題**換成「_（填你的單位／情境，例如某公司、某活動）_」，
-> 保留所有遊戲機制、輸入操控（WASD／方向鍵／觸控）、計分與生命週期啟停邏輯不變。具體要換：
-> 1. `SEGMENTS` 陣列裡的背景建築段（改成你的地標，`draw(x)` 內用 `ctx.fillRect` 畫像素方塊）；
-> 2. 障礙物 `DOG`/`BIRD` 與加分物件 `PICKUP_DEFS`（`BAG`/`JACKET`/`PISTOL`/`SCOPE`）的
->    sprite 字串（`.` = 透明，其餘字母對應 `*_PAL` 調色盤）與名稱；
+> 這是一個 8-bit 橫向跑酷 loading 小遊戲的美術層，同一份資料同時餵 2D canvas renderer
+> 與 3D three.js voxel renderer，目前主題是「林口高中」（校園建築、制服小人、
+> 跨欄/小黑狗/台灣藍鵲障礙、書包/外套/氣手槍/天文望遠鏡加分物件）。請把**美術主題**換成
+> 「_（填你的單位／情境，例如某公司、某活動）_」，保留所有遊戲機制、輸入操控
+> （WASD／方向鍵／觸控）、計分與生命週期啟停邏輯不變。具體要換：
+> 1. `loadingScene2d.js` 的 `SEGMENT_DRAWS` 背景建築段（改成你的地標，用 `ctx.fillRect`
+>    畫像素方塊）**以及 `loadingScene3d.js` 的 `BUILD` 陣列**（同一批地標的 3D 版，用
+>    `box()` 堆方塊、`textPlane()` 貼招牌字）。兩者的段序與段寬吃 `loadingArt.js` 的
+>    `SEGMENT_WIDTHS`，**改寬度要兩邊一起對**，否則兩種模式的校園會對不起來；
+> 2. `loadingArt.js` 的障礙物 `DOG`/`BIRD` 與加分物件 `PICKUP_DEFS`（`BAG`/`JACKET`/
+>    `PISTOL`/`SCOPE`）sprite 字串（`.` = 透明，其餘字母對應 `*_PAL` 調色盤）與名稱
+>    ——這份 3D 會直接拿去堆成 voxel，改了兩種模式一起換；
 > 3. **`src/utils/pixelSprites.js` 裡的「小人」sprite**——這是**全系統共用的角色**，
->    匯出四個造型：`BOY`/`GIRL`（側面，用於遊戲）、`BOY_FRONT`/`GIRL_FRONT`（正面，用於進度條
->    與時間軸）。**這個檔案一改，除了 loading 遊戲，`FieldTimeline.vue`（填答進度軌道上的正面小人）
->    和 `LifecycleTimeline.vue`（生命週期時間軸上的小人）也會一起換掉**——這正是重點，四個造型要
->    一致地換成你的新角色（別只改側面忘了正面），否則進度條/時間軸會跟遊戲對不起來。男女造型的選擇
->    跨元件同步（`getGameSession().playerIsGirl`），改造型時兩性都要有對應的側面＋正面版本。
+>    匯出六個造型：`BOY`/`GIRL`（側面站姿跑步四幀，用於遊戲）、`BOY_DUCK`/`GIRL_DUCK`
+>    （側面蹲姿兩幀，比站姿矮 3px，用來鑽過藍鵲）、`BOY_FRONT`/`GIRL_FRONT`（正面兩幀，用於
+>    進度條與時間軸）。**這個檔案一改，除了 loading 遊戲，`FieldTimeline.vue`（填答進度軌道上的
+>    正面小人）和 `LifecycleTimeline.vue`（生命週期時間軸上的小人）也會一起換掉**——這正是重點，
+>    六個造型要一致地換成你的新角色（別只改側面忘了正面／蹲姿），否則進度條/時間軸會跟遊戲對不
+>    起來。男女造型的選擇跨元件同步（`getGameSession().playerIsGirl`），改造型時兩性都要有對應的
+>    側面站姿＋蹲姿＋正面版本。**蹲姿一定要獨立畫，不要拿站姿去砍頂端幾列**（那會變成頭頂被削掉
+>    一塊）；兩個 timeline 只取側面的 frame 0/1，側面加幀不影響它們。
 > 調色盤盡量沿用 `src/theme/colors.config.js` 匯出的 `THEME_COLORS`/`SURFACE_COLORS`，
 > 不要憑空寫死 hex（純黑純白例外）。改完 `demoloading.html` 是可獨立開啟的預覽檔，可同步更新。
 

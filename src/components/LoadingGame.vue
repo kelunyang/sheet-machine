@@ -8,15 +8,44 @@
     </button>
   </div>
   <div v-else class="loading-game-card">
-    <canvas
-      ref="canvasRef"
-      width="720"
-      height="240"
+    <!-- 舞台：2D 與 3D 兩個 canvas 疊在同一個位置，只顯示這次抽中的那個 -->
+    <div
+      class="loading-game-stage"
       @pointerdown="onPointerDown"
       @pointermove="onPointerMove"
       @pointerup="onPointerUp"
       @pointercancel="onPointerUp"
-    ></canvas>
+    >
+      <canvas ref="canvasRef" width="720" height="240" :hidden="scene3dActive"></canvas>
+      <canvas ref="canvas3dRef" :hidden="!scene3dActive"></canvas>
+      <!-- 3D 的 HUD／記分板走 DOM（小字比畫在 canvas 裡清楚） -->
+      <template v-if="scene3dActive">
+        <div class="loading-game-hud3d">
+          <div class="row">
+            <span>{{ youTag }}{{ player.label }}</span>
+            <span class="bar" :class="{ low: hud.playerScore <= 40 }">
+              <i :style="{ width: barWidth(hud.playerScore) }"></i>
+            </span>
+            <span>{{ hud.playerScore }}</span>
+          </div>
+          <div class="row">
+            <span>電腦{{ cpu.label }}</span>
+            <span class="bar" :class="{ low: hud.cpuScore <= 40 }">
+              <i :style="{ width: barWidth(hud.cpuScore) }"></i>
+            </span>
+            <span>{{ hud.cpuScore }}</span>
+          </div>
+        </div>
+        <div v-if="boardText" class="loading-game-board3d">
+          <div class="win">{{ boardText.title }}</div>
+          <div class="sub">
+            <span>{{ youTag }}{{ player.label }} {{ hud.playerScore }}分</span>
+            <span>電腦{{ cpu.label }} {{ hud.cpuScore }}分</span>
+          </div>
+          <div class="tip">{{ boardText.prompt }}</div>
+        </div>
+      </template>
+    </div>
     <div
       class="loading-game-label"
       role="status"
@@ -43,8 +72,19 @@
 
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
-import { THEME_COLORS, SURFACE_COLORS } from '../theme/colors.config.js';
-import { BOY, GIRL, drawSprite } from '../utils/pixelSprites.js';
+import { BOY, GIRL, BOY_DUCK, GIRL_DUCK } from '../utils/pixelSprites.js';
+import {
+  SCREEN_W,
+  SCREEN_H,
+  SCALE,
+  GROUND_Y,
+  MSG_BONUS,
+  MSG_PENALTY,
+  OBSTACLE_NAMES,
+  PICKUP_DEFS,
+} from '../utils/loadingArt.js';
+import { createLoadingScene2d } from '../utils/loadingScene2d.js';
+import { createLoadingScene3d } from '../utils/loadingScene3d.js';
 import {
   useLoadingGame,
   useLoadingGameState,
@@ -54,13 +94,20 @@ import {
   closeLoadingGame,
 } from '../composables/useLoadingGame';
 
-// Phase 8：8-bit loading game（規格見 plan/plan.md，程式碼與 demoloading.html 同步）。
+// Phase 8：8-bit loading game（規格見 plan/plan.md，原型在 demoloading.html）。
 // 兩個林口高中制服小人在校園裡跑步跨欄，藏 Chrome 小恐龍式的操控彩蛋：
 // WASD／方向鍵／空白鍵，觸控＝拖曳移動、上滑跳、下拉蹲。
 // 血條式計分：兩人各 100 分起跳，撞到跨欄/小黑狗/藍鵲扣隨機 10+x 分、
 // 撿到加分物件（書包/射擊隊外套/氣手槍/天文望遠鏡，天上或地上隨機出現）加隨機 10+x 分，
 // 書包/外套撿到會穿上；有人歸零出記分板問要不要再玩一次。
 // 「資料傳輸中」文字列兼遊戲事件看板（撞到/撿到訊息顯示約 1 秒後變回 loading 文案）。
+//
+// 這支只負責「模擬 + 狀態編排 + 生命週期」，畫面交給兩個 renderer：
+//   - utils/loadingScene2d.js：像素 240x80 緩衝放大 3 倍
+//   - utils/loadingScene3d.js：three.js voxel、側面正交鏡頭
+// 每次掛載隨機抽一種（各半）。3D 的 three 是動態 import（走 CDN import map），
+// 抽中 3D 時先照常跑 2D，模組到位才切過去；載入失敗就整場留在 2D（不會白畫面）。
+//
 // 隨 useLoadingGame 的 v-if 掛載/卸載，rAF 與鍵盤監聽在生命週期內啟停（防洩漏）；
 // 比賽狀態（分數/角色分配/穿戴）存 module 層（getGameSession），跨顯示延續。
 
@@ -69,9 +116,11 @@ const { loadingGameLabel } = useLoadingGame();
 const session = getGameSession();
 
 const canvasRef = ref(null);
+const canvas3dRef = ref(null);
 const dots = ref('');
 const eventMsg = ref('');
 const eventColor = ref('');
+const scene3dActive = ref(false);
 
 // 兩個 el-switch 綁 localStorage 開關
 const keepPlayingModel = computed({
@@ -99,102 +148,8 @@ const baseLabel = computed(() => {
 const labelLine = computed(() => eventMsg.value || baseLabel.value);
 const plainLabel = computed(() => loadingGameLabel.value + dots.value);
 
-// ==== 低解析度緩衝：全部畫在 240x80，再放大 3 倍到 720x240（保持像素感）====
-const SCREEN_W = 240;
-const SCREEN_H = 80;
-const SCALE = 3;
-
-// 調色盤與小人 sprite 已抽到 utils/pixelSprites.js（與 FieldTimeline 共用）
-const BRICK = THEME_COLORS.danger.background; // 校舍紅磚 = 珊瑚紅
-const BRICK_DARK = THEME_COLORS.danger.gradient.end; // 陰影/屋簷
-const CREAM = SURFACE_COLORS.alert.background; // 建築米色橫帶
-const MSG_BONUS = THEME_COLORS.success.gradient.start; // 深色卡上的加分訊息（亮綠）
-const MSG_PENALTY = THEME_COLORS.danger.gradient.start; // 扣分訊息（亮紅）
-
-// ==== 障礙物：跨欄（跳）/ 小黑狗（跳）/ 台灣藍鵲（蹲）====
-// 小黑狗：面朝左、白鼻子，蹲坐在跑道上（11x6）
-const DOG_PAL = { K: '#1c1c22', W: '#f4f0e0' };
-const DOG = [
-  [
-    '.K.......K.',
-    '.KKK.....KK',
-    'WKKKKKKKKK.',
-    '.KKKKKKKKK.',
-    '..KK...KK..',
-    '..KK...KK..',
-  ],
-  [
-    '.K.......K.',
-    '.KKK.....KK',
-    'WKKKKKKKKK.',
-    '.KKKKKKKKK.',
-    '.KK.....KK.',
-    '.KK.....KK.',
-  ],
-];
-// 台灣藍鵲：黑頭紅嘴、藍身、長尾白尾尖，飛在頭部高度（14x4，兩幀拍翅）
-const BIRD_PAL = { B: '#2f6bd8', K: '#1c1c22', R: '#d84c30', W: '#f4f0e0' };
-const BIRD = [
-  ['...BB.........', 'RKKBBBB.......', '.KBBBBBBBBBBW.', '..............'],
-  ['..............', 'RKKBBBB.......', '.KBBBBBBBBBBW.', '...BB.........'],
-];
-
-const GROUND_Y = 66;
-const BIRD_Y = GROUND_Y - 17; // 站著會撞頭、蹲下（矮 3px）剛好鑽過
-
-// ==== 加分物件 ====
-// 書包：黑色後背包，上蓋+銀色扣具+中央反光條
-const BAG_PAL = { K: '#1c1c22', G: '#c8c8c4', W: '#f4f0e0' };
-const BAG = [
-  '..KKKK..',
-  '.KKKKKK.',
-  '.KKGGKK.',
-  '.KKKKKK.',
-  '.KKWKKK.',
-  '.KKWKKK.',
-  '.KKWKKK.',
-  '..KKKK..',
-];
-// 射擊隊外套：紅底、深色肩袖、白色拉鍊
-const JACKET_PAL = { R: THEME_COLORS.danger.background, K: '#2c2c34', W: '#f4f0e0' };
-const JACKET = ['.RRRRRR.', 'KRRWWRRK', 'KR.WW.RK', 'KR.WW.RK', '.R.RR.R.'];
-// 競賽氣手槍：黑色長槍管、金色氣瓶、木紋握把
-const PISTOL_PAL = { K: '#2c2c34', Y: '#c8a048', B: '#5a4632' };
-const PISTOL = ['KKKKKKKKKK.', 'YYYYYYYYKK.', '........KK.', '.......BBB.', '.......BB..'];
-// 天文望遠鏡：斜指天空的鏡筒（白色鏡頭端）+ 三腳架
-const SCOPE_PAL = { G: '#8c98a8', K: '#2c2c34', W: '#f4f0e0' };
-const SCOPE = [
-  '.........GW',
-  '........GGG',
-  '.......GGG.',
-  '......GGG..',
-  '.....GGG...',
-  '....KGG....',
-  '....KK.....',
-  '...K.K.K...',
-  '..K..K..K..',
-];
-const PICKUP_DEFS = [
-  { key: 'bag', name: '書包', rows: BAG, pal: BAG_PAL, w: 8, h: 8 },
-  { key: 'jacket', name: '射擊隊外套', rows: JACKET, pal: JACKET_PAL, w: 8, h: 5 },
-  { key: 'pistol', name: '氣手槍', rows: PISTOL, pal: PISTOL_PAL, w: 11, h: 5 },
-  { key: 'scope', name: '天文望遠鏡', rows: SCOPE, pal: SCOPE_PAL, w: 11, h: 9 },
-];
-
-// ==== 生命週期內的遊戲實體 ====
-let rafHandle = 0;
-let vctx = null;
-let ctx = null;
-let buf = null;
-
-let t = 0;
-let farScroll = 0;
-let midScroll = 0;
-let groundScroll = 0;
-let gameOver = false;
-
-// 角色：分配/分數/穿戴自 module 層延續——user 控其中一個，另一個電腦隨機控制。
-// 上一場已分出勝負（有人歸零）就自動開新的一場
+// ==== 角色：分配/分數/穿戴自 module 層延續 ====
+// user 控其中一個，另一個電腦隨機控制。上一場已分出勝負（有人歸零）就自動開新的一場
 if (session.playerScore <= 0 || session.cpuScore <= 0) {
   session.playerScore = 100;
   session.cpuScore = 100;
@@ -204,11 +159,25 @@ if (session.playerScore <= 0 || session.cpuScore <= 0) {
   session.cpuJacket = false;
 }
 
-function makeRunner(sprite, label, x, score, bag, jacket) {
-  return { sprite, label, x, y: 0, vy: 0, ducking: false, blink: 0, score, bag, jacket };
+function makeRunner(sprite, duck, label, x, score, bag, jacket) {
+  return {
+    sprite,
+    duck,
+    label,
+    x,
+    y: 0,
+    vy: 0,
+    ducking: false,
+    blink: 0,
+    score,
+    bag,
+    jacket,
+    grounded: true,
+  };
 }
 const player = makeRunner(
   session.playerIsGirl ? GIRL : BOY,
+  session.playerIsGirl ? GIRL_DUCK : BOY_DUCK,
   session.playerIsGirl ? '女' : '男',
   92,
   session.playerScore,
@@ -217,6 +186,7 @@ const player = makeRunner(
 );
 const cpu = makeRunner(
   session.playerIsGirl ? BOY : GIRL,
+  session.playerIsGirl ? BOY_DUCK : GIRL_DUCK,
   session.playerIsGirl ? '男' : '女',
   48,
   session.cpuScore,
@@ -224,10 +194,37 @@ const cpu = makeRunner(
   session.cpuJacket
 );
 
-const obstacles = []; // { type: 'hurdle'|'dog'|'bird', x, w, passedBy: Set, cpuFails }
+// renderer 讀的世界狀態（兩種 renderer 共用同一份，切換模式不影響比賽）
+const world = {
+  t: 0,
+  cloudScroll: 0,
+  hillScroll: 0,
+  farScroll: 0,
+  midScroll: 0,
+  groundScroll: 0,
+  player,
+  cpu,
+  obstacles: [], // { type: 'hurdle'|'dog'|'bird', x, w, passedBy: Set, cpuFails }
+  pickups: [], // { def, x, y }
+  events: [], // 粒子事件 { type: 'hit'|'pickup'|'land', x, y }，由 renderer 消化
+  controlled: session.controlled,
+  scoreboard: null, // { title, prompt } 或 null
+};
 let nextObstacle = 200;
-const pickups = []; // { def, x, y }
 let nextPickup = 320;
+let gameOver = false;
+
+function emit(type, x, y) {
+  world.events.push({ type, x, y });
+}
+
+// HUD（3D 的 DOM 版）：分數存在非響應式的 runner 上，每幾幀鏡射一次進 ref 推畫面
+const youTag = ref(session.controlled ? '你' : '？');
+const hud = ref({ playerScore: player.score, cpuScore: cpu.score });
+const boardText = ref(null);
+function barWidth(score) {
+  return Math.max(0, Math.min(100, (score / 160) * 100)) + '%';
+}
 
 // ==== 事件看板：撞到/撿到訊息顯示約 1 秒後變回 loading 文案 ====
 let msgTimeout = null;
@@ -247,6 +244,12 @@ function announce(text, color) {
 const keys = {};
 const CONTROL_KEYS = ['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '];
 
+function takeControl() {
+  session.controlled = true;
+  world.controlled = true;
+  youTag.value = '你';
+}
+
 function onKeyDown(e) {
   const k = e.key.toLowerCase();
   if (gameOver) {
@@ -258,7 +261,7 @@ function onKeyDown(e) {
   }
   if (CONTROL_KEYS.includes(k)) {
     keys[k] = true;
-    session.controlled = true;
+    takeControl();
     e.preventDefault();
   }
 }
@@ -281,7 +284,7 @@ function onPointerMove(e) {
   if (!touchStart) {
     return;
   }
-  session.controlled = true;
+  takeControl();
   const dx = e.clientX - touchStart.x;
   const dy = e.clientY - touchStart.y;
   if (dy < -24 && player.y === 0) {
@@ -300,268 +303,7 @@ function onPointerUp() {
   player.ducking = false;
 }
 
-// ==== 繪圖 ====
-// drawSprite 在 utils/pixelSprites.js（收 ctx 的純函數）
-
-function drawCritter(rows, pal, x, y) {
-  for (let r = 0; r < rows.length; r++) {
-    for (let c = 0; c < rows[r].length; c++) {
-      const ch = rows[r][c];
-      if (ch !== '.' && pal[ch]) {
-        ctx.fillStyle = pal[ch];
-        ctx.fillRect(x + c, y + r, 1, 1);
-      }
-    }
-  }
-}
-
-function drawSky() {
-  const bands = ['#9cd4f0', '#aadcf4', '#bce4f8', '#d0eefb'];
-  for (let i = 0; i < bands.length; i++) {
-    ctx.fillStyle = bands[i];
-    ctx.fillRect(0, i * 10, SCREEN_W, 10);
-  }
-  ctx.fillStyle = '#d0eefb';
-  ctx.fillRect(0, 40, SCREEN_W, GROUND_Y - 40);
-  ctx.fillStyle = '#ffffff';
-  const cx = SCREEN_W - ((t * 0.1) % (SCREEN_W + 60)) - 30;
-  ctx.fillRect(cx, 8, 16, 4);
-  ctx.fillRect(cx + 4, 5, 10, 3);
-  ctx.fillRect(cx + 90, 16, 14, 4);
-  ctx.fillRect(cx + 94, 13, 8, 3);
-}
-
-// ==== 校園遠景：照空拍圖排成多段循環 ====
-function brickBody(x, y, w, h) {
-  ctx.fillStyle = BRICK;
-  ctx.fillRect(x, y, w, h);
-  ctx.fillStyle = CREAM;
-  ctx.fillRect(x, y + 8, w, 2);
-  ctx.fillStyle = '#5b7a8c';
-  for (let wx = x + 4; wx < x + w - 6; wx += 10) {
-    ctx.fillRect(wx, y + 11, 5, 5);
-    ctx.fillRect(wx, y + 21, 5, 5);
-  }
-}
-
-// 教學大樓（照 teacharea.jpg）：紅瓦屋頂、磚身每層陰影開口 + 白欄杆，
-// 左角樓掛棟別紅字（照片裡的 C/D 棟）
-function teachBody(x, y, w, h, letter) {
-  ctx.fillStyle = '#d84c30';
-  ctx.fillRect(x - 2, y - 3, w + 4, 3); // 紅瓦屋頂（出簷）
-  ctx.fillStyle = BRICK_DARK;
-  ctx.fillRect(x - 2, y - 1, w + 4, 1); // 簷下陰影
-  ctx.fillStyle = BRICK;
-  ctx.fillRect(x, y, w, h);
-  for (let fy = y + 3; fy < y + h - 7; fy += 9) {
-    ctx.fillStyle = '#5b7a8c';
-    for (let wx = x + 10; wx < x + w - 10; wx += 8) {
-      ctx.fillRect(wx, fy, 5, 5); // 柱廊開口
-    }
-    ctx.fillStyle = '#f4f0e0';
-    ctx.fillRect(x + 8, fy + 5, w - 16, 1); // 白欄杆帶
-  }
-  ctx.fillStyle = CREAM;
-  ctx.fillRect(x + 1, y + 4, 7, 9); // 角樓字牌
-  ctx.fillStyle = BRICK;
-  ctx.font = '7px monospace';
-  ctx.fillText(letter, x + 2, y + 11);
-}
-
-const SEGMENTS = [
-  {
-    // 行政大樓：頂樓招牌 + 門口大石
-    w: 150,
-    draw(x) {
-      brickBody(x + 8, 22, 118, 34);
-      ctx.fillStyle = BRICK_DARK;
-      ctx.fillRect(x + 40, 14, 52, 8);
-      ctx.fillStyle = CREAM;
-      ctx.font = '7px monospace';
-      ctx.fillText('林口高中', x + 52, 21);
-      ctx.fillStyle = '#c8c8c4';
-      ctx.fillRect(x + 130, 48, 14, 8);
-      ctx.fillStyle = '#8c8c88';
-      ctx.fillRect(x + 132, 50, 10, 2);
-    },
-  },
-  {
-    // 樹帶
-    w: 56,
-    draw(x) {
-      for (let i = 0; i < 2; i++) {
-        const bx = x + 6 + i * 26;
-        ctx.fillStyle = '#3f7a3a';
-        ctx.fillRect(bx, 44, 16, 12);
-        ctx.fillRect(bx + 3, 40, 10, 5);
-        ctx.fillStyle = '#5a4632';
-        ctx.fillRect(bx + 7, 56, 2, 4);
-      }
-    },
-  },
-  {
-    // 教學樓 C 棟（teacharea.jpg 樣式）
-    w: 130,
-    draw(x) {
-      teachBody(x + 4, 26, 116, 30, 'C');
-    },
-  },
-  {
-    // 籃球場：圍網 + 籃架
-    w: 90,
-    draw(x) {
-      ctx.fillStyle = '#4a9c6e';
-      ctx.fillRect(x + 4, 50, 82, 6);
-      ctx.fillStyle = '#9caab4';
-      for (let fx = x + 4; fx <= x + 84; fx += 16) {
-        ctx.fillRect(fx, 38, 1, 18);
-      }
-      ctx.fillStyle = '#b8c4cc';
-      ctx.fillRect(x + 4, 38, 82, 1);
-      ctx.fillRect(x + 4, 44, 82, 1);
-      ctx.fillStyle = '#e8e8e0';
-      ctx.fillRect(x + 42, 40, 1, 16);
-      ctx.fillRect(x + 40, 40, 6, 4);
-      ctx.fillStyle = '#d84c30';
-      ctx.fillRect(x + 44, 44, 3, 1);
-    },
-  },
-  {
-    // 教學樓 D 棟（teacharea.jpg 樣式）＋中庭圓形花圃與玻璃金字塔
-    w: 120,
-    draw(x) {
-      teachBody(x + 4, 24, 100, 32, 'D');
-      ctx.fillStyle = '#3f7a3a';
-      ctx.fillRect(x + 106, 50, 10, 6);
-      ctx.fillRect(x + 108, 48, 6, 2);
-      ctx.fillStyle = '#6ab04c';
-      ctx.fillRect(x + 108, 51, 6, 3);
-      ctx.fillStyle = '#bce4f8';
-      ctx.fillRect(x + 110, 46, 2, 2); // 花圃上的玻璃金字塔尖
-    },
-  },
-  {
-    // 樹帶（短）
-    w: 40,
-    draw(x) {
-      ctx.fillStyle = '#3f7a3a';
-      ctx.fillRect(x + 10, 44, 16, 12);
-      ctx.fillRect(x + 13, 40, 10, 5);
-      ctx.fillStyle = '#5a4632';
-      ctx.fillRect(x + 17, 56, 2, 4);
-    },
-  },
-  {
-    // 圖書館（library.jpg）：左側高塔 + 紅字招牌 + 門口雨遮
-    w: 112,
-    draw(x) {
-      ctx.fillStyle = BRICK_DARK;
-      ctx.fillRect(x + 5, 12, 18, 2); // 塔頂簷
-      ctx.fillStyle = BRICK;
-      ctx.fillRect(x + 6, 14, 16, 42);
-      ctx.fillStyle = CREAM;
-      ctx.fillRect(x + 6, 20, 16, 2); // 塔身橫帶
-      ctx.fillStyle = '#5b7a8c';
-      ctx.fillRect(x + 10, 25, 3, 5); // 塔窗
-      ctx.fillRect(x + 15, 25, 3, 5);
-      ctx.fillRect(x + 10, 36, 3, 5);
-      ctx.fillRect(x + 15, 36, 3, 5);
-      brickBody(x + 22, 24, 84, 32);
-      ctx.fillStyle = CREAM;
-      ctx.fillRect(x + 50, 26, 26, 9);
-      ctx.fillStyle = BRICK;
-      ctx.font = '7px monospace';
-      ctx.fillText('圖書館', x + 52, 33);
-      ctx.fillStyle = '#c8c8c4';
-      ctx.fillRect(x + 52, 50, 22, 2); // 門口雨遮
-      ctx.fillStyle = '#8c8c88';
-      ctx.fillRect(x + 53, 52, 2, 4);
-      ctx.fillRect(x + 71, 52, 2, 4);
-    },
-  },
-  {
-    // 科學館（science.jpg，圖書館隔壁）：弧形樓身 + 柱廊 + 石砌門面，
-    // 頂樓補上照片沒拍到的天文台圓頂（深灰輪廓+受光亮面+觀測縫）
-    w: 132,
-    draw(x) {
-      const bx = x + 4;
-      const by = 22;
-      const bw = 120;
-      const bh = 34;
-      ctx.fillStyle = BRICK;
-      ctx.fillRect(bx + 6, by, bw - 12, bh); // 中段主體
-      ctx.fillRect(bx + 2, by + 4, 4, bh - 4); // 兩側退階模擬圓弧
-      ctx.fillRect(bx + bw - 6, by + 4, 4, bh - 4);
-      ctx.fillStyle = BRICK_DARK;
-      ctx.fillRect(bx + 6, by, bw - 12, 2); // 頂簷
-      for (let fy = by + 6; fy < by + bh - 6; fy += 9) {
-        ctx.fillStyle = CREAM;
-        ctx.fillRect(bx + 8, fy, bw - 16, 6); // 柱廊
-        ctx.fillStyle = '#5b7a8c';
-        for (let wx = bx + 11; wx < bx + bw - 12; wx += 7) {
-          ctx.fillRect(wx, fy + 1, 4, 5);
-        }
-        ctx.fillStyle = '#f4f0e0';
-        ctx.fillRect(bx + 8, fy + 6, bw - 16, 1);
-      }
-      const dx = bx + Math.floor(bw / 2);
-      ctx.fillStyle = '#b8c4cc';
-      ctx.fillRect(dx - 13, 47, 26, 9); // 石砌門面
-      ctx.fillStyle = BRICK;
-      ctx.font = '7px monospace';
-      ctx.fillText('科學館', dx - 11, 54);
-      ctx.fillStyle = '#8c98a8';
-      ctx.fillRect(dx - 8, 17, 16, 5); // 天文台圓頂輪廓
-      ctx.fillRect(dx - 6, 14, 12, 3);
-      ctx.fillRect(dx - 4, 12, 8, 2);
-      ctx.fillStyle = '#e8e8e0';
-      ctx.fillRect(dx - 6, 18, 10, 4); // 亮面偏左受光
-      ctx.fillRect(dx - 4, 15, 8, 3);
-      ctx.fillRect(dx - 2, 13, 4, 2);
-      ctx.fillStyle = '#5b5b5d';
-      ctx.fillRect(dx - 9, 21, 18, 1); // 圓頂基座
-      ctx.fillStyle = '#2c2c34';
-      ctx.fillRect(dx - 1, 12, 2, 10); // 觀測縫
-    },
-  },
-];
-const CYCLE = SEGMENTS.reduce((sum, seg) => sum + seg.w, 0);
-
-function drawCampus(scroll) {
-  let x = -(scroll % CYCLE);
-  let i = 0;
-  while (x < SCREEN_W) {
-    const seg = SEGMENTS[i % SEGMENTS.length];
-    if (x + seg.w > 0) {
-      seg.draw(x);
-    }
-    x += seg.w;
-    i++;
-  }
-}
-
-function drawShrubs(scroll) {
-  const W = 34;
-  for (let base = -(scroll % W); base < SCREEN_W; base += W) {
-    ctx.fillStyle = '#356b32';
-    ctx.fillRect(base + 4, 58, 10, 5);
-    ctx.fillRect(base + 6, 56, 6, 2);
-  }
-}
-
-function drawTrack(scroll) {
-  ctx.fillStyle = '#3a78c8';
-  ctx.fillRect(0, GROUND_Y, SCREEN_W, SCREEN_H - GROUND_Y);
-  ctx.fillStyle = '#2c5ea0';
-  ctx.fillRect(0, GROUND_Y, SCREEN_W, 2);
-  ctx.fillStyle = '#e8f0f8';
-  const W = 22;
-  for (let base = -(scroll % W); base < SCREEN_W; base += W) {
-    ctx.fillRect(base, GROUND_Y + 7, 10, 1);
-  }
-}
-
-// ==== 更新 ====
+// ==== 模擬 ====
 function applyPhysics(r) {
   if (r.y < 0 || r.vy !== 0) {
     r.y += r.vy;
@@ -569,6 +311,12 @@ function applyPhysics(r) {
     if (r.y >= 0) {
       r.y = 0;
       r.vy = 0;
+      if (!r.grounded) {
+        emit('land', r.x + 6, GROUND_Y); // 落地塵土
+      }
+      r.grounded = true;
+    } else {
+      r.grounded = false;
     }
   }
   if (r.blink > 0) {
@@ -597,7 +345,7 @@ function updatePlayer() {
 // 地面障礙靠近時「大概」會跳（每幀 15% 機率起跳，太晚就撞）、藍鵲靠近會趴下，
 // 沒事偶爾亂跳一下。不完美才有比賽感
 function updateCpu() {
-  const next = obstacles.find((o) => o.x + o.w > cpu.x - 4 && o.x < cpu.x + 30);
+  const next = world.obstacles.find((o) => o.x + o.w > cpu.x - 4 && o.x < cpu.x + 30);
   if (next && !next.cpuFails) {
     if (next.type === 'bird') {
       cpu.ducking = next.x - cpu.x < 24;
@@ -611,7 +359,7 @@ function updateCpu() {
     cpu.ducking = false;
     // 前方有飄在空中的加分物件時偶爾跳起來搶（10%/幀，搶不搶得到看運氣），
     // 落地的物件跑過去就會撿到不用跳；沒事亂跳的小動作照舊
-    const wantPickup = pickups.find(
+    const wantPickup = world.pickups.find(
       (p) => p.x > cpu.x && p.x - cpu.x < 24 && p.y + p.def.h < GROUND_Y - 15
     );
     if (wantPickup && cpu.y === 0 && Math.random() < 0.1) {
@@ -625,7 +373,6 @@ function updateCpu() {
 
 // 過關判定：地面障礙（欄/狗）要跳起 y < -6，藍鵲要蹲下。
 // 撞到扣隨機 10+x 分並閃爍；玩家的碰撞打上事件看板；有人歸零遊戲結束出記分板
-const OBSTACLE_NAMES = { hurdle: '跨欄', dog: '小黑狗', bird: '藍鵲' };
 function judge(r, o) {
   const cleared = o.type === 'bird' ? r.ducking && r.y === 0 : r.y < -6;
   if (cleared) {
@@ -634,6 +381,7 @@ function judge(r, o) {
   const loss = 10 + Math.floor(Math.random() * 10);
   r.score = Math.max(0, r.score - loss);
   r.blink = 20;
+  emit('hit', r.x + 6, GROUND_Y - 10 + r.y);
   if (r === player) {
     announce('撞到' + OBSTACLE_NAMES[o.type] + ' -' + loss + '分！', MSG_PENALTY);
   }
@@ -647,7 +395,7 @@ function updateObstacles() {
   if (nextObstacle <= 0) {
     const roll = Math.random();
     const type = roll < 0.45 ? 'hurdle' : roll < 0.75 ? 'dog' : 'bird';
-    obstacles.push({
+    world.obstacles.push({
       type,
       x: SCREEN_W + 10,
       w: type === 'bird' ? 14 : type === 'dog' ? 11 : 8,
@@ -656,8 +404,8 @@ function updateObstacles() {
     });
     nextObstacle = 150 + Math.random() * 140;
   }
-  for (let i = obstacles.length - 1; i >= 0; i--) {
-    const o = obstacles[i];
+  for (let i = world.obstacles.length - 1; i >= 0; i--) {
+    const o = world.obstacles[i];
     o.x -= 1.6;
     for (const r of [player, cpu]) {
       if (!o.passedBy.has(r) && o.x < r.x + 10 && o.x + o.w > r.x) {
@@ -666,7 +414,7 @@ function updateObstacles() {
       }
     }
     if (o.x < -16) {
-      obstacles.splice(i, 1);
+      world.obstacles.splice(i, 1);
     }
   }
 }
@@ -678,15 +426,15 @@ function updatePickups() {
   if (nextPickup <= 0) {
     const def = PICKUP_DEFS[Math.floor(Math.random() * PICKUP_DEFS.length)];
     const airborne = Math.random() < 0.5;
-    pickups.push({
+    world.pickups.push({
       def,
       x: SCREEN_W + 10,
       y: airborne ? GROUND_Y - 24 - def.h - Math.floor(Math.random() * 5) : GROUND_Y - def.h,
     });
     nextPickup = 260 + Math.random() * 300;
   }
-  for (let i = pickups.length - 1; i >= 0; i--) {
-    const p = pickups[i];
+  for (let i = world.pickups.length - 1; i >= 0; i--) {
+    const p = world.pickups[i];
     p.x -= 1.6;
     let taken = false;
     for (const r of [player, cpu]) {
@@ -700,6 +448,7 @@ function updatePickups() {
         if (p.def.key === 'jacket') {
           r.jacket = true;
         }
+        emit('pickup', p.x + p.def.w / 2, p.y + p.def.h / 2);
         if (r === player) {
           announce('撿到' + p.def.name + ' +' + gain + '分！', MSG_BONUS);
         }
@@ -708,67 +457,11 @@ function updatePickups() {
       }
     }
     if (taken || p.x < -16) {
-      pickups.splice(i, 1);
+      world.pickups.splice(i, 1);
     }
   }
 }
 
-function drawPickups() {
-  const bob = Math.floor(t / 12) % 2; // 上下飄的小動態
-  for (const p of pickups) {
-    drawCritter(p.def.rows, p.def.pal, p.x, p.y + bob);
-  }
-}
-
-function drawObstacles() {
-  for (const o of obstacles) {
-    if (o.type === 'hurdle') {
-      // 田徑跨欄：深色欄架 + 白紅相間橫板（高對比）
-      ctx.fillStyle = '#2c2c34';
-      ctx.fillRect(o.x, GROUND_Y - 7, 2, 7);
-      ctx.fillRect(o.x + 6, GROUND_Y - 7, 2, 7);
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(o.x, GROUND_Y - 9, 8, 3);
-      ctx.fillStyle = BRICK;
-      ctx.fillRect(o.x + 2, GROUND_Y - 9, 2, 3);
-      ctx.fillRect(o.x + 6, GROUND_Y - 9, 2, 3);
-    } else if (o.type === 'dog') {
-      drawCritter(DOG[Math.floor(t / 10) % 2], DOG_PAL, o.x, GROUND_Y - 6);
-    } else {
-      drawCritter(BIRD[Math.floor(t / 6) % 2], BIRD_PAL, o.x, BIRD_Y);
-    }
-  }
-}
-
-// 穿上外套：制服(w)換紅、領帶(t)收進外套變深色
-const JACKET_ON = { w: THEME_COLORS.danger.background, t: '#2c2c34' };
-
-function drawRunner(r) {
-  if (r.blink % 4 >= 2) {
-    return; // 撞欄閃爍
-  }
-  const frame = r.sprite[Math.floor(t / 8) % 2];
-  const squash = r.ducking && r.y === 0 ? 3 : 0;
-  const X = Math.round(r.x);
-  drawSprite(
-    ctx,
-    frame,
-    X,
-    GROUND_Y - 15 + squash + Math.round(r.y),
-    squash,
-    r.jacket ? JACKET_ON : null
-  );
-  if (r.bag) {
-    // 背上的書包：貼在背側（朝左）軀幹處；squash 已含在 baseY 內、上下抵銷，蹲下也跟著身體
-    const ty = GROUND_Y - 15 + Math.round(r.y) + 6;
-    ctx.fillStyle = '#1c1c22';
-    ctx.fillRect(X, ty, 2, 5);
-    ctx.fillStyle = '#c8c8c4';
-    ctx.fillRect(X, ty + 2, 1, 1); // 扣具
-  }
-}
-
-// ==== 遊戲結束與記分板 ====
 function resetGame() {
   gameOver = false;
   for (const r of [player, cpu]) {
@@ -779,79 +472,100 @@ function resetGame() {
     r.blink = 0;
     r.bag = false;
     r.jacket = false;
+    r.grounded = true;
   }
-  obstacles.length = 0;
-  pickups.length = 0;
+  world.obstacles.length = 0;
+  world.pickups.length = 0;
+  world.events.length = 0;
   nextObstacle = 200;
   nextPickup = 320;
   announce('再來一場！', MSG_BONUS);
 }
 
-// 記分板：蓋在畫面中央。內部結束（有人歸零）宣布贏家並問要不要再玩；
-// loading 結束的 2 秒結算（settling）宣布 loading 完成、分數保留
-function drawScoreboard(title, prompt) {
-  ctx.fillStyle = 'rgba(20,20,28,0.82)';
-  ctx.fillRect(46, 12, 148, 56);
-  ctx.fillStyle = '#f4f0e0';
-  ctx.font = '9px monospace';
-  ctx.fillText(title, 120 - title.length * 4.5, 26);
-  ctx.font = '7px monospace';
-  const youTag = session.controlled ? '你' : '？';
-  ctx.fillText(youTag + player.label + ' ' + player.score + '分', 64, 40);
-  ctx.fillText('電腦' + cpu.label + ' ' + cpu.score + '分', 124, 40);
-  ctx.fillText(prompt, 120 - prompt.length * 3.5, 58);
-}
-
-// HUD 計分板：右上角，標出哪個是「你」——user 未操作前顯示「？」，
-// 被電腦海放的分數就是發現彩蛋的鉤子，不寫操作說明
-function drawHud() {
-  ctx.fillStyle = 'rgba(20,20,28,0.55)';
-  ctx.fillRect(SCREEN_W - 86, 2, 84, 10);
-  ctx.fillStyle = '#f4f0e0';
-  ctx.font = '7px monospace';
-  const youTag = session.controlled ? '你' : '？';
-  ctx.fillText(
-    youTag + player.label + ' ' + player.score + '  電腦' + cpu.label + ' ' + cpu.score,
-    SCREEN_W - 83,
-    10
-  );
-}
+// ==== renderer ====
+let rafHandle = 0;
+let vctx = null;
+let buf = null;
+let scene2d = null;
+let scene3d = null;
+let want3d = false;
+let loading3d = false;
 
 function frame() {
-  t++;
+  world.t++;
   // 凍結時機：內部結束（記分板等重開）或 loading 結算 2 秒（看分數）
   const frozen = gameOver || state.settling;
   if (!frozen) {
-    farScroll += 0.35;
-    midScroll += 0.8;
-    groundScroll += 1.6;
+    world.cloudScroll += 0.12;
+    world.hillScroll += 0.2;
+    world.farScroll += 0.35;
+    world.midScroll += 0.8;
+    world.groundScroll += 1.6;
     updatePlayer();
     updateCpu();
     updateObstacles();
     updatePickups();
   }
 
-  drawSky();
-  drawCampus(farScroll);
-  drawShrubs(midScroll);
-  drawTrack(groundScroll);
-  drawObstacles();
-  drawPickups();
-  drawRunner(cpu);
-  drawRunner(player);
-  drawHud();
+  // 記分板：內部結束（有人歸零）宣布贏家並問要不要再玩；
+  // loading 結束的 2 秒結算宣布 loading 完成、分數保留
   if (gameOver) {
-    drawScoreboard(
-      player.score > 0 ? (session.controlled ? '你' : '？') + '贏了！' : '電腦贏了！',
-      '再玩一次？點畫面或按空白鍵'
-    );
+    world.scoreboard = {
+      title: (player.score > 0 ? youTag.value : '電腦') + '贏了！',
+      prompt: '再玩一次？點畫面或按空白鍵',
+    };
   } else if (state.settling) {
-    drawScoreboard('載入完成！', '分數保留，下次載入繼續');
+    world.scoreboard = { title: '載入完成！', prompt: '分數保留，下次載入繼續' };
+  } else {
+    world.scoreboard = null;
   }
 
-  vctx.clearRect(0, 0, SCREEN_W * SCALE, SCREEN_H * SCALE);
-  vctx.drawImage(buf, 0, 0, SCREEN_W * SCALE, SCREEN_H * SCALE);
+  if (scene3d) {
+    scene3d.render();
+    // DOM HUD 每 6 幀鏡射一次就夠（分數不是響應式資料）
+    if (world.t % 6 === 0) {
+      hud.value = { playerScore: player.score, cpuScore: cpu.score };
+      boardText.value = world.scoreboard;
+    }
+  } else {
+    const shake = scene2d.render();
+    vctx.clearRect(0, 0, SCREEN_W * SCALE, SCREEN_H * SCALE);
+    const sx = shake > 0 ? (Math.random() - 0.5) * shake * SCALE : 0;
+    const sy = shake > 0 ? (Math.random() - 0.5) * shake * SCALE : 0;
+    vctx.drawImage(buf, sx, sy, SCREEN_W * SCALE, SCREEN_H * SCALE);
+  }
   rafHandle = requestAnimationFrame(frame);
+}
+
+// 抽中 3D 時動態 import three（走 CDN import map）。載入期間照常跑 2D，
+// 到位才切；失敗就整場留在 2D——這是 CDN 掛掉時不會變白畫面的保險
+async function tryStart3d() {
+  if (loading3d || scene3d || !want3d) {
+    return;
+  }
+  loading3d = true;
+  try {
+    const THREE = await import('three');
+    if (!gameStarted || !canvas3dRef.value) {
+      return; // 載入途中已卸載
+    }
+    scene3dActive.value = true;
+    await nextTick(); // 先讓 canvas 顯示出來，才量得到尺寸
+    scene3d = createLoadingScene3d(THREE, canvas3dRef.value, world);
+    scene3d.resize();
+  } catch (err) {
+    console.error('[LoadingGame] 3D 模組載入失敗，留在 2D', err);
+    want3d = false;
+    scene3dActive.value = false;
+  } finally {
+    loading3d = false;
+  }
+}
+
+function onResize() {
+  if (scene3d) {
+    scene3d.resize();
+  }
 }
 
 // ==== 啟停：遊戲迴圈與鍵盤監聽跟著「遊戲卡是否在畫面上」走 ====
@@ -870,10 +584,12 @@ function startGame() {
   buf = document.createElement('canvas');
   buf.width = SCREEN_W;
   buf.height = SCREEN_H;
-  ctx = buf.getContext('2d');
+  scene2d = createLoadingScene2d(buf.getContext('2d'), world);
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
+  window.addEventListener('resize', onResize);
   rafHandle = requestAnimationFrame(frame);
+  tryStart3d();
 }
 
 function stopGame() {
@@ -884,6 +600,13 @@ function stopGame() {
   cancelAnimationFrame(rafHandle);
   window.removeEventListener('keydown', onKeyDown);
   window.removeEventListener('keyup', onKeyUp);
+  window.removeEventListener('resize', onResize);
+  if (scene3d) {
+    scene3d.dispose();
+    scene3d = null;
+  }
+  scene3dActive.value = false;
+  scene2d = null;
   if (msgTimeout !== null) {
     clearTimeout(msgTimeout);
     msgTimeout = null;
@@ -912,6 +635,8 @@ watch(
 );
 
 onMounted(() => {
+  // 這次掛載抽 2D 還是 3D（各半）
+  want3d = Math.random() < 0.5;
   // 點點動畫兩種卡都要
   dotsInterval = setInterval(() => {
     dots.value = '.'.repeat(Math.floor(Date.now() / 400) % 4);
@@ -973,14 +698,104 @@ onBeforeUnmount(() => {
   padding: 0;
 }
 
-/* canvas 內部解析度固定 720x240，顯示尺寸跟著卡片縮放（3:1 比例） */
-.loading-game-card canvas {
+/* 舞台：兩個 canvas 疊在一起（3:1 比例），HUD/記分板絕對定位疊上去 */
+.loading-game-stage {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 3 / 1;
+}
+
+.loading-game-stage canvas {
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
-  height: auto;
-  aspect-ratio: 3 / 1;
-  image-rendering: pixelated;
+  height: 100%;
   border-radius: 4px;
+}
+
+/* 2D 是低解析度緩衝放大，要保持像素感；3D 交給 WebGL 自己抗鋸齒 */
+.loading-game-stage canvas:first-child {
+  image-rendering: pixelated;
+}
+
+/* 這些疊層自帶 display，不加這條 [hidden] 會被蓋掉、隱形擋住互動 */
+.loading-game-stage [hidden] {
+  display: none !important;
+}
+
+/* 3D 模式的 HUD：右上角血條 + 分數，標出哪個是「你」 */
+.loading-game-hud3d {
+  position: absolute;
+  right: 6px;
+  top: 6px;
+  background: rgba(20, 20, 28, 0.55);
+  border-radius: 4px;
+  padding: 4px 7px;
+  color: #f4f0e0;
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  min-width: 118px;
+  pointer-events: none;
+}
+
+.loading-game-hud3d .row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.loading-game-hud3d .bar {
+  flex: 1;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 2px;
+}
+
+.loading-game-hud3d .bar i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: #3fbf3f;
+}
+
+.loading-game-hud3d .bar.low i {
+  background: #ff8a75;
+}
+
+/* 3D 模式的記分板 */
+.loading-game-board3d {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: rgba(20, 20, 28, 0.72);
+  border-radius: 4px;
+  color: #f4f0e0;
+  font-family: 'Courier New', monospace;
+  pointer-events: none;
+}
+
+.loading-game-board3d .win {
+  font-size: 18px;
+  letter-spacing: 2px;
+}
+
+.loading-game-board3d .sub {
+  display: flex;
+  gap: 14px;
+  font-size: 12px;
+  opacity: 0.9;
+}
+
+.loading-game-board3d .tip {
+  font-size: 11px;
+  opacity: 0.7;
+  margin-top: 4px;
 }
 
 .loading-game-label {
@@ -1019,6 +834,11 @@ onBeforeUnmount(() => {
   .loading-game-label {
     font-size: 11px;
     margin-top: 5px;
+  }
+
+  .loading-game-hud3d {
+    font-size: 10px;
+    min-width: 96px;
   }
 
   .loading-game-controls :deep(.el-switch__label) {

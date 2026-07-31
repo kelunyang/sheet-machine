@@ -11,19 +11,17 @@ const REFER_ID = 'REFER_SHEET_DRIVE_ID';
 const CREATED_MS = 1_700_000_000_000;
 const DAY = 24 * 60 * 60 * 1000;
 
-// 清單分頁的一列（A:P）：B=refer（唯一的 Drive 試算表 ID，建立時間查它）、
-// L=顯示、N=sheetID（問卷識別字串/前端暫存 key，實務上是「204」這種編號，不是 Drive ID）、
-// O=writeAllowed
+// 清單分頁的一列（A:O，共 15 欄；舊「固定ID」欄已於 2026-07-31 刪除）：
+// B=refer（唯一的 Drive 試算表 ID，建立時間查它）、L=顯示、N=writeAllowed
 function makeListRow({ refer = REFER_ID } = {}) {
-  const row = new Array(16).fill('');
+  const row = new Array(15).fill('');
   row[0] = '測試問卷';
   row[1] = refer;
   row[2] = 'RECORD_SHEET_ID';
   row[3] = String(Date.now() + 30 * DAY); // dueDate
   row[4] = String(Date.now() + 60 * DAY); // viewDate（未來才 visible）
   row[11] = '是'; // 顯示
-  row[13] = '204'; // 若誤拿這欄查 Drive 就是當初的 bug
-  row[14] = '是'; // writeAllowed
+  row[13] = '是'; // writeAllowed
   return row;
 }
 
@@ -47,7 +45,7 @@ function loadGas({ listRows = [makeListRow(), makeListRow()], cacheStore = {}, d
     },
     {
       openById: () => ({
-        getSheets: () => [{ getRange: () => ({ getValues: () => [new Array(16).fill(''), ...listRows] }) }],
+        getSheets: () => [{ getRange: () => ({ getValues: () => [new Array(15).fill(''), ...listRows] }) }],
       }),
     },
     {
@@ -103,7 +101,7 @@ describe('sheetCreatedAt_', () => {
 });
 
 describe('getQList_ 附掛 createdAt', () => {
-  it('visible 清單每項都有 createdAt（查 B 欄 refer，不是 N 欄）；同 refer 第二次讀走快取，Drive 只打一次', () => {
+  it('visible 清單每項都有 createdAt（Drive ID 只認 B 欄 refer，誤用別欄會被 driveCalls 抓到）；同 refer 第二次讀走快取，Drive 只打一次', () => {
     const { gas, driveCalls } = loadGas();
     const list = gas.getQList_();
     expect(list).toHaveLength(2);

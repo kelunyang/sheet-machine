@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Loading Game Demo - 林口高中 8bit</title>
+<title>Loading Game Demo - 林口高中 8bit / 3D</title>
 <style>
   /* 模擬 sheet-machine 的畫面：白底 + 一個假的 drawer 內容被遮罩蓋住 */
   body { margin: 0; font-family: sans-serif; background: #fff; }
@@ -22,17 +22,64 @@
     padding: 10px 12px 8px; box-shadow: 0 12px 40px rgba(0,0,0,.45);
     image-rendering: pixelated; touch-action: none;
   }
-  /* canvas 內部解析度固定 720x240，顯示尺寸跟著卡片縮放（3:1 比例） */
-  .loading-card canvas {
-    display: block; width: 100%; height: auto; aspect-ratio: 3 / 1;
-    image-rendering: pixelated; border-radius: 4px;
+  /* 舞台：兩種 renderer 疊在同一個位置，只顯示目前模式那個 */
+  .stage { position: relative; width: 100%; aspect-ratio: 3 / 1; }
+  .stage canvas {
+    position: absolute; inset: 0;
+    display: block; width: 100%; height: 100%;
+    border-radius: 4px;
   }
+  #game { image-rendering: pixelated; }
+  /* 這些疊層自帶 display，不加這條 [hidden] 會被蓋掉、隱形擋住點擊 */
+  .stage [hidden] { display: none !important; }
+
+  /* 模式切換：雙態按鈕（外觀直接反映目前模式），不用 switch */
+  .mode-switch {
+    position: absolute; left: 6px; top: 6px; z-index: 3;
+    display: flex; gap: 2px; padding: 2px;
+    background: rgba(20,20,28,.62); border-radius: 999px;
+    font-family: 'Courier New', monospace;
+  }
+  .mode-switch button {
+    appearance: none; border: 0; cursor: pointer;
+    padding: 3px 10px; border-radius: 999px;
+    font-size: 11px; letter-spacing: 1px;
+    color: #b9b9c6; background: transparent;
+  }
+  .mode-switch button.is-on {
+    background: #efe0c8; color: #14141c; font-weight: bold;
+  }
+  .mode-switch button:disabled { opacity: .45; cursor: progress; }
+
+  /* 3D 模式的 HUD／記分板（3D 不畫在 canvas 裡，用 DOM 疊） */
+  .hud3d {
+    position: absolute; right: 6px; top: 6px; z-index: 2;
+    background: rgba(20,20,28,.55); border-radius: 4px;
+    padding: 4px 7px; color: #f4f0e0;
+    font-family: 'Courier New', monospace; font-size: 11px; line-height: 1.5;
+    min-width: 118px;
+  }
+  .hud3d .row { display: flex; align-items: center; gap: 5px; }
+  .hud3d .bar { flex: 1; height: 4px; background: rgba(255,255,255,.18); border-radius: 2px; }
+  .hud3d .bar i { display: block; height: 100%; border-radius: 2px; background: #3fbf3f; }
+  .hud3d .bar.low i { background: #ff8a75; }
+  .board3d {
+    position: absolute; inset: 0; z-index: 4; display: flex;
+    flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+    background: rgba(20,20,28,.72); border-radius: 4px;
+    color: #f4f0e0; font-family: 'Courier New', monospace;
+  }
+  .board3d .win { font-size: 18px; letter-spacing: 2px; }
+  .board3d .sub { font-size: 12px; opacity: .9; }
+  .board3d .tip { font-size: 11px; opacity: .7; margin-top: 4px; }
   .loading-label {
     color: #fff; font-size: 13px; text-align: center; margin-top: 7px;
     font-family: 'Courier New', monospace; letter-spacing: 1px;
   }
   @media (max-width: 480px) {
     .loading-label { font-size: 11px; margin-top: 5px; }
+    .mode-switch button { font-size: 10px; padding: 2px 7px; }
+    .hud3d { font-size: 10px; min-width: 96px; }
   }
 </style>
 </head>
@@ -40,6 +87,7 @@
   <div class="fake-app">
     <h2>（假裝這裡是問卷畫面）</h2>
     <p>demo：載入遊戲浮在畫面腰部正中央，底下是被遮罩蓋住的 app。</p>
+    <p>左上角可切 <b>2D 像素</b> ／ <b>3D 立體</b>（three.js 側面正交鏡頭，第一次切才下載）。兩種模式共用同一份遊戲邏輯與同一份像素圖，3D 是把像素直接堆成 voxel。</p>
     <p>彩蛋：鍵盤 WASD／方向鍵，或手指在遊戲畫面上拖曳／上滑，控制「你」的角色跟電腦比跨欄。</p>
     <p>加分物件（天上或地上隨機出現）：書包、射擊隊外套（撿到會穿上）、競賽氣手槍、天文望遠鏡。</p>
     <p>計分：兩人各從 100 分開始，撞到跨欄／小黑狗／藍鵲扣 10~19 分、撿到加分物件加 10~19 分，
@@ -47,20 +95,34 @@
   </div>
   <div class="overlay"></div>
   <div class="loading-card">
-    <canvas id="game" width="720" height="240"></canvas>
+    <div class="stage" id="stage">
+      <canvas id="game" width="720" height="240"></canvas>
+      <canvas id="game3d" hidden></canvas>
+      <div class="mode-switch">
+        <button id="mode-2d" class="is-on" type="button">2D 像素</button>
+        <button id="mode-3d" type="button">3D 立體</button>
+      </div>
+      <div class="hud3d" id="hud3d" hidden>
+        <div class="row"><span id="hud3d-p-name">你</span><span class="bar" id="hud3d-p-bar"><i></i></span><span id="hud3d-p-score">100</span></div>
+        <div class="row"><span id="hud3d-c-name">電腦</span><span class="bar" id="hud3d-c-bar"><i></i></span><span id="hud3d-c-score">100</span></div>
+      </div>
+      <div class="board3d" id="board3d" hidden>
+        <div class="win" id="board3d-win">你贏了！</div>
+        <div class="sub" id="board3d-sub"></div>
+        <div class="tip">再玩一次？點畫面或按空白鍵</div>
+      </div>
+    </div>
     <div class="loading-label"><span id="label-text">資料傳輸中</span><span id="dots"></span></div>
   </div>
 
-<script>
+<script type="module">
 (() => {
-  // ==== 低解析度緩衝：全部畫在 240x80，再放大 3 倍到 720x240（保持像素感）====
+  // ============================================================
+  // 0. 共用設定：遊戲座標系一律用 240x80 的「螢幕像素」單位，
+  //    2D renderer 直接畫、3D renderer 換算成世界座標（1 px = 1 unit）
+  // ============================================================
   const SCREEN_W = 240, SCREEN_H = 80, SCALE = 3;
-  const view = document.getElementById('game');
-  const vctx = view.getContext('2d');
-  vctx.imageSmoothingEnabled = false;
-  const buf = document.createElement('canvas');
-  buf.width = SCREEN_W; buf.height = SCREEN_H;
-  const ctx = buf.getContext('2d');
+  const GROUND_Y = 66;
 
   // ==== 調色盤（對映 src/theme/colors.config.js 的配色表）====
   const PAL = {
@@ -75,361 +137,166 @@
   const BRICK = '#c0392b';      // 校舍紅磚 = 配色表珊瑚紅（danger）
   const BRICK_DARK = '#8e2418'; // danger gradient end（陰影/屋簷）
   const CREAM = '#efe0c8';      // 建築米色橫帶 = 奶油米
+  const WINDOW = '#5b7a8c';     // 窗玻璃（背光）
+  const WINDOW_LIT = '#ffd98a'; // 亮燈的窗
 
-  // ==== 像素小人：12 寬 15 列，側臉朝右，兩幀跑步 ====
-  // 男學生（參考圖左）：奶油米襯衫+深藍領帶+石墨灰長褲
+  // ============================================================
+  // 1. 像素圖資：2D 直接畫、3D 拿同一份堆成 voxel（兩邊美術絕不走鐘）
+  //    小人 12 寬 15 列，側臉朝右，四幀跑步循環（觸地A→過渡→觸地B→過渡）
+  // ============================================================
+  // 男學生：奶油米襯衫 + 深藍領帶 + 石墨灰長褲
   const BOY = [
-    [
-      '...kkkkkk...',
-      '..kkkkkkkk..',
-      '..kkkkssss..',
-      '..kkkssskss.',
-      '..kkkssssss.',
-      '..kkkkssss..',
-      '..wwwwwwtt..',
-      '..wwwwwwtss.',
-      '..wwwwwwww..',
-      '..wwwwwwww..',
-      '..gggggggg..',
-      '..gggggggg..',
-      '...ggg..ggg.',
-      '...gg....gg.',
-      '...dd....dd.',
+    [ // F0 觸地 A：前臂前擺、大跨步
+      '...kkkkkk...', '..kkkkkkkk..', '..kkkkssss..', '..kkkssskss.',
+      '..kkkssssss.', '..kkkkssss..', '..wwwwwwtt..', '..wwwwwwtss.',
+      '..wwwwwwww..', '..wwwwwwww..', '..gggggggg..', '..gggggggg..',
+      '..gg..gggg..', '..gg.....gg.', '..dd.....dd.',
     ],
-    [
-      '...kkkkkk...',
-      '..kkkkkkkk..',
-      '..kkkkssss..',
-      '..kkkssskss.',
-      '..kkkssssss.',
-      '..kkkkssss..',
-      '..wwwwwwtt..',
-      '.sswwwwwwt..',
-      '..wwwwwwww..',
-      '..wwwwwwww..',
-      '..gggggggg..',
-      '..gggggggg..',
-      '....gggg....',
-      '....gg.gg...',
-      '....dd.dd...',
+    [ // F1 過渡：雙腿收攏、手臂中位
+      '...kkkkkk...', '..kkkkkkkk..', '..kkkkssss..', '..kkkssskss.',
+      '..kkkssssss.', '..kkkkssss..', '..wwwwwwtt..', '.swwwwwwwts.',
+      '..wwwwwwww..', '..wwwwwwww..', '..gggggggg..', '..gggggggg..',
+      '...gg.ggg...', '...gg..gg...', '...dd..dd...',
+    ],
+    [ // F2 觸地 B：反向大跨步、手臂後擺
+      '...kkkkkk...', '..kkkkkkkk..', '..kkkkssss..', '..kkkssskss.',
+      '..kkkssssss.', '..kkkkssss..', '..wwwwwwtt..', '.sswwwwwwt..',
+      '..wwwwwwww..', '..wwwwwwww..', '..gggggggg..', '..gggggggg..',
+      '.gggg..gg...', '.gg....gg...', '.dd....dd...',
+    ],
+    [ // F3 過渡：後腿提膝
+      '...kkkkkk...', '..kkkkkkkk..', '..kkkkssss..', '..kkkssskss.',
+      '..kkkssssss.', '..kkkkssss..', '..wwwwwwtt..', '.swwwwwwwts.',
+      '..wwwwwwww..', '..wwwwwwww..', '..gggggggg..', '..gggggggg..',
+      '..ggg.ggg...', '..gg...gg...', '..dd...dd...',
     ],
   ];
-  // 女學生（參考圖右）：鮑伯頭側臉+奶油米襯衫+石墨灰百褶裙+黑絲襪
+  // 女學生：鮑伯頭側臉 + 奶油米襯衫 + 石墨灰百褶裙 + 黑絲襪
   const GIRL = [
     [
-      '...kkkkkk...',
-      '..kkkkkkkk..',
-      '..kkkkssss..',
-      '..kkkssskss.',
-      '..kkkssssss.',
-      '..kkkkssss..',
-      '..kkwwwwww..',
-      '..wwwwwwss..',
-      '..wwwwwwww..',
-      '..gggggggg..',
-      '.gggggggggg.',
-      '.gggggggggg.',
-      '...bb....bb.',
-      '...bb....bb.',
-      '...dd....dd.',
+      '...kkkkkk...', '..kkkkkkkk..', '..kkkkssss..', '..kkkssskss.',
+      '..kkkssssss.', '..kkkkssss..', '..kkwwwwww..', '..wwwwwwss..',
+      '..wwwwwwww..', '..gggggggg..', '.gggggggggg.', '.gggggggggg.',
+      '..bb....bb..', '..bb.....bb.', '..dd.....dd.',
     ],
     [
-      '...kkkkkk...',
-      '..kkkkkkkk..',
-      '..kkkkssss..',
-      '..kkkssskss.',
-      '..kkkssssss.',
-      '..kkkkssss..',
-      '..kkwwwwww..',
-      '.sswwwwww...',
-      '..wwwwwwww..',
-      '..gggggggg..',
-      '.gggggggggg.',
-      '.gggggggggg.',
-      '....bb.bb...',
-      '....bb.bb...',
-      '....dd.dd...',
+      '...kkkkkk...', '..kkkkkkkk..', '..kkkkssss..', '..kkkssskss.',
+      '..kkkssssss.', '..kkkkssss..', '..kkwwwwww..', '.swwwwwwss..',
+      '..wwwwwwww..', '..gggggggg..', '.gggggggggg.', '.gggggggggg.',
+      '...bb..bb...', '...bb..bb...', '...dd..dd...',
+    ],
+    [
+      '...kkkkkk...', '..kkkkkkkk..', '..kkkkssss..', '..kkkssskss.',
+      '..kkkssssss.', '..kkkkssss..', '..kkwwwwww..', '.sswwwwww...',
+      '..wwwwwwww..', '..gggggggg..', '.gggggggggg.', '.gggggggggg.',
+      '.bb....bb...', '.bb....bb...', '.dd....dd...',
+    ],
+    [
+      '...kkkkkk...', '..kkkkkkkk..', '..kkkkssss..', '..kkkssskss.',
+      '..kkkssssss.', '..kkkkssss..', '..kkwwwwww..', '.swwwwwwss..',
+      '..wwwwwwww..', '..gggggggg..', '.gggggggggg.', '.gggggggggg.',
+      '..bb...bb...', '..bb...bb...', '..dd...dd...',
     ],
   ];
 
-  // override：撿到外套後把制服色換成外套色（{ w: 紅, t: 深 }）
-  function drawSprite(rows, x, y, squashTop = 0, override = null) {
-    for (let r = squashTop; r < rows.length; r++) {
-      const row = rows[r];
-      for (let c = 0; c < row.length; c++) {
-        const ch = row[c];
-        const color = (override && override[ch]) || PAL[ch];
-        if (ch !== '.' && color) {
-          ctx.fillStyle = color;
-          ctx.fillRect(x + c, y + (r - squashTop), 1, 1);
-        }
-      }
-    }
-  }
-
-  // ==== 背景層 ====
-  const GROUND_Y = 66;
-  let t = 0;
-  let farScroll = 0, midScroll = 0, groundScroll = 0;
-
-  function drawSky() {
-    const bands = ['#9cd4f0', '#aadcf4', '#bce4f8', '#d0eefb'];
-    for (let i = 0; i < bands.length; i++) {
-      ctx.fillStyle = bands[i];
-      ctx.fillRect(0, i * 10, SCREEN_W, 10);
-    }
-    ctx.fillStyle = '#d0eefb';
-    ctx.fillRect(0, 40, SCREEN_W, GROUND_Y - 40);
-    ctx.fillStyle = '#ffffff';
-    const cx = SCREEN_W - ((t * 0.1) % (SCREEN_W + 60)) - 30;
-    ctx.fillRect(cx, 8, 16, 4); ctx.fillRect(cx + 4, 5, 10, 3);
-    ctx.fillRect(cx + 90, 16, 14, 4); ctx.fillRect(cx + 94, 13, 8, 3);
-  }
-
-  // ==== 校園遠景：照空拍圖排成多段循環 ====
-  function brickBody(x, y, w, h) {
-    ctx.fillStyle = BRICK;
-    ctx.fillRect(x, y, w, h);
-    ctx.fillStyle = CREAM;
-    ctx.fillRect(x, y + 8, w, 2);
-    ctx.fillStyle = '#5b7a8c';
-    for (let wx = x + 4; wx < x + w - 6; wx += 10) {
-      ctx.fillRect(wx, y + 11, 5, 5);
-      ctx.fillRect(wx, y + 21, 5, 5);
-    }
-  }
-
-  // 教學大樓（照 teacharea.jpg）：紅瓦屋頂、磚身每層陰影開口 + 白欄杆，
-  // 左角樓掛棟別紅字（照片裡的 C/D 棟）
-  function teachBody(x, y, w, h, letter) {
-    ctx.fillStyle = '#d84c30';
-    ctx.fillRect(x - 2, y - 3, w + 4, 3); // 紅瓦屋頂（出簷）
-    ctx.fillStyle = BRICK_DARK;
-    ctx.fillRect(x - 2, y - 1, w + 4, 1); // 簷下陰影
-    ctx.fillStyle = BRICK;
-    ctx.fillRect(x, y, w, h);
-    for (let fy = y + 3; fy < y + h - 7; fy += 9) {
-      ctx.fillStyle = '#5b7a8c';
-      for (let wx = x + 10; wx < x + w - 10; wx += 8) {
-        ctx.fillRect(wx, fy, 5, 5); // 柱廊開口
-      }
-      ctx.fillStyle = '#f4f0e0';
-      ctx.fillRect(x + 8, fy + 5, w - 16, 1); // 白欄杆帶
-    }
-    ctx.fillStyle = CREAM;
-    ctx.fillRect(x + 1, y + 4, 7, 9); // 角樓字牌
-    ctx.fillStyle = BRICK;
-    ctx.font = '7px monospace';
-    ctx.fillText(letter, x + 2, y + 11);
-  }
-
-  const SEGMENTS = [
-    { // 行政大樓：頂樓招牌 + 門口大石
-      w: 150,
-      draw(x) {
-        brickBody(x + 8, 22, 118, 34);
-        ctx.fillStyle = BRICK_DARK;
-        ctx.fillRect(x + 40, 14, 52, 8);
-        ctx.fillStyle = CREAM;
-        ctx.font = '7px monospace';
-        ctx.fillText('林口高中', x + 52, 21);
-        ctx.fillStyle = '#c8c8c4';
-        ctx.fillRect(x + 130, 48, 14, 8);
-        ctx.fillStyle = '#8c8c88';
-        ctx.fillRect(x + 132, 50, 10, 2);
-      },
-    },
-    { // 樹帶
-      w: 56,
-      draw(x) {
-        for (let i = 0; i < 2; i++) {
-          const bx = x + 6 + i * 26;
-          ctx.fillStyle = '#3f7a3a';
-          ctx.fillRect(bx, 44, 16, 12);
-          ctx.fillRect(bx + 3, 40, 10, 5);
-          ctx.fillStyle = '#5a4632';
-          ctx.fillRect(bx + 7, 56, 2, 4);
-        }
-      },
-    },
-    { // 教學樓 C 棟（teacharea.jpg 樣式）
-      w: 130,
-      draw(x) {
-        teachBody(x + 4, 26, 116, 30, 'C');
-      },
-    },
-    { // 籃球場：圍網 + 籃架
-      w: 90,
-      draw(x) {
-        ctx.fillStyle = '#4a9c6e';
-        ctx.fillRect(x + 4, 50, 82, 6);
-        ctx.fillStyle = '#9caab4';
-        for (let fx = x + 4; fx <= x + 84; fx += 16) {
-          ctx.fillRect(fx, 38, 1, 18);
-        }
-        ctx.fillStyle = '#b8c4cc';
-        ctx.fillRect(x + 4, 38, 82, 1);
-        ctx.fillRect(x + 4, 44, 82, 1);
-        ctx.fillStyle = '#e8e8e0';
-        ctx.fillRect(x + 42, 40, 1, 16);
-        ctx.fillRect(x + 40, 40, 6, 4);
-        ctx.fillStyle = '#d84c30';
-        ctx.fillRect(x + 44, 44, 3, 1);
-      },
-    },
-    { // 教學樓 D 棟（teacharea.jpg 樣式）＋中庭圓形花圃與玻璃金字塔
-      w: 120,
-      draw(x) {
-        teachBody(x + 4, 24, 100, 32, 'D');
-        ctx.fillStyle = '#3f7a3a';
-        ctx.fillRect(x + 106, 50, 10, 6);
-        ctx.fillRect(x + 108, 48, 6, 2);
-        ctx.fillStyle = '#6ab04c';
-        ctx.fillRect(x + 108, 51, 6, 3);
-        ctx.fillStyle = '#bce4f8';
-        ctx.fillRect(x + 110, 46, 2, 2); // 花圃上的玻璃金字塔尖
-      },
-    },
-    { // 樹帶（短）
-      w: 40,
-      draw(x) {
-        ctx.fillStyle = '#3f7a3a';
-        ctx.fillRect(x + 10, 44, 16, 12);
-        ctx.fillRect(x + 13, 40, 10, 5);
-        ctx.fillStyle = '#5a4632';
-        ctx.fillRect(x + 17, 56, 2, 4);
-      },
-    },
-    { // 圖書館（library.jpg）：左側高塔 + 紅字招牌 + 門口雨遮
-      w: 112,
-      draw(x) {
-        // 塔樓（比主樓高一截）
-        ctx.fillStyle = BRICK_DARK;
-        ctx.fillRect(x + 5, 12, 18, 2); // 塔頂簷
-        ctx.fillStyle = BRICK;
-        ctx.fillRect(x + 6, 14, 16, 42);
-        ctx.fillStyle = CREAM;
-        ctx.fillRect(x + 6, 20, 16, 2); // 塔身橫帶
-        ctx.fillStyle = '#5b7a8c';
-        ctx.fillRect(x + 10, 25, 3, 5); // 塔窗
-        ctx.fillRect(x + 15, 25, 3, 5);
-        ctx.fillRect(x + 10, 36, 3, 5);
-        ctx.fillRect(x + 15, 36, 3, 5);
-        // 主樓（沿用紅磚+米帶+藍窗）
-        brickBody(x + 22, 24, 84, 32);
-        // 紅字招牌（米色底、紅字，照片是館名紅字掛在磚牆上）
-        ctx.fillStyle = CREAM;
-        ctx.fillRect(x + 50, 26, 26, 9);
-        ctx.fillStyle = BRICK;
-        ctx.font = '7px monospace';
-        ctx.fillText('圖書館', x + 52, 33);
-        // 門口雨遮
-        ctx.fillStyle = '#c8c8c4';
-        ctx.fillRect(x + 52, 50, 22, 2);
-        ctx.fillStyle = '#8c8c88';
-        ctx.fillRect(x + 53, 52, 2, 4);
-        ctx.fillRect(x + 71, 52, 2, 4);
-      },
-    },
-    { // 科學館（science.jpg，圖書館隔壁）：弧形樓身 + 柱廊 + 石砌門面，
-      // 頂樓補上照片沒拍到的天文台圓頂（白色圓頂 + 觀測縫）
-      w: 132,
-      draw(x) {
-        const bx = x + 4, by = 22, bw = 120, bh = 34;
-        // 弧形樓身：中段主體 + 兩側退階模擬圓弧
-        ctx.fillStyle = BRICK;
-        ctx.fillRect(bx + 6, by, bw - 12, bh);
-        ctx.fillRect(bx + 2, by + 4, 4, bh - 4);
-        ctx.fillRect(bx + bw - 6, by + 4, 4, bh - 4);
-        ctx.fillStyle = BRICK_DARK;
-        ctx.fillRect(bx + 6, by, bw - 12, 2); // 頂簷
-        // 柱廊：每層米色柱列 + 陰影開口 + 白欄杆
-        for (let fy = by + 6; fy < by + bh - 6; fy += 9) {
-          ctx.fillStyle = CREAM;
-          ctx.fillRect(bx + 8, fy, bw - 16, 6);
-          ctx.fillStyle = '#5b7a8c';
-          for (let wx = bx + 11; wx < bx + bw - 12; wx += 7) {
-            ctx.fillRect(wx, fy + 1, 4, 5);
-          }
-          ctx.fillStyle = '#f4f0e0';
-          ctx.fillRect(bx + 8, fy + 6, bw - 16, 1);
-        }
-        // 石砌門面 + 紅字館名
-        const dx = bx + Math.floor(bw / 2);
-        ctx.fillStyle = '#b8c4cc';
-        ctx.fillRect(dx - 13, 47, 26, 9);
-        ctx.fillStyle = BRICK;
-        ctx.font = '7px monospace';
-        ctx.fillText('科學館', dx - 11, 54);
-        // 天文台圓頂（階梯半圓 + 觀測縫）：深灰輪廓襯淺色天空，亮面偏左受光
-        ctx.fillStyle = '#8c98a8';
-        ctx.fillRect(dx - 8, 17, 16, 5);
-        ctx.fillRect(dx - 6, 14, 12, 3);
-        ctx.fillRect(dx - 4, 12, 8, 2);
-        ctx.fillStyle = '#e8e8e0';
-        ctx.fillRect(dx - 6, 18, 10, 4);
-        ctx.fillRect(dx - 4, 15, 8, 3);
-        ctx.fillRect(dx - 2, 13, 4, 2);
-        ctx.fillStyle = '#5b5b5d';
-        ctx.fillRect(dx - 9, 21, 18, 1); // 圓頂基座
-        ctx.fillStyle = '#2c2c34';
-        ctx.fillRect(dx - 1, 12, 2, 10); // 觀測縫
-      },
-    },
+  // 蹲下（鑽藍鵲）專用姿勢：12 寬 12 列，比站姿矮 3px。
+  // 舊做法是把站姿的頂端幾列切掉（squashTop），結果是「頭頂被削掉一塊」很怪；
+  // 改成獨立的低姿勢圖——頭是完整的，只是壓低前傾、腿收在身體下面。
+  const BOY_DUCK = [
+    [ // 頭 5 列（壓低前伸）＋軀幹 3 列＋大腿／膝／小腿／鞋各 1 列，蹲得出膝蓋
+      '.....kkkkk..', '....kkkkssss', '....kkksskss', '....kkssssss',
+      '.....kssss..', '..wwwwwwwss.', '.wwwwwwwtt..', '.wwwwwwww...',
+      '.gggggggg...', '..ggg.ggg...', '..gg...gg...', '..dd...dd...',
+    ],
+    [
+      '.....kkkkk..', '....kkkkssss', '....kkksskss', '....kkssssss',
+      '.....kssss..', '..wwwwwwwss.', '.wwwwwwwtt..', '.wwwwwwww...',
+      '.gggggggg...', '..gg..gggg..', '..gg....gg..', '..dd....dd..',
+    ],
   ];
-  const CYCLE = SEGMENTS.reduce((sum, seg) => sum + seg.w, 0);
+  const GIRL_DUCK = [
+    [
+      '.....kkkkk..', '....kkkkssss', '....kkksskss', '....kkssssss',
+      '...kkkssss..', '..kwwwwwwss.', '.wwwwwwww...', '.wwwwwwww...',
+      'gggggggggg..', '.ggggggggg..', '..bb...bb...', '..dd...dd...',
+    ],
+    [
+      '.....kkkkk..', '....kkkkssss', '....kkksskss', '....kkssssss',
+      '...kkkssss..', '..kwwwwwwss.', '.wwwwwwww...', '.wwwwwwww...',
+      'gggggggggg..', '.ggggggggg..', '..bb..bb....', '..dd..dd....',
+    ],
+  ];
+  const STAND_H = 15, DUCK_H = 12;
 
-  function drawCampus(scroll) {
-    let x = -(scroll % CYCLE);
-    let i = 0;
-    while (x < SCREEN_W) {
-      const seg = SEGMENTS[i % SEGMENTS.length];
-      if (x + seg.w > 0) seg.draw(x);
-      x += seg.w;
-      i++;
-    }
-  }
+  // 小黑狗：面朝左、白鼻子，蹲坐在跑道上（11x6，兩幀）
+  const DOG_PAL = { K: '#1c1c22', W: '#f4f0e0' };
+  const DOG = [
+    ['.K.......K.', '.KKK.....KK', 'WKKKKKKKKK.', '.KKKKKKKKK.', '..KK...KK..', '..KK...KK..'],
+    ['.K.......K.', '.KKK.....KK', 'WKKKKKKKKK.', '.KKKKKKKKK.', '.KK.....KK.', '.KK.....KK.'],
+  ];
+  // 台灣藍鵲：黑頭紅嘴、藍身、長尾白尾尖，飛在頭部高度（14x4，兩幀拍翅）
+  const BIRD_PAL = { B: '#2f6bd8', K: '#1c1c22', R: '#d84c30', W: '#f4f0e0' };
+  const BIRD = [
+    ['...BB.........', 'RKKBBBB.......', '.KBBBBBBBBBBW.', '..............'],
+    ['..............', 'RKKBBBB.......', '.KBBBBBBBBBBW.', '...BB.........'],
+  ];
+  const BIRD_Y = GROUND_Y - 17; // 站著會撞頭、蹲下（矮 3px）剛好鑽過
 
-  function drawShrubs(scroll) {
-    const W = 34;
-    for (let base = -(scroll % W); base < SCREEN_W; base += W) {
-      ctx.fillStyle = '#356b32';
-      ctx.fillRect(base + 4, 58, 10, 5);
-      ctx.fillRect(base + 6, 56, 6, 2);
-    }
-  }
+  // ==== 加分物件 ====
+  const BAG_PAL = { K: '#1c1c22', G: '#c8c8c4', W: '#f4f0e0' };
+  const BAG = ['..KKKK..', '.KKKKKK.', '.KKGGKK.', '.KKKKKK.', '.KKWKKK.', '.KKWKKK.', '.KKWKKK.', '..KKKK..'];
+  const JACKET_PAL = { R: '#c0392b', K: '#2c2c34', W: '#f4f0e0' };
+  const JACKET = ['.RRRRRR.', 'KRRWWRRK', 'KR.WW.RK', 'KR.WW.RK', '.R.RR.R.'];
+  const PISTOL_PAL = { K: '#2c2c34', Y: '#c8a048', B: '#5a4632' };
+  const PISTOL = ['KKKKKKKKKK.', 'YYYYYYYYKK.', '........KK.', '.......BBB.', '.......BB..'];
+  const SCOPE_PAL = { G: '#8c98a8', K: '#2c2c34', W: '#f4f0e0' };
+  const SCOPE = [
+    '.........GW', '........GGG', '.......GGG.', '......GGG..', '.....GGG...',
+    '....KGG....', '....KK.....', '...K.K.K...', '..K..K..K..',
+  ];
+  const PICKUP_DEFS = [
+    { key: 'bag', name: '書包', rows: BAG, pal: BAG_PAL, w: 8, h: 8 },
+    { key: 'jacket', name: '射擊隊外套', rows: JACKET, pal: JACKET_PAL, w: 8, h: 5 },
+    { key: 'pistol', name: '氣手槍', rows: PISTOL, pal: PISTOL_PAL, w: 11, h: 5 },
+    { key: 'scope', name: '天文望遠鏡', rows: SCOPE, pal: SCOPE_PAL, w: 11, h: 9 },
+  ];
+  // 穿上外套：制服(w)換紅、領帶(t)收進外套變深色
+  const JACKET_ON = { w: '#c0392b', t: '#2c2c34' };
 
-  function drawTrack(scroll) {
-    ctx.fillStyle = '#3a78c8';
-    ctx.fillRect(0, GROUND_Y, SCREEN_W, SCREEN_H - GROUND_Y);
-    ctx.fillStyle = '#2c5ea0';
-    ctx.fillRect(0, GROUND_Y, SCREEN_W, 2);
-    ctx.fillStyle = '#e8f0f8';
-    const W = 22;
-    for (let base = -(scroll % W); base < SCREEN_W; base += W) {
-      ctx.fillRect(base, GROUND_Y + 7, 10, 1);
-    }
-  }
-
-  // ==== 角色：每次載入隨機分配——user 控其中一個，另一個電腦隨機控制 ====
-  // bag/jacket：撿到書包/外套後穿在身上（純裝飾，見 drawRunner）
-  // score：血條式計分，100 起跳、撞到扣 10+x、撿到加 10+x，有人歸零遊戲結束
-  function makeRunner(sprite, label, x) {
+  // ============================================================
+  // 2. 遊戲邏輯（純模擬，不畫任何東西；兩種 renderer 共用）
+  // ============================================================
+  function makeRunner(sprite, duck, label, x) {
     return {
-      sprite, label, x, y: 0, vy: 0, ducking: false, blink: 0, score: 100,
-      bag: false, jacket: false,
+      sprite, duck, label, x, y: 0, vy: 0, ducking: false, blink: 0, score: 100,
+      bag: false, jacket: false, grounded: true,
     };
   }
   const playerIsGirl = Math.random() < 0.5;
-  const player = makeRunner(playerIsGirl ? GIRL : BOY, playerIsGirl ? '女' : '男', 92);
-  const cpu = makeRunner(playerIsGirl ? BOY : GIRL, playerIsGirl ? '男' : '女', 48);
+  const player = playerIsGirl
+    ? makeRunner(GIRL, GIRL_DUCK, '女', 92)
+    : makeRunner(BOY, BOY_DUCK, '男', 92);
+  const cpu = playerIsGirl
+    ? makeRunner(BOY, BOY_DUCK, '男', 48)
+    : makeRunner(GIRL, GIRL_DUCK, '女', 48);
   let controlled = false; // user 是否接管過（決定 HUD 顯示「你」）
   let gameOver = false;
+  let t = 0;
+  let cloudScroll = 0, hillScroll = 0, farScroll = 0, midScroll = 0, groundScroll = 0;
 
-  // ==== 事件看板：「資料傳輸中」那行兼作遊戲即時訊息，顯示約 1 秒後變回 loading 文案 ====
+  const obstacles = []; // { type, x, w, passedBy, cpuFails }
+  const pickups = [];   // { def, x, y }
+  let nextObstacle = 200;
+  let nextPickup = 320;
+
+  // 事件佇列：renderer 取走後用來噴粒子（撞擊星星／撿取閃光／落地塵土）
+  const events = [];
+  function emit(type, x, y) { events.push({ type, x, y }); }
+
+  // ==== 事件看板：「資料傳輸中」那行兼作遊戲即時訊息 ====
   const labelText = document.getElementById('label-text');
   const LABEL_BASE = '資料傳輸中';
-  const MSG_BONUS = '#3fbf3f'; // success gradient start（深色卡上用亮色）
+  const MSG_BONUS = '#3fbf3f';   // success gradient start（深色卡上用亮色）
   const MSG_PENALTY = '#ff8a75'; // danger gradient start
   let msgTimer = 0;
   function announce(text, color) {
@@ -438,152 +305,16 @@
     msgTimer = 60;
   }
 
-  // ==== 障礙物：跨欄（跳）/ 小黑狗（跳）/ 台灣藍鵲（蹲）====
-  // 小黑狗：面朝左、白鼻子，蹲坐在跑道上（11x6）
-  const DOG_PAL = { K: '#1c1c22', W: '#f4f0e0' };
-  const DOG = [
-    [
-      '.K.......K.',
-      '.KKK.....KK',
-      'WKKKKKKKKK.',
-      '.KKKKKKKKK.',
-      '..KK...KK..',
-      '..KK...KK..',
-    ],
-    [
-      '.K.......K.',
-      '.KKK.....KK',
-      'WKKKKKKKKK.',
-      '.KKKKKKKKK.',
-      '.KK.....KK.',
-      '.KK.....KK.',
-    ],
-  ];
-  // 台灣藍鵲：黑頭紅嘴、藍身、長尾白尾尖，飛在頭部高度（14x4，兩幀拍翅）
-  const BIRD_PAL = { B: '#2f6bd8', K: '#1c1c22', R: '#d84c30', W: '#f4f0e0' };
-  const BIRD = [
-    [
-      '...BB.........',
-      'RKKBBBB.......',
-      '.KBBBBBBBBBBW.',
-      '..............',
-    ],
-    [
-      '..............',
-      'RKKBBBB.......',
-      '.KBBBBBBBBBBW.',
-      '...BB.........',
-    ],
-  ];
-  const BIRD_Y = GROUND_Y - 17; // 站著會撞頭、蹲下（矮 3px）剛好鑽過
-
-  // ==== 加分物件：飄在跳躍高度，跳起來碰到 +2 ====
-  // 書包（da3e8d9c...jpg）：黑色後背包，上蓋+銀色扣具+中央反光條
-  const BAG_PAL = { K: '#1c1c22', G: '#c8c8c4', W: '#f4f0e0' };
-  const BAG = [
-    '..KKKK..',
-    '.KKKKKK.',
-    '.KKGGKK.',
-    '.KKKKKK.',
-    '.KKWKKK.',
-    '.KKWKKK.',
-    '.KKWKKK.',
-    '..KKKK..',
-  ];
-  // 射擊隊外套（shoot.jpg）：紅底、深色肩袖、白色拉鍊
-  const JACKET_PAL = { R: '#c0392b', K: '#2c2c34', W: '#f4f0e0' };
-  const JACKET = [
-    '.RRRRRR.',
-    'KRRWWRRK',
-    'KR.WW.RK',
-    'KR.WW.RK',
-    '.R.RR.R.',
-  ];
-  // 競賽氣手槍（shoot.jpg）：黑色長槍管、金色氣瓶、木紋握把
-  const PISTOL_PAL = { K: '#2c2c34', Y: '#c8a048', B: '#5a4632' };
-  const PISTOL = [
-    'KKKKKKKKKK.',
-    'YYYYYYYYKK.',
-    '........KK.',
-    '.......BBB.',
-    '.......BB..',
-  ];
-  // 天文望遠鏡：斜指天空的鏡筒（白色鏡頭端）+ 三腳架
-  const SCOPE_PAL = { G: '#8c98a8', K: '#2c2c34', W: '#f4f0e0' };
-  const SCOPE = [
-    '.........GW',
-    '........GGG',
-    '.......GGG.',
-    '......GGG..',
-    '.....GGG...',
-    '....KGG....',
-    '....KK.....',
-    '...K.K.K...',
-    '..K..K..K..',
-  ];
-  const PICKUP_DEFS = [
-    { key: 'bag', name: '書包', rows: BAG, pal: BAG_PAL, w: 8, h: 8 },
-    { key: 'jacket', name: '射擊隊外套', rows: JACKET, pal: JACKET_PAL, w: 8, h: 5 },
-    { key: 'pistol', name: '氣手槍', rows: PISTOL, pal: PISTOL_PAL, w: 11, h: 5 },
-    { key: 'scope', name: '天文望遠鏡', rows: SCOPE, pal: SCOPE_PAL, w: 11, h: 9 },
-  ];
-  const pickups = []; // { def, x, y }
-  let nextPickup = 320;
-
-  function drawCritter(rows, pal, x, y) {
-    for (let r = 0; r < rows.length; r++) {
-      for (let c = 0; c < rows[r].length; c++) {
-        const ch = rows[r][c];
-        if (ch !== '.' && pal[ch]) {
-          ctx.fillStyle = pal[ch];
-          ctx.fillRect(x + c, y + r, 1, 1);
-        }
-      }
-    }
-  }
-
-  const obstacles = []; // { type: 'hurdle'|'dog'|'bird', x, w, passedBy: Set, cpuFails }
-  let nextObstacle = 200;
-
-  // ==== 彩蛋輸入：WASD / 方向鍵 / 觸控（只控制 player）；遊戲結束時任一操作＝再玩一次 ====
-  const keys = {};
-  window.addEventListener('keydown', (e) => {
-    const k = e.key.toLowerCase();
-    if (gameOver) {
-      if ([' ', 'enter', 'w', 'arrowup'].includes(k)) {
-        resetGame();
-        e.preventDefault();
-      }
-      return;
-    }
-    if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(k)) {
-      keys[k] = true; controlled = true; e.preventDefault();
-    }
-  });
-  window.addEventListener('keyup', (e) => { keys[e.key.toLowerCase()] = false; });
-
-  let touchStart = null;
-  view.addEventListener('pointerdown', (e) => {
-    if (gameOver) {
-      resetGame();
-      return;
-    }
-    touchStart = { x: e.clientX, y: e.clientY };
-  });
-  view.addEventListener('pointermove', (e) => {
-    if (!touchStart) return;
-    controlled = true;
-    const dx = e.clientX - touchStart.x, dy = e.clientY - touchStart.y;
-    if (dy < -24 && player.y === 0) { player.vy = -2.6; touchStart.y = e.clientY; } // 上滑跳
-    player.ducking = dy > 24;                                                       // 下拉蹲
-    if (Math.abs(dx) > 6) { player.x += dx > 0 ? 2 : -2; touchStart.x = e.clientX; } // 左右拖
-  });
-  view.addEventListener('pointerup', () => { touchStart = null; player.ducking = false; });
-
   function applyPhysics(r) {
     if (r.y < 0 || r.vy !== 0) {
       r.y += r.vy; r.vy += 0.22;
-      if (r.y >= 0) { r.y = 0; r.vy = 0; }
+      if (r.y >= 0) {
+        r.y = 0; r.vy = 0;
+        if (!r.grounded) emit('land', r.x + 6, GROUND_Y); // 落地塵土
+        r.grounded = true;
+      } else {
+        r.grounded = false;
+      }
     }
     if (r.blink > 0) r.blink--;
   }
@@ -599,9 +330,8 @@
     applyPhysics(player);
   }
 
-  // 電腦隨機控制：每個障礙生成時就先擲骰決定電腦會不會失誤（18%），
-  // 地面障礙靠近時「大概」會跳（每幀 15% 機率起跳，太晚就撞）、藍鵲靠近會趴下，
-  // 沒事偶爾亂跳一下。不完美才有比賽感
+  // 電腦隨機控制：每個障礙生成時就先擲骰決定會不會失誤（18%），
+  // 地面障礙靠近時「大概」會跳、藍鵲靠近會趴下，沒事偶爾亂跳一下。不完美才有比賽感
   function updateCpu() {
     const next = obstacles.find((o) => o.x + o.w > cpu.x - 4 && o.x < cpu.x + 30);
     if (next && !next.cpuFails) {
@@ -613,19 +343,16 @@
       }
     } else {
       cpu.ducking = false;
-      // 前方有飄在空中的加分物件時偶爾跳起來搶（10%/幀，搶不搶得到看運氣），
-      // 落地的物件跑過去就會撿到不用跳；沒事亂跳的小動作照舊
       const wantPickup = pickups.find(
         (p) => p.x > cpu.x && p.x - cpu.x < 24 && p.y + p.def.h < GROUND_Y - 15
       );
       if (wantPickup && cpu.y === 0 && Math.random() < 0.1) cpu.vy = -2.6;
-      else if (!next && cpu.y === 0 && Math.random() < 0.002) cpu.vy = -2.2; // 沒事亂跳的小動作
+      else if (!next && cpu.y === 0 && Math.random() < 0.002) cpu.vy = -2.2;
     }
     applyPhysics(cpu);
   }
 
-  // 過關判定：地面障礙（欄/狗）要跳起 y < -6，藍鵲要蹲下。
-  // 撞到扣隨機 10+x 分並閃爍；玩家的碰撞打上事件看板；有人歸零遊戲結束出記分板
+  // 過關判定：地面障礙（欄/狗）要跳起 y < -6，藍鵲要蹲下
   const OBSTACLE_NAMES = { hurdle: '跨欄', dog: '小黑狗', bird: '藍鵲' };
   function judge(r, o) {
     const cleared = o.type === 'bird' ? r.ducking && r.y === 0 : r.y < -6;
@@ -633,6 +360,7 @@
     const loss = 10 + Math.floor(Math.random() * 10);
     r.score = Math.max(0, r.score - loss);
     r.blink = 20;
+    emit('hit', r.x + 6, GROUND_Y - 10 + r.y);
     if (r === player) announce('撞到' + OBSTACLE_NAMES[o.type] + ' -' + loss + '分！', MSG_PENALTY);
     if (r.score === 0) gameOver = true;
   }
@@ -664,8 +392,7 @@
     }
   }
 
-  // 加分物件：獨立於障礙的生成節奏，隨機落地（跑過去撿）或飄在跳躍高度（跳起來拿），
-  // 誰先碰到誰拿走，加隨機 10+x 分；書包/外套撿到會穿在身上（pistol/scope 純加分）
+  // 加分物件：隨機落地（跑過去撿）或飄在跳躍高度（跳起來拿），誰先碰到誰拿走
   function updatePickups() {
     nextPickup -= 1.6;
     if (nextPickup <= 0) {
@@ -689,6 +416,7 @@
           r.score += gain;
           if (p.def.key === 'bag') r.bag = true;
           if (p.def.key === 'jacket') r.jacket = true;
+          emit('pickup', p.x + p.def.w / 2, p.y + p.def.h / 2);
           if (r === player) announce('撿到' + p.def.name + ' +' + gain + '分！', MSG_BONUS);
           taken = true;
           break;
@@ -698,104 +426,24 @@
     }
   }
 
-  function drawPickups() {
-    const bob = Math.floor(t / 12) % 2; // 上下飄的小動態
-    for (const p of pickups) {
-      drawCritter(p.def.rows, p.def.pal, p.x, p.y + bob);
-    }
-  }
-
-  function drawObstacles() {
-    for (const o of obstacles) {
-      if (o.type === 'hurdle') {
-        // 田徑跨欄：深色欄架 + 白紅相間橫板（高對比）
-        ctx.fillStyle = '#2c2c34';
-        ctx.fillRect(o.x, GROUND_Y - 7, 2, 7);
-        ctx.fillRect(o.x + 6, GROUND_Y - 7, 2, 7);
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(o.x, GROUND_Y - 9, 8, 3);
-        ctx.fillStyle = '#c0392b';
-        ctx.fillRect(o.x + 2, GROUND_Y - 9, 2, 3);
-        ctx.fillRect(o.x + 6, GROUND_Y - 9, 2, 3);
-      } else if (o.type === 'dog') {
-        drawCritter(DOG[Math.floor(t / 10) % 2], DOG_PAL, o.x, GROUND_Y - 6);
-      } else {
-        drawCritter(BIRD[Math.floor(t / 6) % 2], BIRD_PAL, o.x, BIRD_Y);
-      }
-    }
-  }
-
-  // 穿上外套：制服(w)換紅、領帶(t)收進外套變深色
-  const JACKET_ON = { w: '#c0392b', t: '#2c2c34' };
-
-  function drawRunner(r) {
-    if (r.blink % 4 >= 2) return; // 撞欄閃爍
-    const frame = r.sprite[Math.floor(t / 8) % 2];
-    const squash = r.ducking && r.y === 0 ? 3 : 0;
-    const X = Math.round(r.x);
-    drawSprite(
-      frame, X, GROUND_Y - 15 + squash + Math.round(r.y), squash,
-      r.jacket ? JACKET_ON : null
-    );
-    if (r.bag) {
-      // 背上的書包：貼在背側（朝左）軀幹處；squash 已含在 baseY 內、上下抵銷，蹲下也跟著身體
-      const ty = GROUND_Y - 15 + Math.round(r.y) + 6;
-      ctx.fillStyle = '#1c1c22';
-      ctx.fillRect(X, ty, 2, 5);
-      ctx.fillStyle = '#c8c8c4';
-      ctx.fillRect(X, ty + 2, 1, 1); // 扣具
-    }
-  }
-
-  // ==== 遊戲結束與記分板 ====
   function resetGame() {
     gameOver = false;
     for (const r of [player, cpu]) {
-      r.score = 100;
-      r.y = 0;
-      r.vy = 0;
-      r.ducking = false;
-      r.blink = 0;
-      r.bag = false;
-      r.jacket = false;
+      r.score = 100; r.y = 0; r.vy = 0;
+      r.ducking = false; r.blink = 0; r.bag = false; r.jacket = false; r.grounded = true;
     }
     obstacles.length = 0;
     pickups.length = 0;
+    events.length = 0;
     nextObstacle = 200;
     nextPickup = 320;
     announce('再來一場！', MSG_BONUS);
   }
 
-  // 記分板：蓋在畫面中央，宣布贏家與兩人分數，等玩家點畫面/按鍵再開
-  function drawScoreboard() {
-    ctx.fillStyle = 'rgba(20,20,28,0.82)';
-    ctx.fillRect(46, 12, 148, 56);
-    ctx.fillStyle = '#f4f0e0';
-    ctx.font = '9px monospace';
-    const youTag = controlled ? '你' : '？';
-    ctx.fillText(player.score > 0 ? youTag + '贏了！' : '電腦贏了！', 98, 26);
-    ctx.font = '7px monospace';
-    ctx.fillText(youTag + player.label + ' ' + player.score + '分', 64, 40);
-    ctx.fillText('電腦' + cpu.label + ' ' + cpu.score + '分', 124, 40);
-    ctx.fillText('再玩一次？點畫面或按空白鍵', 74, 58);
-  }
-
-  // HUD 計分板：右上角，標出哪個是「你」
-  function drawHud() {
-    ctx.fillStyle = 'rgba(20,20,28,0.55)';
-    ctx.fillRect(SCREEN_W - 86, 2, 84, 10);
-    ctx.fillStyle = '#f4f0e0';
-    ctx.font = '7px monospace';
-    const youTag = controlled ? '你' : '？';
-    ctx.fillText(
-      youTag + player.label + ' ' + player.score + '  電腦' + cpu.label + ' ' + cpu.score,
-      SCREEN_W - 83, 10
-    );
-  }
-
-  function frame() {
+  function step() {
     t++;
     if (!gameOver) {
+      cloudScroll += 0.12; hillScroll += 0.2;
       farScroll += 0.35; midScroll += 0.8; groundScroll += 1.6;
       updatePlayer();
       updateCpu();
@@ -806,8 +454,533 @@
       labelText.textContent = LABEL_BASE;
       labelText.style.color = '';
     }
+  }
+
+  // ==== 彩蛋輸入：WASD / 方向鍵 / 觸控（只控制 player）====
+  const keys = {};
+  const stage = document.getElementById('stage');
+  window.addEventListener('keydown', (e) => {
+    const k = e.key.toLowerCase();
+    if (gameOver) {
+      if ([' ', 'enter', 'w', 'arrowup'].includes(k)) { resetGame(); e.preventDefault(); }
+      return;
+    }
+    if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(k)) {
+      keys[k] = true; controlled = true; e.preventDefault();
+    }
+  });
+  window.addEventListener('keyup', (e) => { keys[e.key.toLowerCase()] = false; });
+
+  let touchStart = null;
+  stage.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('.mode-switch')) return; // 別跟切換鈕搶
+    if (gameOver) { resetGame(); return; }
+    touchStart = { x: e.clientX, y: e.clientY };
+  });
+  stage.addEventListener('pointermove', (e) => {
+    if (!touchStart) return;
+    controlled = true;
+    const dx = e.clientX - touchStart.x, dy = e.clientY - touchStart.y;
+    if (dy < -24 && player.y === 0) { player.vy = -2.6; touchStart.y = e.clientY; } // 上滑跳
+    player.ducking = dy > 24;                                                       // 下拉蹲
+    if (Math.abs(dx) > 6) { player.x += dx > 0 ? 2 : -2; touchStart.x = e.clientX; } // 左右拖
+  });
+  stage.addEventListener('pointerup', () => { touchStart = null; player.ducking = false; });
+
+  // ============================================================
+  // 3. 2D renderer：低解析度緩衝 240x80 放大 3 倍（保持像素感）
+  // ============================================================
+  const view = document.getElementById('game');
+  const vctx = view.getContext('2d');
+  vctx.imageSmoothingEnabled = false;
+  const buf = document.createElement('canvas');
+  buf.width = SCREEN_W; buf.height = SCREEN_H;
+  const ctx = buf.getContext('2d');
+
+  const particles = []; // { x, y, vx, vy, life, max, color, size }
+  function spawnParticles(ev) {
+    if (ev.type === 'land') {
+      for (let i = 0; i < 5; i++) {
+        particles.push({
+          x: ev.x + (Math.random() * 8 - 4), y: ev.y - 1,
+          vx: (Math.random() - 0.5) * 1.1, vy: -Math.random() * 0.5,
+          life: 14, max: 14, color: '#cfd8e0', size: 1,
+        });
+      }
+    } else if (ev.type === 'hit') {
+      for (let i = 0; i < 10; i++) {
+        const a = Math.random() * Math.PI * 2;
+        particles.push({
+          x: ev.x, y: ev.y,
+          vx: Math.cos(a) * 1.4, vy: Math.sin(a) * 1.4 - 0.5,
+          life: 20, max: 20, color: i % 2 ? '#ff8a75' : '#ffd98a', size: 1,
+        });
+      }
+      shake = 4;
+    } else {
+      for (let i = 0; i < 8; i++) {
+        const a = (i / 8) * Math.PI * 2;
+        particles.push({
+          x: ev.x, y: ev.y,
+          vx: Math.cos(a) * 1.1, vy: Math.sin(a) * 1.1,
+          life: 16, max: 16, color: '#3fbf3f', size: 1,
+        });
+      }
+    }
+  }
+  let shake = 0;
+  function updateParticles() {
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.x += p.vx; p.y += p.vy; p.vy += 0.06; p.life--;
+      if (p.life <= 0) particles.splice(i, 1);
+    }
+    if (shake > 0) shake -= 0.5;
+  }
+  function drawParticles() {
+    for (const p of particles) {
+      ctx.globalAlpha = Math.max(0, p.life / p.max);
+      ctx.fillStyle = p.color;
+      ctx.fillRect(Math.round(p.x), Math.round(p.y), p.size, p.size);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawSprite(rows, x, y, override = null) {
+    for (let r = 0; r < rows.length; r++) {
+      const row = rows[r];
+      for (let c = 0; c < row.length; c++) {
+        const ch = row[c];
+        const color = (override && override[ch]) || PAL[ch];
+        if (ch !== '.' && color) {
+          ctx.fillStyle = color;
+          ctx.fillRect(x + c, y + r, 1, 1);
+        }
+      }
+    }
+  }
+
+  function drawCritter(rows, pal, x, y) {
+    for (let r = 0; r < rows.length; r++) {
+      for (let c = 0; c < rows[r].length; c++) {
+        const ch = rows[r][c];
+        if (ch !== '.' && pal[ch]) {
+          ctx.fillStyle = pal[ch];
+          ctx.fillRect(x + c, y + r, 1, 1);
+        }
+      }
+    }
+  }
+
+  // ---- 天空：多層漸層帶 + 太陽 + 兩層雲（各自視差）----
+  const SKY_BANDS = ['#7cc4ea', '#8fceef', '#a2d7f3', '#b5e0f7', '#c7e8fa', '#d8f0fc'];
+  function drawSky() {
+    for (let i = 0; i < SKY_BANDS.length; i++) {
+      ctx.fillStyle = SKY_BANDS[i];
+      ctx.fillRect(0, i * 7, SCREEN_W, 7);
+    }
+    ctx.fillStyle = '#d8f0fc';
+    ctx.fillRect(0, 42, SCREEN_W, GROUND_Y - 42);
+    // 太陽（固定不捲動，帶一圈柔光）
+    ctx.fillStyle = 'rgba(255,236,170,0.55)';
+    // 太陽擺畫面中上（左上是模式切換、右上是 HUD，都別擋）
+    ctx.fillRect(104, 5, 14, 14); ctx.fillRect(102, 7, 18, 10);
+    ctx.fillStyle = '#fff3c4';
+    ctx.fillRect(106, 7, 10, 10); ctx.fillRect(105, 8, 12, 8); ctx.fillRect(107, 6, 8, 12);
+  }
+
+  function cloud(x, y, s) {
+    ctx.fillStyle = 'rgba(255,255,255,0.92)';
+    ctx.fillRect(x, y + 2, 16 * s, 3);
+    ctx.fillRect(x + 3 * s, y, 9 * s, 3);
+    ctx.fillStyle = 'rgba(214,236,250,0.9)';
+    ctx.fillRect(x, y + 5, 16 * s, 1);
+  }
+  function drawClouds() {
+    const W = 96;
+    for (let base = -(cloudScroll % W); base < SCREEN_W; base += W) {
+      cloud(base + 4, 6, 1); cloud(base + 52, 14, 1);
+    }
+    const W2 = 130;
+    for (let base = -((cloudScroll * 1.8) % W2); base < SCREEN_W; base += W2) {
+      cloud(base + 20, 22, 1);
+    }
+  }
+
+  // ---- 遠山：兩層剪影，比校舍更慢，把畫面拉出景深 ----
+  function drawHills() {
+    const W = 120;
+    ctx.fillStyle = '#93b8c9';
+    for (let base = -(hillScroll % W); base < SCREEN_W; base += W) {
+      for (let i = 0; i < 3; i++) {
+        const hx = base + i * 40, peak = 34 + (i % 2) * 5;
+        for (let dx = 0; dx < 34; dx++) {
+          const h = Math.round((17 - Math.abs(dx - 17)) * 0.75);
+          ctx.fillRect(hx + dx, peak + (8 - h), 1, GROUND_Y - (peak + (8 - h)));
+        }
+      }
+    }
+    ctx.fillStyle = '#a8c8d6';
+    ctx.fillRect(0, 44, SCREEN_W, GROUND_Y - 44);
+  }
+
+  // ---- 校園遠景：照空拍圖排成多段循環 ----
+  function windowGrid(x, y, w, cols, rows, gapX, gapY) {
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const wx = x + c * gapX, wy = y + r * gapY;
+        if (wx + 5 > x + w) continue;
+        // 用位置決定亮燈與否（穩定不閃爍），偶爾亮一格
+        ctx.fillStyle = ((c * 7 + r * 13) % 11 === 0) ? WINDOW_LIT : WINDOW;
+        ctx.fillRect(wx, wy, 5, 5);
+        ctx.fillStyle = 'rgba(255,255,255,0.35)';
+        ctx.fillRect(wx, wy, 5, 1);
+      }
+    }
+  }
+
+  function brickBody(x, y, w, h) {
+    ctx.fillStyle = BRICK;
+    ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = BRICK_DARK;        // 右側背光面 + 落地陰影
+    ctx.fillRect(x + w - 3, y, 3, h);
+    ctx.fillRect(x, y + h - 2, w, 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.16)'; // 左側受光邊
+    ctx.fillRect(x, y, 2, h);
+    ctx.fillStyle = CREAM;
+    ctx.fillRect(x, y + 8, w, 2);
+    windowGrid(x + 4, y + 11, w - 6, Math.floor((w - 8) / 10), 2, 10, 10);
+  }
+
+  // 教學大樓（照 teacharea.jpg）：紅瓦屋頂、磚身每層陰影開口 + 白欄杆
+  function teachBody(x, y, w, h, letter) {
+    ctx.fillStyle = '#d84c30';
+    ctx.fillRect(x - 2, y - 3, w + 4, 3); // 紅瓦屋頂（出簷）
+    ctx.fillStyle = '#f0755a';
+    ctx.fillRect(x - 2, y - 3, w + 4, 1); // 瓦頂受光邊
+    ctx.fillStyle = BRICK_DARK;
+    ctx.fillRect(x - 2, y - 1, w + 4, 1); // 簷下陰影
+    ctx.fillStyle = BRICK;
+    ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = BRICK_DARK;
+    ctx.fillRect(x + w - 3, y, 3, h);
+    ctx.fillRect(x, y + h - 2, w, 2);
+    for (let fy = y + 3; fy < y + h - 7; fy += 9) {
+      for (let wx = x + 10; wx < x + w - 10; wx += 8) {
+        ctx.fillStyle = ((wx + fy) % 23 === 0) ? WINDOW_LIT : '#4d6b7c';
+        ctx.fillRect(wx, fy, 5, 5); // 柱廊開口
+      }
+      ctx.fillStyle = '#f4f0e0';
+      ctx.fillRect(x + 8, fy + 5, w - 16, 1); // 白欄杆帶
+      ctx.fillStyle = 'rgba(0,0,0,0.18)';
+      ctx.fillRect(x + 8, fy + 6, w - 16, 1); // 欄杆下陰影
+    }
+    ctx.fillStyle = CREAM;
+    ctx.fillRect(x + 1, y + 4, 7, 9); // 角樓字牌
+    ctx.fillStyle = BRICK;
+    ctx.font = '7px monospace';
+    ctx.fillText(letter, x + 2, y + 11);
+  }
+
+  function tree(x, groundY) {
+    ctx.fillStyle = '#5a4632';
+    ctx.fillRect(x + 7, groundY - 5, 2, 5);
+    ctx.fillStyle = '#2f5e2c';
+    ctx.fillRect(x, groundY - 16, 16, 11);
+    ctx.fillRect(x + 3, groundY - 20, 10, 5);
+    ctx.fillStyle = '#4b8c42';                  // 受光面
+    ctx.fillRect(x + 1, groundY - 15, 7, 5);
+    ctx.fillRect(x + 4, groundY - 19, 5, 4);
+    ctx.fillStyle = 'rgba(0,0,0,0.15)';
+    ctx.fillRect(x + 2, groundY - 1, 12, 1);    // 樹影
+  }
+
+  const SEGMENTS = [
+    { // 行政大樓：頂樓招牌 + 門口大石
+      w: 150,
+      draw(x) {
+        brickBody(x + 8, 22, 118, 34);
+        ctx.fillStyle = BRICK_DARK;
+        ctx.fillRect(x + 40, 14, 52, 8);
+        ctx.fillStyle = CREAM;
+        ctx.font = '7px monospace';
+        ctx.fillText('林口高中', x + 52, 21);
+        ctx.fillStyle = '#c8c8c4';
+        ctx.fillRect(x + 130, 48, 14, 8);
+        ctx.fillStyle = '#8c8c88';
+        ctx.fillRect(x + 132, 50, 10, 2);
+      },
+    },
+    { w: 56, draw(x) { tree(x + 6, 60); tree(x + 32, 60); } },
+    { w: 130, draw(x) { teachBody(x + 4, 26, 116, 30, 'C'); } },
+    { // 籃球場：圍網 + 籃架
+      w: 90,
+      draw(x) {
+        ctx.fillStyle = '#4a9c6e';
+        ctx.fillRect(x + 4, 50, 82, 6);
+        ctx.fillStyle = '#3d8259';
+        ctx.fillRect(x + 4, 54, 82, 2);
+        ctx.fillStyle = '#9caab4';
+        for (let fx = x + 4; fx <= x + 84; fx += 16) ctx.fillRect(fx, 38, 1, 18);
+        ctx.fillStyle = '#b8c4cc';
+        ctx.fillRect(x + 4, 38, 82, 1);
+        ctx.fillRect(x + 4, 44, 82, 1);
+        ctx.fillStyle = '#e8e8e0';
+        ctx.fillRect(x + 42, 40, 1, 16);
+        ctx.fillRect(x + 40, 40, 6, 4);
+        ctx.fillStyle = '#d84c30';
+        ctx.fillRect(x + 44, 44, 3, 1);
+      },
+    },
+    { // 教學樓 D 棟 + 中庭圓形花圃與玻璃金字塔
+      w: 120,
+      draw(x) {
+        teachBody(x + 4, 24, 100, 32, 'D');
+        ctx.fillStyle = '#2f5e2c';
+        ctx.fillRect(x + 106, 50, 10, 6);
+        ctx.fillRect(x + 108, 48, 6, 2);
+        ctx.fillStyle = '#6ab04c';
+        ctx.fillRect(x + 108, 51, 6, 3);
+        ctx.fillStyle = '#bce4f8';
+        ctx.fillRect(x + 110, 46, 2, 2); // 花圃上的玻璃金字塔尖
+      },
+    },
+    { w: 40, draw(x) { tree(x + 10, 60); } },
+    { // 圖書館：左側高塔 + 紅字招牌 + 門口雨遮
+      w: 112,
+      draw(x) {
+        ctx.fillStyle = BRICK_DARK;
+        ctx.fillRect(x + 5, 12, 18, 2);
+        ctx.fillStyle = BRICK;
+        ctx.fillRect(x + 6, 14, 16, 42);
+        ctx.fillStyle = BRICK_DARK;
+        ctx.fillRect(x + 19, 14, 3, 42);
+        ctx.fillStyle = CREAM;
+        ctx.fillRect(x + 6, 20, 16, 2);
+        ctx.fillStyle = WINDOW;
+        ctx.fillRect(x + 10, 25, 3, 5); ctx.fillRect(x + 15, 25, 3, 5);
+        ctx.fillStyle = WINDOW_LIT;
+        ctx.fillRect(x + 10, 36, 3, 5);
+        ctx.fillStyle = WINDOW;
+        ctx.fillRect(x + 15, 36, 3, 5);
+        brickBody(x + 22, 24, 84, 32);
+        ctx.fillStyle = CREAM;
+        ctx.fillRect(x + 50, 26, 26, 9);
+        ctx.fillStyle = BRICK;
+        ctx.font = '7px monospace';
+        ctx.fillText('圖書館', x + 52, 33);
+        ctx.fillStyle = '#c8c8c4';
+        ctx.fillRect(x + 52, 50, 22, 2);
+        ctx.fillStyle = '#8c8c88';
+        ctx.fillRect(x + 53, 52, 2, 4);
+        ctx.fillRect(x + 71, 52, 2, 4);
+      },
+    },
+    { // 科學館：弧形樓身 + 柱廊 + 石砌門面 + 頂樓天文台圓頂
+      w: 132,
+      draw(x) {
+        const bx = x + 4, by = 22, bw = 120, bh = 34;
+        ctx.fillStyle = BRICK;
+        ctx.fillRect(bx + 6, by, bw - 12, bh);
+        ctx.fillRect(bx + 2, by + 4, 4, bh - 4);
+        ctx.fillRect(bx + bw - 6, by + 4, 4, bh - 4);
+        ctx.fillStyle = BRICK_DARK;
+        ctx.fillRect(bx + 6, by, bw - 12, 2);
+        ctx.fillRect(bx + bw - 6, by + 4, 4, bh - 4);
+        ctx.fillRect(bx + 6, by + bh - 2, bw - 12, 2);
+        for (let fy = by + 6; fy < by + bh - 6; fy += 9) {
+          ctx.fillStyle = CREAM;
+          ctx.fillRect(bx + 8, fy, bw - 16, 6);
+          for (let wx = bx + 11; wx < bx + bw - 12; wx += 7) {
+            ctx.fillStyle = ((wx + fy) % 29 === 0) ? WINDOW_LIT : WINDOW;
+            ctx.fillRect(wx, fy + 1, 4, 5);
+          }
+          ctx.fillStyle = '#f4f0e0';
+          ctx.fillRect(bx + 8, fy + 6, bw - 16, 1);
+        }
+        const dx = bx + Math.floor(bw / 2);
+        ctx.fillStyle = '#b8c4cc';
+        ctx.fillRect(dx - 13, 47, 26, 9);
+        ctx.fillStyle = BRICK;
+        ctx.font = '7px monospace';
+        ctx.fillText('科學館', dx - 11, 54);
+        ctx.fillStyle = '#8c98a8';
+        ctx.fillRect(dx - 8, 17, 16, 5);
+        ctx.fillRect(dx - 6, 14, 12, 3);
+        ctx.fillRect(dx - 4, 12, 8, 2);
+        ctx.fillStyle = '#e8e8e0';
+        ctx.fillRect(dx - 6, 18, 10, 4);
+        ctx.fillRect(dx - 4, 15, 8, 3);
+        ctx.fillRect(dx - 2, 13, 4, 2);
+        ctx.fillStyle = '#5b5b5d';
+        ctx.fillRect(dx - 9, 21, 18, 1);
+        ctx.fillStyle = '#2c2c34';
+        ctx.fillRect(dx - 1, 12, 2, 10); // 觀測縫
+      },
+    },
+  ];
+  const CYCLE = SEGMENTS.reduce((sum, seg) => sum + seg.w, 0);
+
+  function drawCampus(scroll) {
+    let x = -(scroll % CYCLE);
+    let i = 0;
+    while (x < SCREEN_W) {
+      const seg = SEGMENTS[i % SEGMENTS.length];
+      if (x + seg.w > 0) seg.draw(x);
+      x += seg.w;
+      i++;
+    }
+  }
+
+  function drawShrubs(scroll) {
+    const W = 34;
+    for (let base = -(scroll % W); base < SCREEN_W; base += W) {
+      ctx.fillStyle = '#2f5e2c';
+      ctx.fillRect(base + 4, 58, 10, 5);
+      ctx.fillRect(base + 6, 56, 6, 2);
+      ctx.fillStyle = '#4b8c42';
+      ctx.fillRect(base + 5, 57, 5, 2);
+    }
+  }
+
+  // 跑道：紅色 PU 分道 + 透視分道線（近的跑得快、間距大）
+  function drawTrack(scroll) {
+    ctx.fillStyle = '#b8432f';
+    ctx.fillRect(0, GROUND_Y, SCREEN_W, SCREEN_H - GROUND_Y);
+    ctx.fillStyle = '#8e3222';                 // 跑道最遠端偏暗
+    ctx.fillRect(0, GROUND_Y, SCREEN_W, 3);
+    ctx.fillStyle = '#e8f0f8';
+    ctx.fillRect(0, GROUND_Y, SCREEN_W, 1);    // 內圈白邊
+    // 分道線：三條，越近越粗、捲動越快，做出速度感
+    const LANES = [
+      { y: GROUND_Y + 4, dash: 14, gap: 8, speed: 1.0, color: 'rgba(255,255,255,0.55)' },
+      { y: GROUND_Y + 8, dash: 18, gap: 10, speed: 1.4, color: 'rgba(255,255,255,0.75)' },
+      { y: GROUND_Y + 12, dash: 24, gap: 12, speed: 1.9, color: '#ffffff' },
+    ];
+    for (const lane of LANES) {
+      const W = lane.dash + lane.gap;
+      ctx.fillStyle = lane.color;
+      for (let base = -((scroll * lane.speed) % W); base < SCREEN_W; base += W) {
+        ctx.fillRect(base, lane.y, lane.dash, 1);
+      }
+    }
+  }
+
+  function groundShadow(cx, r) {
+    ctx.fillStyle = 'rgba(0,0,0,0.22)';
+    ctx.fillRect(Math.round(cx - r), GROUND_Y - 1, r * 2, 1);
+    ctx.fillStyle = 'rgba(0,0,0,0.14)';
+    ctx.fillRect(Math.round(cx - r - 1), GROUND_Y, r * 2 + 2, 1);
+  }
+
+  function drawObstacles() {
+    for (const o of obstacles) {
+      if (o.type === 'hurdle') {
+        groundShadow(o.x + 4, 5);
+        ctx.fillStyle = '#2c2c34';
+        ctx.fillRect(o.x, GROUND_Y - 7, 2, 7);
+        ctx.fillRect(o.x + 6, GROUND_Y - 7, 2, 7);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(o.x, GROUND_Y - 9, 8, 3);
+        ctx.fillStyle = '#c0392b';
+        ctx.fillRect(o.x + 2, GROUND_Y - 9, 2, 3);
+        ctx.fillRect(o.x + 6, GROUND_Y - 9, 2, 3);
+      } else if (o.type === 'dog') {
+        groundShadow(o.x + 5, 5);
+        drawCritter(DOG[Math.floor(t / 10) % 2], DOG_PAL, o.x, GROUND_Y - 6);
+      } else {
+        groundShadow(o.x + 7, 4);
+        drawCritter(BIRD[Math.floor(t / 6) % 2], BIRD_PAL, o.x, BIRD_Y);
+      }
+    }
+  }
+
+  function drawPickups() {
+    const bob = Math.floor(t / 12) % 2; // 上下飄的小動態
+    for (const p of pickups) {
+      // 空中物件加一圈光暈，好認
+      if (p.y + p.def.h < GROUND_Y - 15) {
+        ctx.fillStyle = 'rgba(255,246,190,' + (0.18 + 0.1 * Math.sin(t / 8)) + ')';
+        ctx.fillRect(p.x - 1, p.y + bob - 1, p.def.w + 2, p.def.h + 2);
+      }
+      drawCritter(p.def.rows, p.def.pal, p.x, p.y + bob);
+    }
+  }
+
+  function drawRunner(r) {
+    if (r.blink % 4 >= 2) return; // 撞欄閃爍
+    const ducked = r.ducking && r.y === 0;
+    const frames = ducked ? r.duck : r.sprite;
+    const frame = ducked
+      ? frames[Math.floor(t / 8) % frames.length]
+      : frames[Math.floor(t / 6) % frames.length];
+    const height = ducked ? DUCK_H : STAND_H;
+    const X = Math.round(r.x);
+    // 落地陰影：跳越高陰影越小越淡
+    const lift = Math.min(1, -r.y / 24);
+    ctx.fillStyle = 'rgba(0,0,0,' + (0.26 - lift * 0.18) + ')';
+    ctx.fillRect(X + 2 + Math.round(lift * 2), GROUND_Y - 1, 8 - Math.round(lift * 4), 1);
+    drawSprite(frame, X, GROUND_Y - height + Math.round(r.y), r.jacket ? JACKET_ON : null);
+    if (r.bag) {
+      // 蹲下時身體壓低前傾，書包跟著往下貼一格
+      const ty = GROUND_Y - height + Math.round(r.y) + (ducked ? 7 : 6);
+      ctx.fillStyle = '#1c1c22';
+      ctx.fillRect(X, ty, 2, 5);
+      ctx.fillStyle = '#c8c8c4';
+      ctx.fillRect(X, ty + 2, 1, 1); // 扣具
+    }
+    // 跑步塵土：貼地時每隔幾幀噴一顆
+    if (r.y === 0 && !r.ducking && t % 9 === 0) {
+      particles.push({
+        x: X + 2, y: GROUND_Y - 1, vx: -0.6 - Math.random() * 0.4, vy: -0.2,
+        life: 10, max: 10, color: 'rgba(255,255,255,0.9)', size: 1,
+      });
+    }
+  }
+
+  // HUD 計分板：右上角血條 + 分數
+  function scoreBar(x, y, w, score, label) {
+    ctx.fillStyle = 'rgba(255,255,255,0.18)';
+    ctx.fillRect(x, y, w, 3);
+    const ratio = Math.max(0, Math.min(1, score / 160));
+    ctx.fillStyle = score <= 40 ? '#ff8a75' : '#3fbf3f';
+    ctx.fillRect(x, y, Math.round(w * ratio), 3);
+    ctx.fillStyle = '#f4f0e0';
+    ctx.font = '7px monospace';
+    ctx.fillText(label, x - 22, y + 3);
+    ctx.fillText(String(score), x + w + 2, y + 3);
+  }
+  function drawHud() {
+    ctx.fillStyle = 'rgba(20,20,28,0.55)';
+    ctx.fillRect(SCREEN_W - 84, 2, 82, 20);
+    const youTag = controlled ? '你' : '？';
+    scoreBar(SCREEN_W - 58, 6, 34, player.score, youTag + player.label);
+    scoreBar(SCREEN_W - 58, 14, 34, cpu.score, '電' + cpu.label);
+  }
+
+  function drawScoreboard() {
+    ctx.fillStyle = 'rgba(20,20,28,0.82)';
+    ctx.fillRect(46, 12, 148, 56);
+    ctx.fillStyle = '#efe0c8';
+    ctx.fillRect(46, 12, 148, 1);
+    ctx.fillRect(46, 67, 148, 1);
+    ctx.fillStyle = '#f4f0e0';
+    ctx.font = '9px monospace';
+    const youTag = controlled ? '你' : '？';
+    ctx.fillText(player.score > 0 ? youTag + '贏了！' : '電腦贏了！', 98, 26);
+    ctx.font = '7px monospace';
+    ctx.fillText(youTag + player.label + ' ' + player.score + '分', 64, 40);
+    ctx.fillText('電腦' + cpu.label + ' ' + cpu.score + '分', 124, 40);
+    ctx.fillText('再玩一次？點畫面或按空白鍵', 74, 58);
+  }
+
+  function render2d() {
+    while (events.length) spawnParticles(events.shift());
+    updateParticles();
 
     drawSky();
+    drawClouds();
+    drawHills();
     drawCampus(farScroll);
     drawShrubs(midScroll);
     drawTrack(groundScroll);
@@ -815,11 +988,591 @@
     drawPickups();
     drawRunner(cpu);
     drawRunner(player);
+    drawParticles();
     drawHud();
     if (gameOver) drawScoreboard();
 
     vctx.clearRect(0, 0, view.width, view.height);
-    vctx.drawImage(buf, 0, 0, SCREEN_W * SCALE, SCREEN_H * SCALE);
+    const sx = shake > 0 ? (Math.random() - 0.5) * shake * SCALE : 0;
+    const sy = shake > 0 ? (Math.random() - 0.5) * shake * SCALE : 0;
+    vctx.drawImage(buf, sx, sy, SCREEN_W * SCALE, SCREEN_H * SCALE);
+  }
+
+  // ============================================================
+  // 4. 3D renderer（three.js，側面正交鏡頭）
+  //    像素圖直接堆成 voxel InstancedMesh，跟 2D 同一份圖資
+  // ============================================================
+  const canvas3d = document.getElementById('game3d');
+  const hud3d = document.getElementById('hud3d');
+  const board3d = document.getElementById('board3d');
+  let three = null;      // 已載入的 three 模組
+  let scene3d = null;    // 建好的場景物件集合
+
+  const W2 = (x) => x - SCREEN_W / 2;        // 遊戲 x → 世界 x
+  const H2 = (screenY) => GROUND_Y - screenY; // 遊戲螢幕 y → 世界 y（地面 = 0）
+
+  async function ensureThree() {
+    if (three) return three;
+    three = await import('https://esm.sh/three@0.169.0');
+    return three;
+  }
+
+  // 把像素圖轉成 voxel：一個 InstancedMesh、逐格上色，只吃一個 draw call
+  function voxel(THREE, rows, pal, depth, centerX) {
+    const cells = [];
+    for (let r = 0; r < rows.length; r++) {
+      for (let c = 0; c < rows[r].length; c++) {
+        const ch = rows[r][c];
+        const color = (pal && pal[ch]) || null;
+        if (ch !== '.' && color) cells.push([c, r, color]);
+      }
+    }
+    const geo = new THREE.BoxGeometry(1, 1, depth);
+    const mat = new THREE.MeshLambertMaterial();
+    const mesh = new THREE.InstancedMesh(geo, mat, cells.length);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    const m = new THREE.Matrix4();
+    const col = new THREE.Color();
+    const w = rows[0].length;
+    const offX = centerX ? -w / 2 : 0;
+    for (let i = 0; i < cells.length; i++) {
+      const [c, r, color] = cells[i];
+      m.makeTranslation(offX + c + 0.5, rows.length - r - 0.5, 0);
+      mesh.setMatrixAt(i, m);
+      mesh.setColorAt(i, col.set(color));
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    return mesh;
+  }
+
+  // 小人：把 sprite 的 PAL（可疊外套 override）轉成 voxel，四幀各一個、切換 visible
+  function runnerGroup(THREE, sprite, override) {
+    const g = new THREE.Group();
+    const pal = override ? Object.assign({}, PAL, override) : PAL;
+    g.userData.frames = sprite.map((rows) => {
+      const m = voxel(THREE, rows, pal, 4, true);
+      m.visible = false;
+      g.add(m);
+      return m;
+    });
+    return g;
+  }
+
+  function disposeDeep(obj) {
+    obj.traverse((o) => {
+      if (!o.isMesh && !o.isInstancedMesh) return;
+      o.geometry.dispose();
+      if (Array.isArray(o.material)) o.material.forEach((m) => m.dispose());
+      else o.material.dispose();
+    });
+  }
+
+  function box(THREE, w, h, d, color, x, y, z, opts) {
+    const mat = new THREE.MeshLambertMaterial({ color });
+    if (opts && opts.emissive) mat.emissive = new THREE.Color(opts.emissive);
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+    m.position.set(x, y + h / 2, z);
+    m.castShadow = true;
+    m.receiveShadow = true;
+    return m;
+  }
+
+  // 招牌字：畫在離屏 canvas 上當貼圖，貼在建物正面（3D 也要有「林口高中」「圖書館」
+  // 「科學館」「C/D 棟」，不然整排紅磚盒子認不出是哪一棟）
+  function textPlane(THREE, text, w, h, bg, fg, x, y, z) {
+    const c = document.createElement('canvas');
+    c.width = Math.max(32, Math.round(w * 20));
+    c.height = Math.max(32, Math.round(h * 20));
+    const g = c.getContext('2d');
+    if (bg) { g.fillStyle = bg; g.fillRect(0, 0, c.width, c.height); }
+    g.font = '900 ' + Math.floor(c.height * 0.78) + 'px "Noto Sans TC", "Microsoft JhengHei", sans-serif';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    // 字很小，描邊一圈同色把筆畫加粗，遠看才不會糊掉
+    g.lineWidth = Math.max(2, c.height * 0.05);
+    g.strokeStyle = fg;
+    g.strokeText(text, c.width / 2, c.height * 0.54, c.width * 0.9);
+    g.fillStyle = fg;
+    g.fillText(text, c.width / 2, c.height * 0.54, c.width * 0.9);
+    const tex = new THREE.CanvasTexture(c);
+    tex.anisotropy = 4;
+    const mesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(w, h),
+      new THREE.MeshBasicMaterial({ map: tex, transparent: true })
+    );
+    mesh.position.set(x, y, z);
+    return mesh;
+  }
+
+  // 3D 校園：沿用 2D 的 SEGMENTS 寬度與座標，讓兩種模式跑的是同一座校園
+  function buildingsGroup(THREE) {
+    const strip = new THREE.Group();
+    const BUILD = [
+      (g, x) => { // 行政大樓
+        g.add(box(THREE, 118, H2(22), 46, BRICK, x + 67, 0, -80));
+        g.add(box(THREE, 52, 8, 48, BRICK_DARK, x + 66, H2(22), -80));
+        g.add(textPlane(THREE, '林口高中', 46, 7, null, CREAM, x + 66, H2(22) + 4, -55.4));
+        g.add(box(THREE, 122, 3, 50, CREAM, x + 67, H2(22) - 11, -80));
+        for (let i = 0; i < 10; i++) {
+          g.add(box(THREE, 5, 5, 1, i % 5 === 0 ? WINDOW_LIT : WINDOW,
+            x + 16 + i * 11, H2(22) - 22, -56.5, { emissive: i % 5 === 0 ? '#5a4310' : null }));
+        }
+        g.add(box(THREE, 14, 8, 12, '#c8c8c4', x + 137, 0, -46));
+      },
+      (g, x) => { treeMesh(THREE, g, x + 14, -40); treeMesh(THREE, g, x + 40, -44); },
+      (g, x) => teachMesh(THREE, g, x + 62, 26, 'C'),
+      (g, x) => { // 籃球場
+        g.add(box(THREE, 82, 1, 40, '#4a9c6e', x + 45, 0, -50));
+        g.add(box(THREE, 1, 16, 1, '#e8e8e0', x + 45, 0, -34));
+        g.add(box(THREE, 6, 4, 1, '#e8e8e0', x + 45, 16, -34));
+        for (let i = 0; i < 6; i++) g.add(box(THREE, 1, 18, 1, '#9caab4', x + 6 + i * 16, 0, -30));
+      },
+      (g, x) => { // 教學樓 D + 花圃
+        teachMesh(THREE, g, x + 54, 24, 'D');
+        g.add(box(THREE, 12, 5, 12, '#2f5e2c', x + 111, 0, -40));
+        g.add(box(THREE, 5, 5, 5, '#bce4f8', x + 111, 5, -40, { emissive: '#204050' }));
+      },
+      (g, x) => treeMesh(THREE, g, x + 18, -40),
+      (g, x) => { // 圖書館：高塔 + 主樓
+        g.add(box(THREE, 16, H2(14), 22, BRICK, x + 14, 0, -70));
+        g.add(box(THREE, 20, 2, 26, BRICK_DARK, x + 14, H2(14), -70));
+        g.add(box(THREE, 84, H2(24), 44, BRICK, x + 64, 0, -80));
+        g.add(box(THREE, 88, 3, 46, CREAM, x + 64, H2(24) - 10, -80));
+        g.add(box(THREE, 26, 9, 1, CREAM, x + 63, H2(35), -57.5));
+        g.add(textPlane(THREE, '圖書館', 24, 8, null, BRICK_DARK, x + 63, H2(35) + 4.5, -56.4));
+        for (let i = 0; i < 7; i++) {
+          g.add(box(THREE, 5, 5, 1, i === 2 ? WINDOW_LIT : WINDOW,
+            x + 26 + i * 11, H2(24) - 22, -57.5, { emissive: i === 2 ? '#5a4310' : null }));
+        }
+      },
+      (g, x) => { // 科學館 + 天文台圓頂
+        g.add(box(THREE, 108, H2(22), 44, BRICK, x + 64, 0, -80));
+        for (let f = 0; f < 3; f++) {
+          g.add(box(THREE, 104, 6, 46, CREAM, x + 64, 6 + f * 11, -80));
+        }
+        g.add(box(THREE, 26, 9, 4, '#b8c4cc', x + 64, H2(56), -57));
+        g.add(textPlane(THREE, '科學館', 24, 8, null, BRICK_DARK, x + 64, H2(56) + 4.5, -54.4));
+        g.add(box(THREE, 16, 5, 16, '#8c98a8', x + 64, H2(22), -80));
+        g.add(box(THREE, 12, 3, 12, '#c8ccd4', x + 64, H2(22) + 5, -80));
+        g.add(box(THREE, 8, 3, 8, '#e8e8e0', x + 64, H2(22) + 8, -80));
+        g.add(box(THREE, 2, 10, 9, '#2c2c34', x + 64, H2(22) + 2, -76));
+      },
+    ];
+    // 疊兩輪，捲動時才不會露餡
+    for (let cycle = 0; cycle < 2; cycle++) {
+      let x = cycle * CYCLE;
+      for (let i = 0; i < SEGMENTS.length; i++) {
+        BUILD[i](strip, x);
+        x += SEGMENTS[i].w;
+      }
+    }
+    return strip;
+  }
+
+  function treeMesh(THREE, g, x, z) {
+    g.add(box(THREE, 2, 6, 2, '#5a4632', x, 0, z));
+    g.add(box(THREE, 12, 10, 12, '#2f5e2c', x, 6, z));
+    g.add(box(THREE, 8, 5, 8, '#4b8c42', x, 15, z));
+  }
+
+  function teachMesh(THREE, g, x, topY, letter) {
+    const h = H2(topY);
+    g.add(box(THREE, 116, h, 40, BRICK, x, 0, -78));
+    g.add(box(THREE, 122, 3, 46, '#d84c30', x, h, -78)); // 紅瓦出簷
+    // 角樓棟別字牌（照片裡的 C/D 棟）
+    g.add(box(THREE, 15, 16, 1, CREAM, x - 51, h - 21, -57.5));
+    g.add(textPlane(THREE, letter, 13, 13, null, BRICK_DARK, x - 51, h - 13, -56.4));
+    for (let f = 0; f < 3; f++) {
+      const fy = 6 + f * 10;
+      if (fy + 6 > h) break;
+      g.add(box(THREE, 100, 1, 42, '#f4f0e0', x, fy + 5, -78)); // 白欄杆
+      for (let i = 0; i < 11; i++) {
+        const lit = (i + f) % 7 === 0;
+        g.add(box(THREE, 5, 5, 1, lit ? WINDOW_LIT : '#4d6b7c',
+          x - 50 + i * 10, fy, -57.5, { emissive: lit ? '#5a4310' : null }));
+      }
+    }
+  }
+
+  // 跑道貼圖：用 canvas 畫紅色 PU + 白色分道線，靠 texture.offset 捲動
+  function trackTexture(THREE) {
+    const c = document.createElement('canvas');
+    c.width = 64; c.height = 64;
+    const g = c.getContext('2d');
+    g.fillStyle = '#b8432f'; g.fillRect(0, 0, 64, 64);
+    // 分道線（順著跑向）
+    g.fillStyle = 'rgba(255,255,255,0.85)';
+    for (let i = 1; i < 4; i++) g.fillRect(0, i * 16, 64, 1);
+    // 橫向刻痕：這才是速度感的來源（純縱線捲動時看不出來在動）
+    g.fillStyle = 'rgba(255,255,255,0.55)';
+    g.fillRect(0, 4, 10, 2); g.fillRect(32, 36, 10, 2);
+    g.fillStyle = 'rgba(0,0,0,0.10)';
+    for (let i = 0; i < 64; i += 8) g.fillRect(i, 0, 1, 64);
+    const tex = new THREE.CanvasTexture(c);
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(12, 2);
+    tex.magFilter = THREE.NearestFilter;
+    return tex;
+  }
+
+  function buildScene(THREE) {
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color('#a2d7f3');
+    // 霧只用來讓最遠的山淡出；起霧點要在校舍之後（相機 z=180、校舍 z≈-80，距離約 265）
+    scene.fog = new THREE.Fog('#c7e8fa', 270, 460);
+
+    // 側面正交鏡頭：只給一點點側移角，讓方塊讀得出立體又維持側視
+    // 半寬要 >= 遊戲場寬的一半（120），否則玩家跑到最右邊會出畫面
+    const HALF_W = 122;
+    const camera = new THREE.OrthographicCamera(-HALF_W, HALF_W, HALF_W / 3, -HALF_W / 3, 1, 600);
+    camera.position.set(28, 54, 180);
+    camera.lookAt(0, 20, 0);
+
+    const renderer = new THREE.WebGLRenderer({ canvas: canvas3d, antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+    scene.add(new THREE.HemisphereLight('#cfe9f8', '#6b5a4a', 1.5));
+    const sun = new THREE.DirectionalLight('#fff3d0', 1.9);
+    sun.position.set(60, 90, 70);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(1024, 1024);
+    const sc = sun.shadow.camera;
+    sc.left = -130; sc.right = 130; sc.top = 90; sc.bottom = -40; sc.near = 1; sc.far = 320;
+    scene.add(sun);
+    scene.add(sun.target);
+
+    // 跑道 + 草地
+    const track = new THREE.Mesh(
+      new THREE.PlaneGeometry(400, 70),
+      new THREE.MeshLambertMaterial({ map: trackTexture(THREE) })
+    );
+    track.rotation.x = -Math.PI / 2;
+    track.position.set(0, 0, 18);
+    track.receiveShadow = true;
+    scene.add(track);
+
+    const grass = new THREE.Mesh(
+      new THREE.PlaneGeometry(600, 200),
+      new THREE.MeshLambertMaterial({ color: '#3f7a3a' })
+    );
+    grass.rotation.x = -Math.PI / 2;
+    grass.position.set(0, -0.1, -85);
+    grass.receiveShadow = true;
+    scene.add(grass);
+
+    // 跑道外側草皮：補住畫面最下緣，不然會露出天空底色
+    const apron = new THREE.Mesh(
+      new THREE.PlaneGeometry(600, 140),
+      new THREE.MeshLambertMaterial({ color: '#4a8c42' })
+    );
+    apron.rotation.x = -Math.PI / 2;
+    apron.position.set(0, -0.1, 120);
+    apron.receiveShadow = true;
+    scene.add(apron);
+
+    // 遠山剪影（不吃陰影，純背景）
+    const hills = new THREE.Group();
+    for (let i = 0; i < 14; i++) {
+      const h = 26 + (i % 3) * 10;
+      const m = new THREE.Mesh(
+        new THREE.ConeGeometry(28, h, 4),
+        new THREE.MeshLambertMaterial({ color: '#93b8c9', fog: true })
+      );
+      m.position.set(-240 + i * 40, h / 2 - 4, -190);
+      m.rotation.y = Math.PI / 4;
+      hills.add(m);
+    }
+    scene.add(hills);
+
+    // 校園（可捲動）與灌木帶
+    // 正交鏡頭不會因為推遠而變小，所以校舍要自己縮一號，跑者才有主角感
+    const CAMPUS_S = 0.72;
+    const campus = buildingsGroup(THREE);
+    campus.scale.setScalar(CAMPUS_S);
+    campus.position.z = -26;
+    scene.add(campus);
+    const shrubs = new THREE.Group();
+    for (let i = 0; i < 40; i++) {
+      shrubs.add(box(THREE, 10, 5, 8, '#2f5e2c', i * 34, 0, -26));
+    }
+    scene.add(shrubs);
+
+    // 雲
+    const clouds = new THREE.Group();
+    for (let i = 0; i < 10; i++) {
+      const c = new THREE.Group();
+      c.add(box(THREE, 22, 5, 10, '#ffffff', 0, 0, 0));
+      c.add(box(THREE, 12, 5, 10, '#ffffff', 4, 4, 0));
+      c.position.set(i * 60, 52 + (i % 3) * 9, -150);
+      c.traverse((o) => { if (o.isMesh) { o.castShadow = false; o.receiveShadow = false; } });
+      clouds.add(c);
+    }
+    scene.add(clouds);
+
+    // 兩位跑者：一般 / 穿外套 兩套 voxel，切換 visible
+    function makeRunner3d(r) {
+      const g = new THREE.Group();
+      // 站姿／蹲姿 × 沒外套／穿外套，四套 voxel 切 visible
+      // （3D 也不做壓扁——壓扁一樣是把頭擠掉，蹲姿走獨立圖）
+      const poses = {
+        stand: runnerGroup(THREE, r.sprite, null),
+        standJacket: runnerGroup(THREE, r.sprite, JACKET_ON),
+        duck: runnerGroup(THREE, r.duck, null),
+        duckJacket: runnerGroup(THREE, r.duck, JACKET_ON),
+      };
+      for (const key of Object.keys(poses)) {
+        poses[key].visible = false;
+        g.add(poses[key]);
+      }
+      // 背包（撿到才顯示）
+      const bag = box(THREE, 3, 6, 5, '#1c1c22', -6.5, 5, 0);
+      bag.visible = false;
+      g.add(bag);
+      g.userData = { poses, bag };
+      scene.add(g);
+      return g;
+    }
+    const runner3d = new Map([[player, makeRunner3d(player)], [cpu, makeRunner3d(cpu)]]);
+
+    // 障礙 / 加分物件：依模擬物件動態建立、離場即釋放
+    const objMeshes = new Map();
+    function hurdleMesh() {
+      const g = new THREE.Group();
+      g.add(box(THREE, 1.5, 7, 1.5, '#2c2c34', -3, 0, -3));
+      g.add(box(THREE, 1.5, 7, 1.5, '#2c2c34', 3, 0, -3));
+      g.add(box(THREE, 1.5, 7, 1.5, '#2c2c34', -3, 0, 3));
+      g.add(box(THREE, 1.5, 7, 1.5, '#2c2c34', 3, 0, 3));
+      g.add(box(THREE, 9, 3, 1, '#ffffff', 0, 7, 0));
+      g.add(box(THREE, 2, 3, 1.2, '#c0392b', -2, 7, 0));
+      g.add(box(THREE, 2, 3, 1.2, '#c0392b', 2, 7, 0));
+      return g;
+    }
+    function twoFrameMesh(rows2, pal, depth) {
+      const g = new THREE.Group();
+      g.userData.frames = rows2.map((rows) => {
+        const m = voxel(THREE, rows, pal, depth, true);
+        m.visible = false;
+        g.add(m);
+        return m;
+      });
+      return g;
+    }
+
+    // 3D 粒子：小方塊池
+    const fx = [];
+    const fxGeo = new THREE.BoxGeometry(1.1, 1.1, 1.1);
+    function spawnFx3d(ev) {
+      const conf = ev.type === 'hit'
+        ? { n: 14, colors: ['#ff8a75', '#ffd98a'], spd: 1.5, up: 0.6 }
+        : ev.type === 'pickup'
+          ? { n: 12, colors: ['#3fbf3f', '#d0ffd0'], spd: 1.2, up: 0.4 }
+          : { n: 6, colors: ['#e8dcc8', '#ffffff'], spd: 0.7, up: 0.2 };
+      for (let i = 0; i < conf.n; i++) {
+        const m = new THREE.Mesh(
+          fxGeo,
+          new THREE.MeshBasicMaterial({ color: conf.colors[i % conf.colors.length], transparent: true })
+        );
+        m.position.set(W2(ev.x), H2(ev.y), (Math.random() - 0.5) * 6);
+        scene.add(m);
+        const a = Math.random() * Math.PI * 2;
+        fx.push({
+          mesh: m,
+          vx: Math.cos(a) * conf.spd, vy: Math.random() * conf.spd + conf.up,
+          vz: Math.sin(a) * conf.spd * 0.6, life: 26, max: 26,
+        });
+      }
+    }
+    function updateFx3d() {
+      for (let i = fx.length - 1; i >= 0; i--) {
+        const p = fx[i];
+        p.mesh.position.x += p.vx;
+        p.mesh.position.y += p.vy;
+        p.mesh.position.z += p.vz;
+        p.vy -= 0.09;
+        p.life--;
+        const k = p.life / p.max;
+        p.mesh.material.opacity = Math.max(0, k);
+        p.mesh.scale.setScalar(0.4 + k * 0.9);
+        if (p.life <= 0) {
+          scene.remove(p.mesh);
+          p.mesh.material.dispose();
+          fx.splice(i, 1);
+        }
+      }
+    }
+
+    function syncObjects() {
+      const alive = new Set();
+      for (const o of obstacles) {
+        alive.add(o);
+        let g = objMeshes.get(o);
+        if (!g) {
+          g = o.type === 'hurdle' ? hurdleMesh()
+            : o.type === 'dog' ? twoFrameMesh(DOG, DOG_PAL, 6)
+              : twoFrameMesh(BIRD, BIRD_PAL, 3);
+          scene.add(g);
+          objMeshes.set(o, g);
+        }
+        g.position.x = W2(o.x + o.w / 2);
+        if (o.type === 'dog') {
+          g.position.y = 0;
+          const f = Math.floor(t / 10) % 2;
+          g.userData.frames.forEach((m, i) => { m.visible = i === f; });
+        } else if (o.type === 'bird') {
+          g.position.y = H2(BIRD_Y + BIRD.length) + Math.sin(t / 9) * 1.2;
+          const f = Math.floor(t / 6) % 2;
+          g.userData.frames.forEach((m, i) => { m.visible = i === f; });
+        }
+      }
+      for (const p of pickups) {
+        alive.add(p);
+        let g = objMeshes.get(p);
+        if (!g) {
+          g = voxel(THREE, p.def.rows, p.def.pal, 3, true);
+          scene.add(g);
+          objMeshes.set(p, g);
+        }
+        g.position.x = W2(p.x + p.def.w / 2);
+        g.position.y = H2(p.y + p.def.h) + Math.sin(t / 10) * 0.8;
+        g.rotation.y = Math.sin(t / 22) * 0.5; // 微微擺動，好認
+      }
+      for (const [key, g] of objMeshes) {
+        if (alive.has(key)) continue;
+        scene.remove(g);
+        disposeDeep(g); // 載入畫面可能開很久，離場物件的 GPU 資源要收乾淨
+        objMeshes.delete(key);
+      }
+    }
+
+    function syncRunners() {
+      for (const r of [player, cpu]) {
+        const g = runner3d.get(r);
+        g.visible = !(r.blink % 4 >= 2);
+        g.position.x = W2(r.x + 6);
+        g.position.y = -r.y;
+        g.rotation.z = r.y < 0 ? -0.12 : 0; // 騰空時身體微微前傾
+        const ducked = r.ducking && r.y === 0;
+        const key = (ducked ? 'duck' : 'stand') + (r.jacket ? 'Jacket' : '');
+        const poses = g.userData.poses;
+        for (const name of Object.keys(poses)) poses[name].visible = name === key;
+        const active = poses[key];
+        const f = Math.floor(t / (ducked ? 8 : 6)) % active.userData.frames.length;
+        active.userData.frames.forEach((m, i) => { m.visible = i === f; });
+        g.userData.bag.visible = r.bag;
+        g.userData.bag.position.y = ducked ? 3.5 : 5;
+      }
+    }
+
+    function resize() {
+      const w = canvas3d.clientWidth || 720;
+      const h = canvas3d.clientHeight || 240;
+      renderer.setSize(w, h, false);
+      const halfH = HALF_W * (h / w);
+      camera.top = halfH; camera.bottom = -halfH;
+      camera.updateProjectionMatrix();
+    }
+
+    const trackTex = track.material.map;
+    function render() {
+      while (events.length) spawnFx3d(events.shift());
+      updateFx3d();
+      // 校園有縮放，捲動位移也要跟著縮，接縫才不會露餡
+      campus.position.x = -SCREEN_W / 2 - (farScroll % CYCLE) * CAMPUS_S;
+      shrubs.position.x = -SCREEN_W / 2 - (midScroll % 34);
+      clouds.position.x = -300 - (cloudScroll % 60);
+      hills.position.x = -(hillScroll % 40);
+      // 跑道貼圖捲動速度對齊地面速度（400 世界單位 / 12 個 repeat）
+      trackTex.offset.x = groundScroll / (400 / 12);
+      syncObjects();
+      syncRunners();
+      renderer.render(scene, camera);
+    }
+
+    return { render, resize };
+  }
+
+  // 3D 的 HUD / 記分板走 DOM（比在 canvas 裡畫文字清楚）
+  const hudEls = {
+    pName: document.getElementById('hud3d-p-name'),
+    pBar: document.getElementById('hud3d-p-bar'),
+    pScore: document.getElementById('hud3d-p-score'),
+    cName: document.getElementById('hud3d-c-name'),
+    cBar: document.getElementById('hud3d-c-bar'),
+    cScore: document.getElementById('hud3d-c-score'),
+    win: document.getElementById('board3d-win'),
+    sub: document.getElementById('board3d-sub'),
+  };
+  function updateHud3d() {
+    const youTag = controlled ? '你' : '？';
+    hudEls.pName.textContent = youTag + player.label;
+    hudEls.cName.textContent = '電腦' + cpu.label;
+    hudEls.pScore.textContent = player.score;
+    hudEls.cScore.textContent = cpu.score;
+    for (const [bar, score] of [[hudEls.pBar, player.score], [hudEls.cBar, cpu.score]]) {
+      bar.firstElementChild.style.width = Math.max(0, Math.min(100, (score / 160) * 100)) + '%';
+      bar.classList.toggle('low', score <= 40);
+    }
+    board3d.hidden = !gameOver;
+    if (gameOver) {
+      hudEls.win.textContent = player.score > 0 ? youTag + '贏了！' : '電腦贏了！';
+      hudEls.sub.textContent =
+        youTag + player.label + ' ' + player.score + '分　電腦' + cpu.label + ' ' + cpu.score + '分';
+    }
+  }
+
+  // ============================================================
+  // 5. 模式切換 + 主迴圈
+  // ============================================================
+  let mode = '2d';
+  const btn2d = document.getElementById('mode-2d');
+  const btn3d = document.getElementById('mode-3d');
+
+  function applyMode() {
+    const is3d = mode === '3d';
+    view.hidden = is3d;
+    canvas3d.hidden = !is3d;
+    hud3d.hidden = !is3d;
+    board3d.hidden = !is3d || !gameOver;
+    btn2d.classList.toggle('is-on', !is3d);
+    btn3d.classList.toggle('is-on', is3d);
+    if (is3d && scene3d) scene3d.resize();
+  }
+
+  btn2d.addEventListener('click', () => { mode = '2d'; applyMode(); });
+  btn3d.addEventListener('click', async () => {
+    if (scene3d) { mode = '3d'; applyMode(); return; }
+    btn3d.disabled = true;
+    btn3d.textContent = '載入中…';
+    try {
+      const THREE = await ensureThree();
+      mode = '3d';
+      applyMode();          // 先讓 canvas 顯示出來，才量得到尺寸
+      scene3d = buildScene(THREE);
+      scene3d.resize();
+    } catch (err) {
+      console.error(err);
+      announce('3D 模組載入失敗，留在 2D', MSG_PENALTY);
+      mode = '2d';
+      applyMode();
+    } finally {
+      btn3d.disabled = false;
+      btn3d.textContent = '3D 立體';
+    }
+  });
+  window.addEventListener('resize', () => { if (mode === '3d' && scene3d) scene3d.resize(); });
+
+  function frame() {
+    step();
+    if (mode === '3d' && scene3d) {
+      scene3d.render();
+      updateHud3d();
+    } else {
+      render2d();
+    }
     requestAnimationFrame(frame);
   }
   frame();

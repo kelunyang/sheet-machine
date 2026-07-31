@@ -1,8 +1,7 @@
 // localStorage 暫存存取層（Phase 20 假名化）：假名 key＋smd1 密文的載入/寫入/清除，
-// 與舊版明文條目的一次性搬家。Node 無 localStorage，以最小 stub 模擬。
+// 與舊版明文條目的一次性清除。Node 無 localStorage，以最小 stub 模擬。
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { loadQueue, saveQueue, removeQueue, migrateLegacyEntry } from '../src/utils/tempStorage';
-import { openDraft } from '../src/utils/draftCipher';
+import { loadQueue, saveQueue, removeQueue, purgeLegacyEntry } from '../src/utils/tempStorage';
 
 const KEYS = { id: 'FAKE_ID_PSEUDONYM_BASE64URL', enc: 'x'.repeat(43) };
 const QUEUE = [
@@ -51,45 +50,35 @@ describe('saveQueue / loadQueue（假名 key＋smd1 密文）', () => {
   });
 });
 
-describe('migrateLegacyEntry（舊明文條目一次性搬家）', () => {
+describe('purgeLegacyEntry（舊明文條目一次性清除）', () => {
   const PKEY = 'A123456789'; // 明顯虛構的佔位主鍵值
-  const UID = 'SHEET_UID_1';
   const legacy = JSON.stringify([
-    { uid: UID, queue: QUEUE },
+    { uid: 'SHEET_UID_1', queue: QUEUE },
     { uid: 'SHEET_UID_2', queue: [{ id: 'z', val: '其他問卷' }] },
   ]);
 
-  it('舊條目轉入假名 key（加密）＋整鍵移除明文', async () => {
+  it('舊明文條目整鍵移除', () => {
     storeMap.set(PKEY, legacy);
-    expect(await migrateLegacyEntry(PKEY, UID, KEYS)).toBe(true);
-    expect(storeMap.has(PKEY)).toBe(false); // 明文個資清除（含其他問卷條目，刻意取捨）
-    expect(await openDraft(storeMap.get(KEYS.id), KEYS.enc)).toEqual(QUEUE);
+    expect(purgeLegacyEntry(PKEY)).toBe(true);
+    expect(storeMap.has(PKEY)).toBe(false);
   });
 
-  it('冪等：無舊條目直接跳過', async () => {
-    expect(await migrateLegacyEntry(PKEY, UID, KEYS)).toBe(false);
+  it('冪等：無舊條目直接跳過', () => {
+    expect(purgeLegacyEntry(PKEY)).toBe(false);
     expect(storeMap.size).toBe(0);
   });
 
-  it('假名 key 已有資料（較新）→ 不覆蓋、僅清舊明文', async () => {
-    await saveQueue(KEYS, [{ id: 'q1', val: '較新的' }]);
-    storeMap.set(PKEY, legacy);
-    expect(await migrateLegacyEntry(PKEY, UID, KEYS)).toBe(false);
-    expect(storeMap.has(PKEY)).toBe(false);
-    expect(await loadQueue(KEYS)).toEqual([{ id: 'q1', val: '較新的' }]);
-  });
-
-  it('舊條目壞掉（非 JSON）→ 照樣移除、不 throw', async () => {
+  it('舊條目壞掉（非 JSON）→ 照樣移除、不 throw', () => {
     storeMap.set(PKEY, '{{{not json');
-    expect(await migrateLegacyEntry(PKEY, UID, KEYS)).toBe(false);
+    expect(purgeLegacyEntry(PKEY)).toBe(true);
     expect(storeMap.has(PKEY)).toBe(false);
   });
 
-  it('舊條目有其他問卷但沒有目前問卷 → 不轉入、仍清明文', async () => {
-    storeMap.set(PKEY, JSON.stringify([{ uid: 'SHEET_UID_2', queue: QUEUE }]));
-    expect(await migrateLegacyEntry(PKEY, UID, KEYS)).toBe(false);
-    expect(storeMap.has(PKEY)).toBe(false);
-    expect(await loadQueue(KEYS)).toBe(null);
+  it('不動假名 key 的現有暫存', async () => {
+    await saveQueue(KEYS, [{ id: 'q1', val: '現有的' }]);
+    storeMap.set(PKEY, legacy);
+    expect(purgeLegacyEntry(PKEY)).toBe(true);
+    expect(await loadQueue(KEYS)).toEqual([{ id: 'q1', val: '現有的' }]);
   });
 });
 

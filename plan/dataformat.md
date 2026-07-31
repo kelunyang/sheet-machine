@@ -21,7 +21,7 @@
 
 ## 1. 問卷列表（listSheetID 指向的試算表）
 
-Web app 只讀**第一個分頁**的 `A:P`（16 欄），第 1 列為標題列，第 2 列起一列一份問卷。
+Web app 只讀**第一個分頁**的 `A:O`（15 欄），第 1 列為標題列，第 2 列起一列一份問卷。
 （實際檔案裡可能還有「輸出主控台」「執行紀錄」等分頁，那是 `tools/` 管理工具在用的，web app 不讀。）
 
 | 欄 | 標題 | `getQList_` 對應 | 說明 |
@@ -39,15 +39,21 @@ Web app 只讀**第一個分頁**的 `A:P`（16 欄），第 1 列為標題列�
 | K | 登入失敗備註語 | `loginfailTip` | 同上 |
 | L | 顯示 | — | 「是」才會進列表，其他值整列略過 |
 | M | 管理員Email | `email` | 送出通知信收件人 |
-| N | 固定ID | `sheetID` | `?sheet=` 直連參數用的固定代號 |
-| O | 開放進入 | `writeAllowed` | 「是」＝可登入填寫；否則唯讀 |
-| P | 亂數出題 | `randomQ` | 「是」＝欄位順序隨機 |
+| N | 開放進入 | `writeAllowed` | 「是」＝可登入填寫；否則唯讀 |
+| O | 亂數出題 | `randomQ` | 「是」＝欄位順序隨機 |
+
+> **2026-07-31 欄位變更**：舊版在 M 與「開放進入」之間有一欄 **N 固定ID**（全表 A~P 共 16 欄）。
+> 該欄原意是給 URL 參數直開問卷用，但深連結 `?sheet=` 從頭到尾帶的是 B 欄 refer（Drive ID，
+> 本身就唯一），且系統包在 Google Sites 裡沒法帶 URL 參數，前後端零讀取。已整欄刪除，
+> 原 O/P 前移成 N/O，全表變 **A~O 共 15 欄**。既有試算表用 `tools/export.js` 的一次性
+> `dropFixedIdColumn()` 遷移——**必須與新版 `src/Code.js` 同時到位**，只做一邊會讓欄位索引
+> 錯開、所有問卷讀成「不開放進入」。
 
 ### 範例列（虛構）
 
-| 表單名稱 | 對照表單ID | 新表單ID | 填表截止 | 檢視截止 | 預設修改 | 簽名 | … | 顯示 | 管理員Email | 固定ID | 開放進入 | 亂數出題 |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| [測試中] 測試問卷 | `1ReferSheetIdFakeAAAAAAAAAAAAAAAAAAAAAAAAAAA` | `1RecordSheetIdFakeBBBBBBBBBBBBBBBBBBBBBBBBB` | `1783726200000` | `1783726200000` | 是 | 測試者一;測試者二 | … | 是 | `admin@example.com` | 16 | 是 | （空） |
+| 表單名稱 | 對照表單ID | 新表單ID | 填表截止 | 檢視截止 | 預設修改 | 簽名 | … | 顯示 | 管理員Email | 開放進入 | 亂數出題 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| [測試中] 測試問卷 | `1ReferSheetIdFakeAAAAAAAAAAAAAAAAAAAAAAAAAAA` | `1RecordSheetIdFakeBBBBBBBBBBBBBBBBBBBBBBBBB` | `1783726200000` | `1783726200000` | 是 | 測試者一;測試者二 | … | 是 | `admin@example.com` | 是 | （空） |
 
 ---
 

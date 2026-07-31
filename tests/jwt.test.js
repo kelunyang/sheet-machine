@@ -38,7 +38,7 @@ function makeListRow({ refer = REFER, record = RECORD, dueDate, writeAllowed = '
   row[1] = refer;
   row[2] = record;
   row[3] = dueDate === undefined ? Date.now() + 86400000 : dueDate;
-  row[14] = writeAllowed;
+  row[13] = writeAllowed;
   return row;
 }
 

@@ -519,7 +519,7 @@ import { prepareColumnsForDisplay } from './utils/columnPrep';
 import { markUserInput } from './utils/fieldSources';
 import { hasAnyDiff } from './utils/submitDiff';
 import { buildTempQueue, hasFilledData } from './utils/tempQueue';
-import { loadQueue, saveQueue, removeQueue, migrateLegacyEntry } from './utils/tempStorage';
+import { loadQueue, saveQueue, removeQueue, purgeLegacyEntry } from './utils/tempStorage';
 import { gasRun, plainClone } from './composables/useGasRpc';
 import { useSignatures } from './composables/useSignatures';
 import { useDraft } from './composables/useDraft';
@@ -532,7 +532,6 @@ const tempFound = ref(false);
 // 本機自動存檔的時間（ms，0＝不知道/沒有）：給 topbar「本機備份」tag 的 tooltip 用（Phase 27）
 const localDraftAt = ref(0);
 const sheetLoaded = ref(false);
-const currentUID = ref('');
 const currentSID = ref('');
 const currentDue = ref(0);
 const viewDate = ref(0);
@@ -891,7 +890,6 @@ async function openSheet(sid) {
       enableModify.value = sheet[0].enableModify;
       scriptError.value.message = '';
       currentSID.value = sheet[0].id;
-      currentUID.value = sheet[0].sheetID;
       currentDue.value = sheet[0].dueDate;
       viewDate.value = sheet[0].viewDate;
       currentQuery.value = sheet[0].name;
@@ -1275,14 +1273,14 @@ async function loginView() {
               authDB.value[i].value = '';
             }
           }
-          // 本機暫存（Phase 20）：先把舊版留在瀏覽器的明文條目一次性搬進假名 key
-          // （順手清除明文個資），再載入加密暫存
+          // 本機暫存（Phase 20）：先清掉舊版留在瀏覽器的明文條目（明文個資），
+          // 再載入加密暫存。清除不依賴暫存功能開關，沒開線上暫存的問卷照樣清
+          let primaryKey = findPrimaryKey(authDB.value);
+          if (primaryKey !== undefined) {
+            purgeLegacyEntry(primaryKey.value);
+          }
           let storedQueue = [];
           if (draftKeys.value !== null) {
-            let primaryKey = findPrimaryKey(authDB.value);
-            if (primaryKey !== undefined) {
-              await migrateLegacyEntry(primaryKey.value, currentUID.value, draftKeys.value);
-            }
             storedQueue = (await loadQueue(draftKeys.value)) || [];
           }
           remainEmail.value = sheetConfig.emailQuota;

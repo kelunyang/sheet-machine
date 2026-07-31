@@ -2,8 +2,8 @@
 // 儲存結構：key = 後端派生的 id 假名（per 問卷×人，draftKeys.id），
 // value = sealDraft 的 smd1 密文（內容為 queue 陣列）——明文主鍵值與明文答案不再落地。
 // draftKeys = readRecord 登入成功回傳的 { id, enc }：id 可落地當定位鍵、enc 只在記憶體。
-// 舊結構（key = 明文主鍵值、value = 明文 JSON [{ uid, queue }, ...]）由 migrateLegacyEntry
-// 登入時一次性搬家清除。
+// 舊結構（key = 明文主鍵值、value = 明文 JSON [{ uid, queue }, ...]）由 purgeLegacyEntry
+// 登入時一次性清除。
 import { sealDraft, openDraft } from './draftCipher';
 
 // 寫入序列化：columnDB 的 watch 每次變動都觸發非同步加密寫入，鏈起來保證
@@ -47,34 +47,16 @@ export function removeQueue(draftKeys) {
   }).then(() => existed);
 }
 
-// 一次性搬家（登入成功當下，明文主鍵值仍在手）：舊版留在瀏覽器的明文條目
-// 轉進假名 key 後整鍵移除。冪等：舊 key 不在就跳過；假名 key 已有資料不覆蓋（較新），
-// 僅清舊明文。舊 key 內「其他問卷」的草稿沒有各自的派生鍵可封存，隨鍵一併清除是
-// 刻意取捨——清掉已部署版本留下的明文個資優先於保住非正式的暫存。
-// 回傳是否有轉入資料
-export async function migrateLegacyEntry(plainPkeyValue, uid, draftKeys) {
-  const raw = localStorage.getItem(plainPkeyValue);
-  if (raw === null) {
+// 一次性清除（登入成功當下，明文主鍵值仍在手）：Phase 20 前的版本用明文主鍵值當 key、
+// 明文 JSON 當 value，把殘留在瀏覽器的這種條目整鍵移除。
+// 原本這裡會先把舊 queue 搬進假名 key 再清，但搬家得靠條目裡的 uid（＝問卷列表 N 欄
+// 固定ID）認出「這一筆是哪份問卷的」；該欄已於 2026-07-31 整欄刪除，搬家隨之拿掉，
+// 只留清除——舊表都已退役、無人依賴那批暫存，但明文個資該清還是要清。
+// 冪等：舊 key 不在就跳過。回傳是否真的清掉了東西。
+export function purgeLegacyEntry(plainPkeyValue) {
+  if (localStorage.getItem(plainPkeyValue) === null) {
     return false;
   }
-  let migrated = false;
-  try {
-    const entries = JSON.parse(raw);
-    const entry = Array.isArray(entries)
-      ? entries.find((item) => item && item.uid === uid)
-      : undefined;
-    if (
-      entry &&
-      Array.isArray(entry.queue) &&
-      entry.queue.length > 0 &&
-      localStorage.getItem(draftKeys.id) === null
-    ) {
-      await saveQueue(draftKeys, entry.queue);
-      migrated = true;
-    }
-  } catch {
-    // 舊條目壞掉照樣往下移除（清明文個資優先）
-  }
   localStorage.removeItem(plainPkeyValue);
-  return migrated;
+  return true;
 }

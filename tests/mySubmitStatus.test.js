@@ -42,7 +42,7 @@ function makeListRow({ writeAllowed = '是', signNames = '導師;家長' } = {})
   row[6] = signNames;
   row[10] = '登入失敗提示';
   row[12] = 'admin@example.com';
-  row[14] = writeAllowed;
+  row[13] = writeAllowed;
   return row;
 }
 
