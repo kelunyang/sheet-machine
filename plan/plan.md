@@ -2357,6 +2357,137 @@ plan/issue.md（「三哨兵關係」一節）。
 
 ---
 
+## Phase 28：問卷列表公告改吃 JSON——排程上下架＋標題/樣式可設（2026-08-01 設計定案）
+
+### 動機
+
+問卷列表頁的重要公告目前是 ScriptProperties 的 `announcement`，值就是一段 Markdown 原文
+（`Code.js` 的 `getAnnouncement()`：`getProperty` 回 null 就回 `""`，前端 `announcement !== ''`
+才渲染那張 el-alert）。實際維運踩到兩個問題：
+
+1. **關不掉**——GAS 編輯器的「指令碼屬性」表單**不接受空值**，所以「清空內容讓公告消失」在 UI 上
+   辦不到；唯一的關法是把整個 property 刪掉，公告內容跟著沒了，下次要用得整段重打。
+2. **忘了關**——公告多半是有時效的（「8/15 系統維護」），到期要靠管理者自己記得回來刪。
+
+解法是把值從「純文字」升級為 **JSON 物件**，帶 `startAt`／`expireAt` 讓系統自己上下架；
+「手動關閉」＝把 `expireAt` 設成過去的時間，property 與內容都留著。順手把寫死的標題
+（「重要公告」）與 alert 樣式（`type="warning"`）一併開放設定。
+
+### 定案表
+
+| 決策點 | 選擇 |
+|---|---|
+| 值格式 | ScriptProperties `announcement` 存 **JSON 物件字串** |
+| 時間格式 | **只收 ms timestamp（數字）**——符合全系統「時間一律 ms」慣例，不做字串日期解析 |
+| 欄位 | `message`（必要）／`title`／`type`／`startAt`／`expireAt` 五個 |
+| 時間判斷位置 | **後端**（`new Date().getTime()`）——client 時鐘不可信，且前端維持零邏輯 |
+| 向後相容 | **parse 失敗＝當成既有的純文字 Markdown 原樣回傳**，現有設定不會壞、不必搬遷 |
+| 回傳型別 | `getAnnouncement()` 改回**物件** `{message, title, type}`；前端對「舊後端回字串」也做 normalize |
+| 明確不做 | 多則公告（陣列）、per-問卷公告、公告已讀記憶 |
+
+### 值格式
+
+```json
+{
+  "title": "系統維護",
+  "message": "8/15 22:00–23:00 暫停填答，屆時已填的暫存不受影響。",
+  "type": "warning",
+  "startAt": 1755000000000,
+  "expireAt": 1755273600000
+}
+```
+
+| 欄位 | 型別 | 缺省 / 容錯 |
+|---|---|---|
+| `message` | string | **公告內文（Markdown）**。缺、非字串或 trim 後為空＝**不顯示** |
+| `title` | string | 缺＝`重要公告`（維持現行寫死文案） |
+| `type` | string | el-alert 型別，**白名單 `warning`／`info`／`error`／`success`**；缺或不在白名單＝`warning` |
+| `startAt` | number(ms) | 生效時間。缺／非有限數／`0`＝**不限制**（立即生效）。`now < startAt` → 不顯示 |
+| `expireAt` | number(ms) | 到期時間。缺／非有限數／`0`＝**不限制**（永不到期）。`now >= expireAt` → 不顯示 |
+
+- **手動關閉的正規做法**＝把 `expireAt` 改成任一過去的 ms（例如 `1`）。property 留著、內容留著，
+  要重新上架就改回未來時間或直接刪掉這個欄位。
+- **時區**：ms timestamp 無時區問題；管理者換算 ms 的方式沿用問卷截止日的既有習慣
+  （`tools/export.js` 的 datetime-local 對話框、或瀏覽器 console `new Date('2026-08-15T22:00').getTime()`）。
+
+### 後端（`src/Code.js`）
+
+把判斷抽成**純函數**方便 vitest，`getAnnouncement()` 只負責讀 property 與取當下時間：
+
+```javascript
+const ANNOUNCE_DEFAULT_TITLE = '重要公告';
+const ANNOUNCE_TYPES = ['warning', 'info', 'error', 'success'];
+
+// 純函數：raw = property 原始字串（可能 null）、now = ms。回傳前端要的物件
+function resolveAnnouncement_(raw, now) { /* 見下方規則 */ }
+
+function getAnnouncement() {
+  return resolveAnnouncement_(appProperties.getProperty('announcement'), new Date().getTime());
+}
+```
+
+`resolveAnnouncement_` 的判斷順序（每一步都往「不顯示」fail-safe，公告壞掉不能拖垮問卷列表）：
+
+1. `raw` 為 null／非字串／trim 後空 → 回空公告 `{message: '', title: '', type: 'warning'}`
+2. `JSON.parse` 包 try/catch；**parse 失敗** → 舊格式純文字，回
+   `{message: trim 後的原字串, title: ANNOUNCE_DEFAULT_TITLE, type: 'warning'}`
+3. parse 成功但**不是 plain object**（number／string／null／**Array**）→ 同第 2 步當純文字原樣回傳
+   （`"123"`、`"[…]"` 這種值不會被誤判成結構化公告）
+4. 是物件 → 取 `message`（非字串或 trim 空 → 回空公告）
+5. `startAt` 為有限正數且 `now < startAt` → 回空公告
+6. `expireAt` 為有限正數且 `now >= expireAt` → 回空公告
+7. 通過 → 回 `{message, title: title || 預設, type: 白名單內則用之，否則 warning}`
+
+回傳一律是**同一個 shape 的物件**（不會回 null／字串），前端只判 `message`。
+
+### 前端（`src/App.vue`）
+
+- `announcement` ref 從 `''` 改成物件，初值 `{message: '', title: '', type: 'warning'}`。
+- `loadSheet()` 收到 `getAnnouncement` 結果後 **normalize**，同時吃兩種型別：
+  - 字串（**舊後端**，部署時序保險）→ `{message: 字串, title: '重要公告', type: 'warning'}`
+  - 物件 → 取三個欄位，`type` 同樣過白名單（前端也擋一次，不讓怪值進 el-alert 的 prop）
+  - 其他（null／undefined／RPC 失敗）→ 空公告
+- el-alert 改綁定：`v-if="announcement.message !== ''"`、`:title="announcement.title"`、
+  `:type="announcement.type"`；內文維持 `v-html="HTMLConverter(announcement.message)"`
+  （marked + DOMPurify，不變）。`show-icon`／`:closable="false"`／class 都不動。
+- **公告仍只在 `loadSheet()` 抓一次**：已開著的頁面不會自己上下架，重新整理（或回問卷列表）
+  才更新——這是刻意取捨，不為公告加 polling。
+
+### 測試（`tests/`）
+
+新開 `tests/announcement.test.js`，對 `resolveAnnouncement_` 打純函數測試（沿用既有 Code.js
+stub 全域載入模式）：
+
+- null／空字串／全空白 → 空公告
+- 舊格式純文字（含 Markdown 語法、含看起來像 JSON 但 parse 失敗的字串）→ 原樣當 message
+- parse 成功但為 number／字串／陣列 → 當純文字原樣回傳
+- 完整物件在區間內 → 三欄位正確
+- `startAt` 未到 → 空；剛好 `now === startAt` → 顯示（下界含）
+- `expireAt` 已過 → 空；`now === expireAt` → **空**（上界不含，「到期」即隱藏）
+- `expireAt: 1`（手動關閉慣用值）→ 空
+- `startAt`／`expireAt` 缺／`0`／`null`／字串 → 視同不限制
+- `type` 不在白名單／缺 → `warning`；白名單四種各自通過
+- `title` 缺 → `重要公告`
+- `message` 缺／非字串／空白 → 空公告
+
+### 文件同步
+
+- `README.md` 的 ScriptProperties 表把 `announcement` 那格改寫：JSON 格式、五個欄位、
+  **ms timestamp**、「要關掉公告請把 `expireAt` 設成過去的時間，不必刪 property」、
+  「填純文字仍可運作（舊格式相容）」。
+- `plan/todo.md` 加簡目。CLAUDE.md 不需改（沒動資料表結構與安全邊界）。
+
+### 驗收
+
+- `npm run lint`、`npm test`、`npm run build` 全過。
+- 實機四種設定各看一次：舊純文字值（照舊顯示、標題「重要公告」）／完整 JSON 在期間內
+  （標題與 type 吃設定）／`expireAt` 設成過去（列表頁乾淨無 alert，property 還在）／
+  `startAt` 設成未來（不顯示，時間到後重整才出現）。
+- 故意塞壞值（`{` 開頭但語法錯、`type: "banana"`、`expireAt: "2026-08-15"`）確認
+  問卷列表照常載入、不噴錯——公告壞掉最多就是不顯示或退回預設樣式。
+
+---
+
 ## 部署原則（每次都適用）
 
 - clasp 用工作帳號登入（`npx clasp show-authorized-user` 先確認）

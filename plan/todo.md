@@ -2,6 +2,20 @@
 
 ## 待處理
 
+### 29. 問卷列表公告改吃 JSON：排程上下架＋標題/樣式可設（2026-08-01 設計定案，規格見 plan.md Phase 28）
+
+- 動機：ScriptProperties `announcement` 現在是純文字，**GAS 指令碼屬性表單不接受空值**＝公告關不掉
+  （只能整個刪掉、內容跟著沒），且有時效的公告要靠管理者記得回來刪。
+- 值改成 JSON：`message`（Markdown 內文）／`title`（預設「重要公告」）／`type`（el-alert 型別白名單，
+  預設 warning）／`startAt`／`expireAt`（**只收 ms timestamp**，缺或 0＝不限制）。
+  **手動關閉＝把 `expireAt` 設成過去的時間**，property 與內容都留著。
+- 時間比對在後端（`new Date().getTime()`），前端維持零邏輯；`getAnnouncement()` 改回物件，
+  前端對「舊後端回字串」也 normalize（部署時序保險）。
+- **向後相容**：JSON parse 失敗（或 parse 出非 plain object）＝當成既有純文字 Markdown 原樣回傳，
+  現有設定不會壞、不必搬遷。壞值一律 fail-safe 到「不顯示／預設樣式」，不能拖垮問卷列表。
+- 落點：`Code.js` 純函數 `resolveAnnouncement_(raw, now)`＋`getAnnouncement()`、App.vue 的 ref 與
+  el-alert 綁定、新開 `tests/announcement.test.js`、README 的 `announcement` 那格改寫。
+
 ### 28. 填寫狀態上 topbar：會自己縮圖的狀態 tag 群＋FieldTimeline 小人開場台詞（2026-07-30 設計定案，規格見 plan.md Phase 27）✅
 
 **2026-07-30 實作完成（未部署）**：新增 `FormStatusTags.vue`（三顆 tag＋60 秒縮圖動畫，重新展開訊號走
