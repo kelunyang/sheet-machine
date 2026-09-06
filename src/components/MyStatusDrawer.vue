@@ -194,7 +194,8 @@ function signatureLabel(index) {
 
 // 進入點；App 經 template ref 呼叫並帶入認證欄位（plainClone 過的 authDB）。
 // 這支要驗身分＋掃整份紀錄表＋逐張讀 Drive 簽名圖，跑得久——掛 loading 小遊戲，
-// 查詢期間不另發 toast（比照 StatDialog 對 compareSheets 的做法）
+// 查詢期間不另發 toast。（填答率那支 Phase 29 起改用 RateBar 的填充動畫當回饋、
+// 刻意不掛遊戲——遊戲是全螢幕遮罩會蓋住那條 bar；這裡沒有 bar，仍走遊戲）
 async function open(auth) {
   if (!props.sheet) {
     return;

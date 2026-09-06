@@ -32,6 +32,7 @@
 | `uuid` | 產生識別碼 |
 | `diff` | 產生 unified patch（`components/DiffText.vue` 的 `createTwoFilesPatch`，送出前差異對照） |
 | `diff2html` | 把 patch 轉成 HTML（同上；輸出必過 DOMPurify 才 v-html）。**CSS 走 index.html 的 jsDelivr `<link>`，版號與 import map 兩處必須同步** |
+| `jsep` | 計算欄（C-S）運算式的 **parser**（`utils/formula.js`）。**只 parse 不執行**——能不能跑由我們自己的白名單 evaluator 決定（只認六種節點、擋掉 `MemberExpression`、函數查表）。**全系統禁止 `eval` / `new Function`**，理由見 plan/issue.md |
 | `three` | loading 小遊戲的 3D 模式（`utils/loadingScene3d.js`）。**唯一一個「動態 import」的 library**——只在該次 loading 抽中 3D 時才載，載不到就整場留在 2D，不像其他 library 掛掉就白畫面。除了這支 renderer 以外不要用它 |
 
 ### devDependencies
@@ -54,7 +55,7 @@
 於 GAS 沙盒 iframe 執行期載入。清單：
 
 - **JS library**（import map → esm.sh）：vue、element-plus、lodash、dayjs、dompurify、
-  marked、signature_pad、uuid、diff、diff2html、three（**唯一動態 import，載不到只是
+  marked、signature_pad、uuid、diff、diff2html、jsep、three（**唯一動態 import，載不到只是
   loading 遊戲退回 2D，不會白畫面**）。改版本要**同步改** `vite.config.js` 的
   `CDN_IMPORT_MAP` 與 `index.html` 的 CSS `<link>` 版號（element-plus、diff2html 各一條，
   兩處版本必須一致）。
@@ -86,7 +87,7 @@ dev（`npm run dev`）由 Vite 從 node_modules 解析、不注入 import map（
 | `src/App.vue` | 主元件：狀態編排、對話框流程、GAS 呼叫 |
 | `src/components/` | UI 元件：FormField（左側狀態邊界條：細線＋頂端狀態圖示）、FieldValueSwitch（答案來源 el-segmented：預設值/你上次的/暫存/你現在填的，切了自動帶入）、SubmitDiffDrawer、DiffText、SheetCard、FormToolbar、FormStatusTags（填寫狀態 tag 群：已填過 N 次／本機備份／遠端備份，60 秒後縮成 icon）、SignatureToolbar、JwtCountdownBar、FieldTimeline、LifecycleTimeline、InviteeSignDialog、PinCodeInput、MultiSelectDrawer、FileUploadDrawer、TempTransferDrawers、ConfirmDrawer、LoadingGame（8-bit 跑步跨欄小遊戲；每次掛載隨機抽 2D 像素或 3D voxel renderer，元件本身只管模擬與狀態編排）、StatDialog、MyStatusDrawer（查詢我填答了沒，需認證的唯讀查詢）、ErrorAlert、AppFooter（版權列單一來源）——各元件職責與彈窗規範（全站零 el-dialog、drawer 方向、`.drawer-flow-title`）見 plan/struct.md「前端元件細節」 |
 | `src/composables/` | 有狀態共用邏輯：useCrypto、useGasRpc、useDraft、useInvites、useSignatures、useJwtSession、useConfirmDrawer（全站禁用 ElMessageBox）、useLoadingGame——細節見 plan/struct.md |
-| `src/utils/` | 純函數：columnRules、columnPrep、tempQueue、tempStorage、draftCipher、sentinels、fieldChips、submitDiff、markdown、multiSelect、formatters、jwt、timeline、sheetFlow、pixelSprites（側面跑者四幀＋蹲姿、正面 indicator，三個元件共用）、loadingArt（loading 遊戲的道具/尺寸/校園段寬，兩種 renderer 的單一來源）、loadingScene2d、loadingScene3d（兩個 renderer 工廠函數，無 module 層狀態）——細節見 plan/struct.md |
+| `src/utils/` | 純函數：columnRules、columnPrep、formula（計算欄運算式：jsep parse＋白名單 evaluator，Phase 30）、tempQueue、tempStorage、draftCipher、sentinels、fieldChips、submitDiff、markdown、multiSelect、formatters、jwt、timeline、sheetFlow、pixelSprites（側面跑者四幀＋蹲姿、正面 indicator，三個元件共用）、loadingArt（loading 遊戲的道具/尺寸/校園段寬，兩種 renderer 的單一來源）、loadingScene2d、loadingScene3d（兩個 renderer 工廠函數，無 module 層狀態）——細節見 plan/struct.md |
 | `src/theme/colors.config.js` | 主題配色單一來源（含 WCAG 實測對比度）；`vite.config.js` 的插件在建置時據此生成 `src/styles/_theme-generated.scss`（gitignored），手寫樣式層在 `src/styles/_theme.scss`，改色只改 config |
 | `src/Code.js` | Google Apps Script 後端程式（非 ES module，clasp 原樣推送） |
 | `tests/` | Vitest 單元測試（純函數；Code.js 以 stub 全域載入測試） |

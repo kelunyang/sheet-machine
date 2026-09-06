@@ -2,6 +2,53 @@
 
 ## 待處理
 
+### 31. 計算欄（C-S）升級為運算式：jsep parse ＋ 白名單 evaluator（2026-09-06 設計定案，規格見 plan.md Phase 30）✅
+
+**2026-09-06 實作完成（未部署）**：新增 `src/utils/formula.js`（jsep 只 parse、自寫白名單
+evaluator——只認六種節點、擋掉 `MemberExpression`、函數查表、scope 走 `Object.create(null)`）、
+content 改三段 `顯示模板::運算式::小數位數`、具名中間值（引號外分號切行，名稱可用中文）、
+`countif`／`match`／`filled`／`sum`／`round` 等函數、C-S 互相引用的循環偵測、
+FormField 錯誤態（固定文案＋tooltip，**畫面絕不出現 NaN**）、`tools/export.js` 的
+上線前結構檢查。舊格式（不含 `::`）行為零變化。lint／test（494 綠，新增 51 例）／
+build（216.14 KB）全過。
+
+- **解掉的三個限制**：常數加不進去（基本費 200 只能寫進題目名稱叫人自己加）、顯示字串寫死
+  （`6個欄位總和為：1020`）、不能依身分（中低收／低收）分歧單價與基本費。
+- **明確不做 callback／eval／new Function**——理由見 issue.md，要推翻先討論。
+- **計算結果仍不落地**（C 是唯讀展示欄）；要留痕必須後端用同一支 parser 重算，另開 Phase。
+- **待人工驗收**：拿真實問卷的價目表寫一條運算式實測（身分欄選項字面值與各身分單價／
+  基本費尚未提供）；`tools/export.js` 需手動貼進 container-bound 專案後測「檢查問卷」選單。
+
+### 30. 填答率入口按鈕變 bar chart＋compareSheets 數學修正／減肥（2026-09-05 設計定案，規格見 plan.md Phase 29）✅
+
+**2026-09-05 實作完成（未部署）**：新增 `RateBar.vue`（el-button 外殼＋linear-gradient 硬斷點＋
+clip-path 疊兩層文字，另有表格內唯讀形態）、`RATE_SCALE` 五段色階進 colors.config.js（WCAG 複驗
+5.44／4.93／4.72／4.99／5.14 全過 AA）、`compareSheets` 改寫（回物件兩種 mode、分子取交集、
+record 只讀 C:E、refer 只讀一次、兩層 compareNatural_ 排序）、StatDialog 升格主流程 drawer 且
+改由 App.vue 供資料、App.vue 四態狀態機＋單調遞增世代序號。順手修掉名冊資料列起點錯一列
+（`splice(0,7)` → `slice(8)`）。lint／test（443 綠，新增 26 例）／build（211.22 KB）全過。
+
+- 登入頁「查看填答率統計」那顆整寬按鈕本身變成 **bar chart**（填充比例＝總填答率，文字疊在條上
+  跨填充邊界仍可讀）。視覺點子取自 scoringSystem-cf 的 `CountdownButton.vue`，但**不移植該元件**
+  （70% 是倒數計時器的東西、顏色全寫死 hex、文字用 mix-blend-mode 會把主題色變負片）——
+  照本專案已有的 `JwtCountdownBar.vue` 骨架重寫成 `RateBar.vue`，文字對比走 clip-path 疊兩層。
+- **修數學**：`StatDialog.vue:70` 的「總填答率」是各組 rate 的**未加權平均**（各組應填人數不同，
+  系統性高估：40人10%／5人100%／5人100% 顯示 70%、實際 28%），改成 `sum(filled)/sum(total)`；
+  `Code.js:2877` 的分子從未與名冊對照，**rate 可能 > 100%**，改取 `_.intersection`。
+- **減肥**（零新鮮度損失）：record 表只讀 C:E（只用到主鍵與組別兩欄，原本整份含所有答案拉下來）、
+  refer 表消除重複讀取（`getHeaders` 內部又讀了一次 → 抽 `getHeadersFrom_`，`getHeaders` 改薄殼）。
+- **不自動預取、不快取、不做重新整理鈕、不加連點冷卻**：使用者點才發 RPC（多數人只是來填答），
+  每次點都是全新的即時查詢，關掉再點就是「重新整理」。防競態走**世代序號**（GAS 沒有 abort，
+  只能丟棄結果）——擋「換問卷後舊結果蓋新的」與亂序回傳。
+- **無 G 欄**：有 P 欄就有主鍵，算得出總體填答率，但**不列未填答者**（drawer 不畫表格，只給大數字）；
+  **無 P 欄**整顆按鈕不顯示。`compareSheets` 改回物件、兩種 mode（`grouped`／`overall`）。
+- 排序後端做：列依 classno、每列 unfinished 內部依座號，走 `compareNatural_`（數字優先、
+  非數字 localeCompare——班級可能是「甲」「三年一班」，`toNumber` 會回 NaN 把排序搞爛）。
+- drawer 升格主流程（`btt` 100% ＋ `with-header=false` ＋ `.drawer-flow-title`，照 MyStatusDrawer）；
+  五段分級色新增進 `colors.config.js`（全白字、明度接近避免文字色中途翻轉，蜜桃橘刻意不入列）。
+- 落點：`Code.js`（compareSheets／compareNatural_／getHeadersFrom_）、新增 `RateBar.vue`、
+  `StatDialog.vue`、`colors.config.js`＋`vite.config.js` 主題生成、`App.vue`、`tests/`。
+
 ### 29. 問卷列表公告改吃 JSON：排程上下架＋標題/樣式可設（2026-08-01 設計定案，規格見 plan.md Phase 28）
 
 - 動機：ScriptProperties `announcement` 現在是純文字，**GAS 指令碼屬性表單不接受空值**＝公告關不掉

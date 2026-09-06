@@ -4,7 +4,7 @@ import { viteSingleFile } from 'vite-plugin-singlefile';
 import { resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { writeFileSync, mkdirSync } from 'fs'
-import { THEME_COLORS, SURFACE_COLORS, getThemeGradient } from './src/theme/colors.config.js'
+import { THEME_COLORS, SURFACE_COLORS, RATE_SCALE, getThemeGradient } from './src/theme/colors.config.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -75,6 +75,14 @@ ${Object.entries(THEME_COLORS)
   .join('\n')}
   --sm-alert-bg: ${SURFACE_COLORS.alert.background};
   --sm-alert-text: ${SURFACE_COLORS.alert.text};
+
+  // 填答率五段色階（Phase 29）：RateBar 的填充色與其配對文字色
+${RATE_SCALE.map(
+  (step, i) =>
+    `  // ≤${step.max}%: ${step.description}（對比 ${step.contrast}:1）\n` +
+    `  --sm-rate-${i + 1}-bg: ${step.background};\n` +
+    `  --sm-rate-${i + 1}-text: ${step.text};`
+).join('\n')}
 }
 `
       const outputDir = resolve(__dirname, 'src/styles')
@@ -105,6 +113,9 @@ const CDN_IMPORT_MAP = {
     // diff2html 的 CSS 走 index.html 的 jsDelivr <link>，**版本要與這裡同步**
     diff: 'https://esm.sh/diff@9.0.0',
     diff2html: 'https://esm.sh/diff2html@3.4.56',
+    // 計算欄（C-S）運算式的 parser（Phase 30）：只 parse 不執行，
+    // 白名單 evaluator 在 src/utils/formula.js
+    jsep: 'https://esm.sh/jsep@1.4.0',
     // loading 小遊戲的 3D 模式（utils/loadingScene3d.js）：只在抽中 3D 時被
     // 動態 import，載不到就整場留在 2D，不會像其他 library 那樣掛掉就白畫面
     three: 'https://esm.sh/three@0.169.0',

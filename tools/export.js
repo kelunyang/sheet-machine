@@ -1290,6 +1290,112 @@ function checkColumn_(column, allIds, report) {
   checkContent_(column, allIds, label, report);
 }
 
+// ── 計算欄運算式（Phase 30）的上線前檢查 ─────────────────────────────
+// **刻意不 parse**：這支是手貼進 container-bound 專案的單檔程式碼，塞第三方 parser
+// （前端用的是 jsep）維護成本不划算。這裡是 best-effort 的靜態檢查——抓得到打錯的欄位 ID、
+// 括號沒關、`=` 誤當比較這類實際會犯的錯，但不保證文法完全正確；真正的把關在執行期
+// evaluator 的預設拒絕（src/utils/formula.js）＋ 前端錯誤態（作者預覽問卷時就會看到）。
+// **規則要與 src/utils/formula.js 的 validateCalcExpression 同步**（該側有測試）
+var CALC_FUNCTION_NAMES = ["countif", "filled", "sum", "min", "max", "abs", "floor", "ceil", "round", "match"];
+
+// 切行：引號內的分號不切（選項值可能是 "是;否"）
+function splitCalcStatements_(source) {
+  let lines = [];
+  let buffer = "";
+  let quote = null;
+  let text = source === null || source === undefined ? "" : String(source);
+  for (let i = 0; i < text.length; i++) {
+    let ch = text[i];
+    if (quote !== null) {
+      if (ch === quote) { quote = null; }
+      buffer += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; buffer += ch; continue; }
+    if (ch === ";") { lines.push(buffer); buffer = ""; continue; }
+    buffer += ch;
+  }
+  lines.push(buffer);
+  let out = [];
+  for (let i = 0; i < lines.length; i++) {
+    let trimmed = lines[i].trim();
+    if (trimmed !== "") { out.push(trimmed); }
+  }
+  return out;
+}
+
+function checkCalcExpression_(content, allIds, label, report) {
+  let segments = content.split("::");
+  if (segments.length < 2) {
+    report.errors.push(label + "計算欄（C-S）運算式格式是「顯示模板::運算式::小數位數」，少了運算式段");
+    return;
+  }
+  if (segments.length > 3) {
+    report.warnings.push(label + "計算欄（C-S）content 出現 3 段以上的 `::`，第 4 段之後會被忽略");
+  }
+  if (segments.length > 2 && segments[2].trim() !== "" && isNaN(parseInt(segments[2], 10))) {
+    report.warnings.push(label + "計算欄（C-S）小數位數「" + segments[2] + "」不是數字，會當成 0");
+  }
+  if (segments[0].indexOf("{}") === -1 && segments[0].trim() !== "") {
+    report.warnings.push(label + "計算欄（C-S）顯示模板沒有 `{}`，結果會直接接在文字尾端");
+  }
+  let assignRe = /^([^\s=<>!+\-*/%(),]+)\s*=(?!=)\s*([\s\S]+)$/;
+  let lines = splitCalcStatements_(segments[1]);
+  if (lines.length === 0) {
+    report.errors.push(label + "計算欄（C-S）運算式段是空的");
+    return;
+  }
+  let names = [];
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i];
+    let isLast = i === lines.length - 1;
+    let matched = line.match(assignRe);
+    if (!isLast) {
+      if (matched === null) {
+        report.errors.push(label + "計算欄第 " + (i + 1) + " 行不是「名稱 = 式子」的形式（最後一行才是結果式）：" + line);
+        continue;
+      }
+      let name = matched[1].trim();
+      if (allIds !== null && allIds.indexOf(name) !== -1) {
+        report.errors.push(label + "計算欄的名稱「" + name + "」與欄位 ID 重複");
+      }
+      names.push(name);
+    } else if (matched !== null) {
+      report.errors.push(label + "計算欄最後一行應該是結果式，不是指派（比較要寫 `==`）：" + line);
+    }
+    let body = matched === null ? line : matched[2];
+    let depth = 0;
+    for (let k = 0; k < body.length; k++) {
+      if (body[k] === "(") { depth += 1; }
+      if (body[k] === ")") { depth -= 1; }
+      if (depth < 0) { break; }
+    }
+    if (depth !== 0) {
+      report.errors.push(label + "計算欄第 " + (i + 1) + " 行的括號沒有配對：" + line);
+    }
+    if (/[^=<>!]=(?!=)/.test(body)) {
+      report.errors.push(label + "計算欄第 " + (i + 1) + " 行出現單一個 `=`（比較要寫 `==`）：" + line);
+    }
+    if (/=>/.test(body)) {
+      report.errors.push(label + "計算欄第 " + (i + 1) + " 行出現 `=>`：運算式不支援函數定義");
+    }
+    let stripped = body.replace(/"[^"]*"|'[^']*'/g, " ");
+    if (/[.[]/.test(stripped)) {
+      report.errors.push(label + "計算欄第 " + (i + 1) + " 行出現 `.` 或 `[`：運算式不支援屬性存取或陣列");
+    }
+    let tokens = stripped.match(/[A-Za-z_\u00A0-\uFFFF][A-Za-z0-9_\u00A0-\uFFFF]*/g) || [];
+    for (let t = 0; t < tokens.length; t++) {
+      let token = tokens[t];
+      if (CALC_FUNCTION_NAMES.indexOf(token) !== -1) { continue; }
+      if (names.indexOf(token) !== -1) { continue; }
+      if (allIds === null) { continue; }
+      if (allIds.indexOf(token) === -1) {
+        report.errors.push(label + "計算欄第 " + (i + 1) + " 行引用了不存在的欄位 ID 或名稱「" + token + "」");
+      }
+    }
+  }
+}
+
 // content 參數依 format 的 mini-grammar 檢查
 function checkContent_(column, allIds, label, report) {
   let content = column.content;
@@ -1297,9 +1403,13 @@ function checkContent_(column, allIds, label, report) {
   let format = column.format;
   if (type === "C") {
     if (format === "S") {
-      // 計算欄：欄位ID:倍數;…
       if (content === "") {
         report.errors.push(label + "計算欄（C-S）content 是空的，不知道要加總哪些欄位");
+        return;
+      }
+      // Phase 30：含 `::` ＝運算式格式（模板::運算式::小數位數），否則走舊的「欄位ID:倍數;…」
+      if (content.indexOf("::") !== -1) {
+        checkCalcExpression_(content, allIds, label, report);
         return;
       }
       let pairs = content.split(";");

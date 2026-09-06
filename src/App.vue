@@ -335,7 +335,15 @@
         <el-button class="ma1 pa1" size="large" type="primary" :disabled="checkAuth()" v-on:click="viewMyStatus()">{{ checkAuth() ? "填好上面的認證欄位才能查詢" : "查詢是否填寫" }}</el-button>
       </div>
       <el-button v-if="saveSuccessed" class="ma1 pa2 xs12" size="large" type="success" v-on:click="downloadResult()">下載你剛剛填寫的結果</el-button>
-      <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="viewStat()" v-if="!loginStatus">查看填答率統計</el-button>
+      <RateBar
+        v-if="!loginStatus && hasPkeyColumn"
+        :percentage="rateBarPercentage"
+        :label="rateBarLabel"
+        :loading="rateState === 'loading'"
+        :disabled="rateState === 'loading'"
+        clickable
+        @click="viewStat()"
+      />
       <el-button class="ma1 pa2 xs12" size="large" type="primary" v-on:click="sendContact()" v-show="!loginStatus" v-if="contactEmail !== ''">Email給問卷負責人</el-button>
       <AppFooter />
     </el-space>
@@ -466,7 +474,7 @@
     @imported="tempFound = true"
     @renew="handleRenewClick"
   />
-  <StatDialog ref="statDialogRef" :sheet="currentSheet" :sheet-name="currentQuery" />
+  <StatDialog ref="statDialogRef" :sheet-name="currentQuery" />
   <MyStatusDrawer
     ref="myStatusDrawerRef"
     :sheet="currentSheet"
@@ -500,6 +508,7 @@ import MultiSelectDrawer from './components/MultiSelectDrawer.vue';
 import FileUploadDrawer from './components/FileUploadDrawer.vue';
 import TempTransferDrawers from './components/TempTransferDrawers.vue';
 import StatDialog from './components/StatDialog.vue';
+import RateBar from './components/RateBar.vue';
 import MyStatusDrawer from './components/MyStatusDrawer.vue';
 import JwtCountdownBar from './components/JwtCountdownBar.vue';
 import InviteeSignDialog from './components/InviteeSignDialog.vue';
@@ -554,6 +563,20 @@ const lastSubmit = ref([]);
 const scriptError = ref({ message: '' });
 const columnDB = ref([]);
 const authDB = ref([]);
+// 填答率入口按鈕（Phase 29）：按鈕本身是一條 bar，填充比例＝總填答率。
+// idle｜loading｜ready｜error 四態；資料只在使用者主動點擊時抓（不自動預取——
+// 多數人只是來填答，自動觸發會把執行次數從「想看的人」放大成「所有訪客」）。
+const rateState = ref('idle');
+const rateStats = ref(null);
+const rateTick = ref(0);
+// 名冊有沒有主鍵欄：沒有 P 欄＝認不出誰是誰，填答率算不了，整顆按鈕不顯示
+const hasPkeyColumn = ref(false);
+// 防競態世代序號：GAS 的 google.script.run 沒有 abort，伺服器端那次一定跑完，
+// 前端只能丟棄結果。發射前遞增，resolve 時對不上就整包丟掉——
+// 擋「換問卷後舊結果蓋到新問卷的按鈕上」與兩次請求亂序回傳。
+// **用單調遞增計數器而不是 currentSID**：拿 SID 當 token 擋不住「同一份問卷離開又回來再點一次」
+// ——那會讓在途的舊請求拿到與新請求相同的 token 而被誤放行。
+const rateGeneration = ref(0);
 // 登入後的 JWT：特權 RPC 只帶它，認證欄位值（個資）不再重傳（Phase 5）
 const authToken = ref('');
 // 暫存加密金鑰對（Phase 20）：readRecord 隨 token 回傳的 { id, enc }。
@@ -887,6 +910,10 @@ async function openSheet(sid) {
     try {
       const headers = await gasRun('publicHeader', sheet[0].refer);
       let now = dayjs().valueOf();
+      // 換問卷＝填答率重來（同時讓在途的舊請求因世代對不上而被丟棄）
+      resetRateBar();
+      // 沒有 P 型欄就沒有主鍵，compareSheets 認不出誰是誰，填答率按鈕整顆不顯示
+      hasPkeyColumn.value = _.some(headers, (header) => /P/.test(header.type));
       enableModify.value = sheet[0].enableModify;
       scriptError.value.message = '';
       currentSID.value = sheet[0].id;
@@ -925,8 +952,80 @@ async function openSheet(sid) {
   }
 }
 
-function viewStat() {
-  statDialogRef.value.open();
+// 條的填充比例：載入中滿版（配石墨灰，與真實數據的分級色區隔），其餘看實際填答率
+const rateBarPercentage = computed(() => {
+  if (rateState.value === 'loading') {
+    return 100;
+  }
+  return rateStats.value ? rateStats.value.rate : 0;
+});
+
+const rateBarLabel = computed(() => {
+  if (rateState.value === 'loading') {
+    return '填答率計算中…';
+  }
+  if (rateState.value === 'error') {
+    return '填答率載入失敗，點此重試';
+  }
+  if (rateStats.value) {
+    // 一定要帶人數：filled 為 0 時條會縮到全空、外觀與 idle 相同，只能靠文字區分
+    return (
+      '查看填答率統計．已填 ' +
+      rateStats.value.filled +
+      '/' +
+      rateStats.value.total +
+      '（' +
+      rateStats.value.rate +
+      '%）'
+    );
+  }
+  return '查看填答率統計';
+});
+
+// 條從 100% 縮回實際值的過場時間，與 RateBar 的 transition 對齊。
+// drawer 是 btt 100% 全屏會把按鈕整個蓋掉，不等動畫跑完就開，使用者根本看不到那段動畫
+const RATE_ANIMATION_MS = 600;
+
+// 填答率統計的進入點。每次點都是一次全新的即時查詢（關掉 drawer 再點就是「重新整理」，
+// 所以不做重新整理鈕）。載入中按鈕 disabled——唯一的 fetch 就是使用者自己按的，
+// 意圖本來就明確，不必保留點擊意圖。
+// 刻意不掛 loading 小遊戲：遊戲是全螢幕遮罩，會蓋住我們正在做的 bar 動畫，bar 本身就是回饋。
+async function viewStat() {
+  if (!currentSheet.value || rateState.value === 'loading') {
+    return;
+  }
+  rateGeneration.value += 1;
+  const generation = rateGeneration.value;
+  rateState.value = 'loading';
+  try {
+    const payload = await gasRun('compareSheets', currentSheet.value.refer, currentSheet.value.record);
+    if (rateGeneration.value !== generation) {
+      return; // 使用者已經換到別份問卷，這包是上一份的，丟掉
+    }
+    rateStats.value = payload;
+    rateTick.value = dayjs().valueOf();
+    rateState.value = 'ready';
+    // 先讓條縮回實際值，動畫跑完才開 drawer
+    await new Promise((resolve) => setTimeout(resolve, RATE_ANIMATION_MS));
+    if (rateGeneration.value !== generation) {
+      return;
+    }
+    statDialogRef.value.open(payload, rateTick.value);
+  } catch (err) {
+    if (rateGeneration.value !== generation) {
+      return;
+    }
+    rateState.value = 'error';
+    scriptError.value = err;
+  }
+}
+
+// 換問卷時把填答率整組歸零——不然新問卷的按鈕上會掛著上一份的數字
+function resetRateBar() {
+  rateGeneration.value += 1; // 讓在途的請求世代對不上而被丟棄
+  rateState.value = 'idle';
+  rateStats.value = null;
+  rateTick.value = 0;
 }
 
 // 「查詢我填答了沒」的進入點：沿用登入頁上方已填的認證欄位（與 loginView 傳給 readRecord

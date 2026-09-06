@@ -80,36 +80,6 @@ export function statusDetector(column) {
   }
 }
 
-// C-S 欄位（計算欄）：依 content 設定加總其他欄位的值
-export function sumUp(column, columnDB) {
-  if (/C/.test(column.type)) {
-    if (/S/.test(column.format)) {
-      if (column.content !== '') {
-        let columns = column.content.split(';');
-        let sumValue = 0;
-        for (let i = 0; i < columns.length; i++) {
-          if (columns[i] !== '') {
-            let columnConfig = columns[i].split(':');
-            let target = _.filter(columnDB, (col) => {
-              return col.id === columnConfig[0];
-            });
-            if (target.length > 0) {
-              // 使用正則表達式提取 value 中最後一個數字區塊
-              let valueStr = target[0].value.toString();
-              let allMatches = valueStr.match(/\d+/g);
-              let value = allMatches ? parseInt(allMatches[allMatches.length - 1]) : 0;
-              let multiplier = parseInt(columnConfig[1]);
-              sumValue += value * multiplier;
-            }
-          }
-        }
-        return columns.length + '個欄位總和為：' + sumValue;
-      }
-    }
-  }
-  return '';
-}
-
 // 群組欄位的說明文字
 export function groupTip(column, columnDB) {
   let tip = '';

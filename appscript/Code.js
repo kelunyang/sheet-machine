@@ -1890,6 +1890,14 @@ function getHeaders(referSSID) {
   let referSheet = referSS.getSheets()[0];
   let referRange = referSheet.getDataRange();
   let referArr = referRange.getValues();
+  return getHeadersFrom_(referArr, referSSID);
+}
+
+// 由已讀好的名冊二維陣列解出欄位定義（Phase 29 抽出）
+// ——讓已經讀過整張表的呼叫端（compareSheets）不必為了拿 headers 再讀一次。
+// referSSID 仍要收：buildSelections 對「S 格式且 content 空」的欄位要回頭讀名冊取唯一值。
+// getHeaders(referSSID) 是本函數的薄殼，簽名不變，其他呼叫端零影響。
+function getHeadersFrom_(referArr, referSSID) {
   let headers = [];
   if(referArr.length > 1) {
     if(referArr[0].length > 0) {
@@ -2826,99 +2834,177 @@ function maskEmail_(email) {
   return local.slice(0, 1) + "***" + local.slice(-1) + domain;
 }
 
+// 依「數字優先、非數字退回字串序」比較（Phase 29）
+// 班級／座號不保證是數字——通用問卷系統，可能是「甲」「三年一班」「A05」。
+// _.toNumber('甲') 回 NaN，NaN 進 comparator 會讓排序結果未定義（比不排還亂），故一律走這支。
+function compareNatural_(a, b) {
+  let sa = (a === undefined || a === null) ? "" : a.toString().trim();
+  let sb = (b === undefined || b === null) ? "" : b.toString().trim();
+  let na = Number(sa);
+  let nb = Number(sb);
+  let aNum = sa !== "" && !isNaN(na);
+  let bNum = sb !== "" && !isNaN(nb);
+  if(aNum && bNum) {
+    if(na !== nb) {
+      return na - nb;
+    }
+    return sa.localeCompare(sb, 'zh-Hant'); // "01" 與 "1" 數值相同，退回字串序求穩定
+  }
+  if(aNum) {
+    return -1; // 數字排在文字前
+  }
+  if(bNum) {
+    return 1;
+  }
+  return sa.localeCompare(sb, 'zh-Hant');
+}
+
+// 名冊主鍵去重（去空白、丟空值）——分子分母的共同前處理
+function pkeysOf_(rows, pos) {
+  let keys = [];
+  for(let i=0; i<rows.length; i++) {
+    let cell = rows[i][pos];
+    let val = (cell === undefined || cell === null) ? "" : cell.toString().trim();
+    if(val !== "") {
+      keys.push(val);
+    }
+  }
+  return _.uniq(keys);
+}
+
+// 一組（或全體）的填答率：分子取「名冊上有、而且填了」的交集
+// ——原本 recordCount.length / referCount.length 的分子從未與名冊對照，
+// 填完後被移出名冊的人會讓 rate > 100%（Phase 29 修正）
+function rateOf_(referKeys, recordKeys) {
+  let unfinished = _.difference(referKeys, recordKeys);
+  let filled = referKeys.length - unfinished.length;
+  let rate = referKeys.length > 0 ? Math.round((filled / referKeys.length) * 100) : 0;
+  return { filled: filled, total: referKeys.length, rate: rate, unfinished: unfinished };
+}
+
+// 未完成者名單的顯示字串（隱私規則沿用舊版，不放寬）：
+//   有座號欄 → 列座號（compareNatural_ 排序）＋ (未完成/應填)
+//   無座號欄 → 3 人以內列遮罩主鍵、超過 3 人只給數字
+function unfinishedLabel_(stat, referRows, pkeyPos, noPos) {
+  if(stat.total > 0 && stat.unfinished.length === stat.total) {
+    return "全體均未填寫";
+  }
+  if(stat.unfinished.length === 0) {
+    return "已完成";
+  }
+  if(noPos !== undefined && noPos !== null) {
+    let nos = [];
+    for(let k=0; k<stat.unfinished.length; k++) {
+      let hit = _.filter(referRows, (row) => {
+        return row[pkeyPos].toString().trim() === stat.unfinished[k];
+      });
+      if(hit.length > 0) {
+        nos.push(hit[0][noPos].toString().trim());
+      }
+    }
+    nos.sort(compareNatural_);
+    return nos.join(",") + " (" + stat.unfinished.length + "/" + stat.total + ")";
+  }
+  if(stat.unfinished.length <= 3) {
+    let sorted = stat.unfinished.slice().sort(compareNatural_);
+    let masked = [];
+    for(let k=0; k<sorted.length; k++) {
+      masked.push(maskString(sorted[k].toString())); // 先排原值再遮罩——排遮罩後的「王*明」沒有意義
+    }
+    return masked.join(",");
+  }
+  return stat.unfinished.length + "/" + stat.total + "（超過3人不顯示名單）";
+}
+
+// 填答率統計（Phase 29 改寫）
+//
+// 回傳物件（原本回陣列，唯一消費者是 StatDialog）：
+//   { mode: 'grouped', filled, total, rate, groups: [{classno, filled, total, rate, unfinished}, ...] }
+//   { mode: 'overall', filled, total, rate, groups: [] }   ← 名冊無 G 型欄
+//
+// 成本：refer 只讀一次（headers 與資料列共用同一份，原本 getHeaders 內部還會再讀一次）、
+// record 只讀 C:E 三欄（紀錄列可能有幾十欄含長文字，只用得到主鍵與組別）。
 function compareSheets(referSSID, recordSSID) {
-  let recordSS = SpreadsheetApp.openById(recordSSID);
-  let recordSheet = recordSS.getSheets()[0];
-  let recordRange = recordSheet.getDataRange();
-  let recordArr = recordRange.getValues();
   let referSS = SpreadsheetApp.openById(referSSID);
   let referSheet = referSS.getSheets()[0];
-  let referRange = referSheet.getDataRange();
-  let referArr = referRange.getValues();
-  let headers = getHeaders(referSSID);
+  let referArr = referSheet.getDataRange().getValues();
+  let headers = getHeadersFrom_(referArr, referSSID);
+
+  let pkeyColumns = _.filter(headers, (header) => {
+    return /P/.test(header.type);
+  });
+  let empty = { mode: 'overall', filled: 0, total: 0, rate: 0, groups: [] };
+  if(pkeyColumns.length === 0) {
+    return empty; // 沒有主鍵欄＝認不出誰是誰，填答率算不了
+  }
+  let pkeyPos = pkeyColumns[0].pos;
+
+  // 名冊資料列從第 9 列（索引 8）起——前 8 列是欄位定義。
+  // 原本是 splice(0,7)，少切一列會把第 8 列（nullable 定義列）當成名冊資料（Phase 29 修正）
+  let referRows = referArr.slice(8);
+
+  // 紀錄列結構：[A]時間 [B]accept [C]主鍵 [D]簽名 [E]組別（見 writeRecord 的 pureData）
+  // 只讀 C:E → recordRow[0]=主鍵、recordRow[2]=組別
+  let recordSS = SpreadsheetApp.openById(recordSSID);
+  let recordSheet = recordSS.getSheets()[0];
+  let recordLastRow = recordSheet.getLastRow();
+  let recordRows = recordLastRow > 0 ? recordSheet.getRange(1, 3, recordLastRow, 3).getValues() : [];
+
   let groupColumns = _.filter(headers, (header) => {
     return /G/.test(header.type);
   });
-  let pkeyColumns = _.filter(headers, (header) => {
-    return /P/.test(header.type);
-  })
-  let result = [];
-  if(pkeyColumns.length > 0) {
-    if(groupColumns.length > 0) {
-      let groupNos = _.filter(groupColumns, (header) => {
-        return /N/.test(header.format);
-      });
-      referArr.splice(0,7);
-      let groupsTemp = _.uniqBy(referArr, (row) => {
-        return row[groupColumns[0].pos].toString().trim();
-      });
-      let groups = [];
-      for(let i=0; i<groupsTemp.length;i++) {
-        groups.push(groupsTemp[i][groupColumns[0].pos].toString().trim());
-      }
-      for(let i=0; i<groups.length; i++) {
-        if(groups[i] !== "") {
-          let referTemp = _.filter(referArr, (refer) => {
-            return refer[groupColumns[0].pos].toString().trim() === groups[i];
-          });
-          let referCount = [];
-          for(let k=0; k<referTemp.length; k++) {
-            referCount.push(referTemp[k][pkeyColumns[0].pos].toString().trim());
-          }
-          let recordTemp = _.filter(recordArr, (record) => {
-            return record[4].toString().trim() === groups[i].toString();
-          });
-          let recordCount = [];
-          for(let k=0; k<recordTemp.length; k++) {
-            recordCount.push(recordTemp[k][2].toString().trim());
-          }
-          recordCount = _.uniq(recordCount);
-          referCount = _.uniq(referCount);
-          let rate = ((recordCount.length / referCount.length) * 100).toFixed(0);
-          let unfinished = _.differenceWith(referCount, recordCount, (existed, written) => {
-            return existed === written;
-          });
-          let returnList = "";
-          if(unfinished.length === referCount.length) {
-            returnList = "全體均未填寫";
-          }
-          if(unfinished.length === 0) {
-            returnList = "已完成";
-          }
-          if(returnList === "") {
-            if(groupNos.length > 0) {
-              let temp = [];
-              for(let k=0; k<unfinished.length; k++) {
-                let nos = _.filter(referTemp, (row) => {
-                  return row[pkeyColumns[0].pos].toString() === unfinished[k];
-                });
-                if(nos.length > 0) {
-                  temp.push(nos[0][groupNos[0].pos].toString());
-                }
-              }
-              returnList = temp.join(",") + " (" + unfinished.length + "/" + referCount.length + ")";
-            } else {
-              if(unfinished.length <= 3) {
-                let temp = [];
-                for(let k=0; k<unfinished.length; k++) {
-                  temp.push(maskString(unfinished[k].toString()));
-                }
-                returnList = temp.join(",");
-              } else if(unfinished.length > 3) {
-                returnList = unfinished.length + "/" + referCount.length + "（超過3人不顯示名單）";
-              }
-            }
-          }
-          result.push({
-            classno: groups[i],
-            rate: rate,
-            unfinished: returnList
-          });
-        }
-      }
+  if(groupColumns.length === 0) {
+    // 總體模式：有 P 欄就算得出總填答率，但沒有分組＝沒有未完成者名單可列
+    let stat = rateOf_(pkeysOf_(referRows, pkeyPos), pkeysOf_(recordRows, 0));
+    return { mode: 'overall', filled: stat.filled, total: stat.total, rate: stat.rate, groups: [] };
+  }
+
+  let groupPos = groupColumns[0].pos;
+  let groupNos = _.filter(groupColumns, (header) => {
+    return /N/.test(header.format);
+  });
+  let noPos = groupNos.length > 0 ? groupNos[0].pos : undefined;
+
+  let groups = [];
+  for(let i=0; i<referRows.length; i++) {
+    let name = referRows[i][groupPos].toString().trim();
+    if(name !== "") {
+      groups.push(name);
     }
   }
-  return result;
+  groups = _.uniq(groups);
+  groups.sort(compareNatural_);
+
+  let result = [];
+  let totalFilled = 0;
+  let totalCount = 0;
+  for(let i=0; i<groups.length; i++) {
+    let referTemp = _.filter(referRows, (row) => {
+      return row[groupPos].toString().trim() === groups[i];
+    });
+    let recordTemp = _.filter(recordRows, (row) => {
+      return row[2].toString().trim() === groups[i];
+    });
+    let stat = rateOf_(pkeysOf_(referTemp, pkeyPos), pkeysOf_(recordTemp, 0));
+    totalFilled += stat.filled;
+    totalCount += stat.total;
+    result.push({
+      classno: groups[i],
+      filled: stat.filled,
+      total: stat.total,
+      rate: stat.rate,
+      unfinished: unfinishedLabel_(stat, referTemp, pkeyPos, noPos)
+    });
+  }
+  return {
+    mode: 'grouped',
+    filled: totalFilled,
+    total: totalCount,
+    // 總填答率＝sum(已填)/sum(應填)，不是各組 rate 的平均
+    // ——各組應填人數不同，直接平均會系統性高估（Phase 29 修正）
+    rate: totalCount > 0 ? Math.round((totalFilled / totalCount) * 100) : 0,
+    groups: result
+  };
 }
 
 function getScriptURL() {

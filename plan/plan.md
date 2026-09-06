@@ -2495,3 +2495,495 @@ stub 全域載入模式）：
   以 `npx clasp deploy -i <該ID>` 就地更新供實測（2026-07-10 起的常態流程）
 - **其他既有部署**只建新：`npx clasp deploy -d "說明"` 不帶 `-i`，不動版本
 - 已知 @HEAD 測試部署會隨 push 更新（已確認可接受）
+
+---
+
+## Phase 29：填答率入口按鈕變 bar chart——compareSheets 數學修正＋成本減肥＋StatDialog 升格全屏（2026-09-05 設計定案；同日實作完成，未部署——待端對端實機驗證）
+
+### 動機
+
+登入頁那顆整寬的「查看填答率統計」（`App.vue:338`）現在只是一顆普通按鈕，點下去開一個
+`ttb` 60% 的輔助面板 drawer。這次把它本身變成一條 **bar chart**：按鈕背景的填充比例＝該問卷
+目前的總填答率，文字疊在條上跨越填充邊界仍然可讀。視覺點子來自 scoringSystem-cf 的
+`CountdownButton.vue`，但**不移植該元件**——它 70% 是倒數計時器的東西（duration／autoStart／
+flipAt／externalProgress／spinner／翻轉動畫／九種樣式組合），而且顏色全寫死 hex、文字用
+`mix-blend-mode: difference`（會把主題色變成不受控的負片）。本專案已有更乾淨的同型元件
+`JwtCountdownBar.vue`，新元件照它的骨架長。
+
+同時修掉三件在檢視這段程式碼時發現的問題：
+
+1. **總填答率算錯**（`StatDialog.vue:70`）：`_.meanBy(stats, item => parseInt(item.rate))` 是
+   **各組填答率的未加權平均**，不是總填答率。各組應填人數本來就不同（不是每次都全班要填），
+   直接平均會系統性高估。例：A 班 40 人填 4（10%）、B 班 5 人填 5（100%）、C 班 5 人填 5（100%），
+   現在顯示 70%，實際 `(4+5+5)/(40+5+5)` = **28%**。藏在 drawer 標題裡還好，放大成整寬按鈕的
+   填充比例就不能接受。
+2. **填答率可能 > 100%**（`Code.js:2877`）：`recordCount.length / referCount.length` 的分子
+   從未與名冊對照，填完後被移出名冊的人會讓分子超出分母。bar 吃到 120% 會壞。
+3. **成本浪費**：`compareSheets` 兩張表都 `getDataRange().getValues()` 整份拉下來，但實際只用到
+   record 的 2 欄、refer 的 3 欄；而且 refer 被讀了**兩次**（`Code.js:2837` 一次、同行下方
+   `getHeaders()` 內部又一次）。
+
+### 定案表
+
+| 決策點 | 選擇 | 理由 |
+|---|---|---|
+| 觸發時機 | **使用者點才發 RPC，不自動預取** | 多數人只是來填答；自動觸發會把執行次數從「想看的人」放大成「所有訪客」 |
+| 快取 | **不用 CacheService** | 填寫當下要看「還有誰沒寫完」，必須即時；減肥後單次已夠便宜 |
+| 重新整理鈕 | **不做** | 關掉 drawer 再點一次就是全新的即時查詢，需求自然消失 |
+| 連點冷卻 | **不做** | 載入中已 disable、drawer 全屏擋著，要連點得「開→關→開→關」，成本高到不會發生 |
+| 載入中按鈕 | **disable** | 唯一的 fetch 就是使用者自己按的，意圖明確，無須保留點擊意圖 |
+| drawer 開啟時機 | **等 bar 縮回動畫跑完再開**（約 600ms） | drawer 是 `btt` 100% 全屏會蓋住按鈕，不等就看不到動畫 |
+| loading 小遊戲 | **這支破例不掛** | 遊戲是全螢幕遮罩，會蓋住我們正在做的 bar 動畫；bar 本身就是回饋 |
+| drawer 樣式 | **升格主流程**：`btt` 100% ＋ `with-header=false` ＋ `.drawer-flow-title` | `plan/struct.md:602` 慣例：主流程 btt 100%、輔助面板 ttb 60% |
+| 分級色 | **5 段**，全部白字（見下方色階表） | |
+| 無 G 欄 | **算總體填答率，不列未填答者** | 有 P 欄就有主鍵（登入必要），算得出分子分母；沒有分組就沒有分組細目 |
+| 無 P 欄 | **整顆按鈕不顯示** | 沒有主鍵誰是誰都認不出來，真的算不了 |
+| 明確不做 | 自動預取、CacheService、重新整理鈕、連點冷卻、倒數計時功能 | |
+
+### 後端：`compareSheets` 改寫
+
+#### 回傳格式（由陣列改為物件——breaking change，唯一消費者是 StatDialog）
+
+分組模式（名冊有 G 型欄）：
+
+```js
+{
+  mode: 'grouped',
+  filled: 128,          // 名冊上有、且已填的人數（全體）
+  total: 175,           // 名冊上應填人數（全體）
+  rate: 73,             // Math.round(filled / total * 100)，number 不是 string
+  ungrouped: 2,         // 名冊上組別欄空白、未歸入任何一組的人數（仍計入 filled/total）
+  groups: [
+    { classno: '101', filled: 28, total: 35, rate: 80, unfinished: '3,11,24,30 (7/35)' },
+    ...  // 依 classno 以 compareNatural_ 排序
+  ]
+}
+```
+
+總體模式（名冊無 G 型欄）：
+
+```js
+{ mode: 'overall', filled: 128, total: 175, rate: 73, ungrouped: 0, groups: [] }
+```
+
+`total === 0` 時 `rate` 回 `0`（不產生 NaN／Infinity）。
+
+#### 數學修正
+
+**(a) 分子取交集，杜絕 rate > 100%**
+
+```js
+let filled = _.intersection(referCount, allRecordKeys);
+let rate = referCount.length > 0 ? Math.round((filled.length / referCount.length) * 100) : 0;
+```
+
+**(b) 分組配對改用主鍵，組別一律以名冊現值為準**
+
+原本是拿紀錄列的組別欄配對：
+
+```js
+let recordTemp = _.filter(recordArr, (record) => record[4].toString().trim() === groups[i].toString());
+```
+
+但 `record[4]` 是**送出那一刻的組別快照**（`Code.js:2456`）。有人送出後轉組、或管理者改了名冊的
+組別值，那個人會**同時算進舊組的已填與新組的未填**，兩邊都錯。改成：
+
+```js
+let allRecordKeys = _.uniq(recordArr.map((r) => r[0].toString().trim()));  // 全部送出過的主鍵，只算一次
+let filled = _.intersection(referCount, allRecordKeys);                     // 名冊該組的人 ∩ 送出過的人
+```
+
+「已填」的定義變成「這個人有沒有送出過」，分組一律照名冊現值。沒改過組別時結果與舊版完全相同，
+改過就是這版對。**副作用是 `record[4]` 不再被使用**，故 record 表只讀 C 欄（見上節）。
+
+**(c) 總體 `filled`／`total` 用完整名冊算，不是各組相加**
+
+`Code.js:2860` 的 `if(groups[i] !== "")` 會把**組別欄空白的人整個跳過**——不進任何一組的分子，
+也不進分母。以前只有分組細目時看不出來，現在要出「總填答率」的大數字就是正確性問題。
+
+故總體的 `total` ＝名冊全部主鍵數、`filled` ＝ `intersection(全部名冊主鍵, allRecordKeys)`，
+**與分組無關**；`groups[]` 只涵蓋有組別的人。這樣就算有幾列漏填組別，頭條數字仍然正確。
+另回 `ungrouped`（名冊上組別空白的人數），drawer 在 > 0 時標一行「另有 N 人未分組」。
+
+總體 `rate` 由 `filled / total` 當場算出（**不是各組 rate 的平均**，見動機段）。
+`unfinished` 的 `_.differenceWith` 方向本來就對（從 refer 減 record），不受影響。
+
+#### 成本減肥（零新鮮度損失）
+
+- **record 表只讀 C 欄**：紀錄列結構是 `[0]=writeTick(ms)、[1]=accept、[2]=主鍵、[3]=簽名 fileID、[4]=組別`
+  （`Code.js:2097`、`2453-2456`）。配對改走「主鍵比對」（見下節）後 **`record[4]` 完全用不到**
+  （已核：全專案只有原 `compareSheets:2869` 一處引用），故只需 `[2]`＝C 欄：
+  `recordSheet.getRange(1, 3, lastRow, 1).getValues()`，索引變成 `row[0]`。紀錄表存的是所有人的
+  完整答案，可能幾十欄含長文字，只讀 1 欄的節省比例約等於欄數，同時降低撞到 GAS 6 分鐘上限的風險。
+- **空紀錄表 guard（改窄範圍讀取才新引入的風險）**：`getRange` 的 `numRows` 必須 ≥ 1，但全新問卷
+  `getLastRow()` 是 **0** → `getRange(1, 3, 0, 1)` 直接拋例外。而「問卷剛開還沒人填」正是有人會去看
+  填答率的時刻。`lastRow < 1` 就當 `allRecordKeys = []`、回 `filled: 0`，不得丟錯誤。
+  （原本的 `getDataRange()` 空表回 1×1 所以沒這問題，容易漏。）
+- **`splice` 不可用在共用的 array**：`Code.js:2851` 現在用 `referArr.splice(0,7)` 原地切掉表頭 7 列。
+  refer 改成只讀一次、與 `getHeadersFrom_` 共用同一份 array 之後，**這個 splice 會把表頭從共用陣列
+  挖掉**，`getHeadersFrom_` 若在其後執行就拿到錯的資料。改用 `slice(7)` 產生新陣列或純索引偏移，
+  不得原地修改。這是本次重構最容易踩的雷。
+- **refer 表只讀一次**：抽出私有 `getHeadersFrom_(referArr)`，`getHeaders(referSSID)` 改為
+  「讀一次 → 呼叫 `getHeadersFrom_`」的薄殼（**簽名不變，其他呼叫端零影響**）；
+  `compareSheets` 自己讀一次 refer 後同時拿 headers 與資料列，不再讀第二次。
+- **總體模式再省一層**：無 G 欄時不做 `differenceWith`、不查座號欄、連組別欄都不用讀，
+  只要 refer 的主鍵欄 + record 的主鍵欄兩份資料。
+
+#### 排序：`compareNatural_`
+
+兩層排序：**列依 `classno`**、**每列 `unfinished` 內部依座號**（無座號欄時依主鍵原值排序、
+排完再套 `maskString`，不能排遮罩後的 `王*明`）。
+
+這是通用問卷系統，`classno`／座號**不保證是數字**（可能是「甲」「忠」「三年一班」「A05」），
+`_.toNumber('甲')` 回 `NaN`，`NaN` 進 comparator 會讓排序結果未定義。故一律走：
+
+```js
+// 數字優先（數值比大小，避免 "10" 排在 "9" 前面）、非數字退回 localeCompare
+function compareNatural_(a, b) {
+  const sa = String(a).trim();
+  const sb = String(b).trim();
+  const na = Number(sa);
+  const nb = Number(sb);
+  const aNum = sa !== '' && !isNaN(na);
+  const bNum = sb !== '' && !isNaN(nb);
+  if (aNum && bNum) return na - nb;
+  if (aNum) return -1;          // 數字排在文字前
+  if (bNum) return 1;
+  return sa.localeCompare(sb, 'zh-Hant');
+}
+```
+
+**`localeCompare` 帶 locale 參數在 GAS 要先驗**：Apps Script 的 V8 runtime 對 `Intl`／ICU 的支援
+歷來有缺口，最壞情況是 locale 被忽略、退化成 code point 比較。實作時先在 GAS 編輯器實跑確認；
+不支援就退回 `sa < sb ? -1 : sa > sb ? 1 : 0`——純數字那條路才是主要情境，中文組別只要**排序穩定**
+就夠，不必是標準字典序。
+
+### 前端：`RateBar.vue`（新元件）
+
+放 `src/components/`。**不自己寫 `<button>`**——保留現有 `el-button`，只用 `:style` 覆蓋
+background 成 `linear-gradient` 硬斷點，這樣 el-button 的尺寸、focus ring、disabled 行為
+全部免費保留，也符合專案用 Element Plus 的慣例。
+
+#### 跨填充邊界的文字對比：clip-path 疊兩層，**不用 `mix-blend-mode`**
+
+同一段文字疊兩份：底層用「未填充區文字色」（白底上的深色），上層用「填充區文字色」（白）並
+
+```css
+clip-path: inset(0 calc(100% - var(--sm-rate-fill)) 0 0);
+```
+
+兩個顏色都是配色表裡對比度已知的色，跨邊界切換是像素級精準。CountdownButton 的
+`mix-blend-mode: difference` 明確不採用：它把底色變負片（`#020180` 深藍 → 亮黃 `#fdfe7f`），
+顏色不受控且違反「配色單一來源」規範。
+
+#### 五段色階（新增進 `colors.config.js`）
+
+以 `RATE_SCALE` 陣列新增，並擴充 `vite.config.js` 的 `generateThemeScssPlugin` 生成
+`--sm-rate-{n}-bg` / `--sm-rate-{n}-text` 變數；另加 getter `getRateScale()` 供 JS 取用。
+
+| 區間 | 底色 | 文字 | WCAG | 來源 |
+|---|---|---|---|---|
+| 0–20% | `#c0392b` | `#ffffff` | 5.44:1 | 沿用 `danger` |
+| 20–40% | `#b4551d` | `#ffffff` | 4.93:1 | **新增**（鏽橙） |
+| 40–60% | `#8a7113` | `#ffffff` | 4.72:1 | **新增**（芥末褐） |
+| 60–80% | `#4d7c0f` | `#ffffff` | 4.99:1 | **新增**（橄欖綠） |
+| 80–100% | `#008000` | `#ffffff` | 5.10:1 | 沿用 `success` |
+
+設計說明：
+
+- **五段全用白字**，明度刻意接近（4.7～5.4:1），避免文字色在色階中途翻轉造成視覺跳動。
+- **蜜桃橘 `warning` 刻意不入列**——它是淺底配深棕字，放進來會逼文字色中途翻轉。
+- 對比度為本規格撰寫時計算，**實作時請以工具複驗**；`#8a7113` 的 4.72:1 最接近 AA 下限
+  （4.5:1），若複驗未過就往深處微調。
+- 色相近乎等明度對色覺障礙者不利，但**此處顏色是冗餘編碼**——填充寬度與按鈕上的
+  「已填 128/175（73%）」數字都獨立表達了同一個值，色相只是輔助。
+
+#### 狀態機
+
+| 狀態 | 按鈕文字 | 填充 | 可點 |
+|---|---|---|---|
+| `idle` | `查看填答率統計` | 0% | ✓ |
+| `loading` | `填答率計算中…` | 100%（**info 石墨灰**，與真實數據的分級色區隔，避免被誤讀成「填答率 100%」） | ✗ disabled |
+| `ready` | `查看填答率統計．已填 128/175（73%）` | 實際 % ＋對應分級色 | ✓ |
+| `error` | `填答率載入失敗，點此重試` | 0% | ✓ |
+
+流程：`idle` →（點擊）→ `loading`（條 0→100% 灰）→ 資料到達 → 換分級色、條 100%→實際 %
+（約 600ms）→ **動畫結束才開 drawer** → `ready`。關掉 drawer 後按鈕維持 `ready` 顯示該次
+快照；再點一次＝全新的即時查詢。
+
+`filled === 0` 時條會縮到全空、外觀與 `idle` 相同，靠文字「已填 0/175（0%）」區分——
+這也是按鈕文字一定要帶人數而不只帶百分比的原因。
+
+#### 防競態：世代序號
+
+GAS 的 `google.script.run` **沒有 abort**，伺服器端那次執行一定跑完，前端只能丟棄結果、
+省不了伺服器成本。發射前記下當下的 `currentSID`，resolve 時比對，對不上就整包丟棄不寫入。
+擋掉三種情境：
+
+1. **使用者登入了**：按鈕被 `v-if="!loginStatus"` 藏起來，但 StatDialog 一直掛在
+   `App.vue:469` 沒被銷毀，promise 照樣 resolve 照樣寫 ref。無害但要丟。
+2. **回列表換了另一份問卷**：舊問卷的結果回來會顯示在新問卷的按鈕上。**實害。**
+3. **兩份問卷的請求交錯回來**：新的先回、舊的後回把新的蓋掉。比 2 更糟，畫面會先對再變錯。
+
+換 SID 時一併把已抓到的統計清空，回到 `idle`。
+
+### `StatDialog.vue` 翻修
+
+- **升格主流程 drawer**：`direction` `ttb`→`btt`、`size` 60%→100%、`:with-header="false"`、
+  `body-class="drawer-flow-body"`，標題移進 body 第一行 `.drawer-flow-title` 並在右側加關閉圓鈕
+  （照 `MyStatusDrawer.vue` 抄）；底部原本那顆「關閉對話框」按鈕收掉，「匯出統計表」保留。
+- **標題文案**：`你在「{{ sheetName }}」的填答率：已填 128/175（73%）`。
+- **`grouped` 模式**：維持 el-table 三欄（班級／填答率／未完成者）。填答率欄的
+  `el-progress` 換成同一顆 `RateBar`（唯讀變體，不可點），讓表內與入口按鈕是同一套色。
+  `rate` 已是 number，`rateSort` 可簡化為 `a.rate - b.rate`。
+- **`overall` 模式**：**不畫表格**，只顯示一個大的填答率數字＋「已填 128/175」＋一條 `RateBar`。
+- **統計時間戳**：drawer 內顯示「統計於 HH:mm:ss」（`loadTick` 已在存 `dayjs().valueOf()`，
+  只是沒渲染）。不是為了重新整理，是因為 drawer 開著不動時資料會變舊。
+- 寫死的 `progressColor` 五段 hex（`#F56C6C`／`#FF9900`／`#E6A23C`／`#CCCC00`／`#67C23A`）
+  整組刪除，改讀 `RATE_SCALE`。
+- `downloadCSV` 的資料來源改吃新格式（`groups`），`overall` 模式匯出單列。
+
+### 隱私：無 G 欄不列未填答者
+
+無 G 欄時**完全不回 `unfinished`**，因此不會走到 `maskString` 那條路徑。有 G 欄時維持既有
+隱私規則不動（有座號欄→列座號；無座號欄→3 人以內列遮罩姓名、超過 3 人只給
+「N/M（超過3人不顯示名單）」）。
+
+### 測試（`tests/`）
+
+- `compareNatural_`：純數字（`"10"` 排在 `"9"` 之後）、純文字（zh-Hant 序）、混合（數字在前）、
+  空字串、前後空白、`"A05"` 這類非純數字不得產生 NaN 排序。
+- 填答率數學：`sum(filled)/sum(total)` ≠ 各組 rate 平均（用動機段那組 40/5/5 的例子鎖住 28% 而非 70%）；
+  分子交集後 rate 不得 > 100%；`total === 0` 回 0 不回 NaN。
+- 分級色的 bucket 索引（純函數）：0／20／20.1／80／100 的邊界歸屬。
+- 組別配對改主鍵後的行為：某人送出後被改到別組，**不得**同時出現在舊組已填與新組未填。
+- 名冊有組別空白的列時，總體 `total` 仍等於名冊全部人數（不因跳過空組而少算），`ungrouped` 正確。
+- 紀錄表為空（`getLastRow() === 0`）時回 `filled: 0` 而非拋例外。
+- 既有 `Code.js` 以 stub 全域載入的測試慣例照舊。
+
+### 檔案異動
+
+| 檔案 | 異動 |
+|---|---|
+| `src/Code.js` | `compareSheets` 改寫（回傳物件、交集、欄位裁切、兩種 mode、排序）；新增 `compareNatural_`、`getHeadersFrom_`；`getHeaders` 改薄殼 |
+| `src/components/RateBar.vue` | **新增**：el-button 外殼 ＋ linear-gradient 填充 ＋ clip-path 雙層文字 ＋ 狀態機；唯讀變體供表格內使用 |
+| `src/components/StatDialog.vue` | 升格主流程 drawer、兩種 mode、改用 RateBar、刪寫死 progressColor、顯示統計時間戳、CSV 改格式 |
+| `src/theme/colors.config.js` | 新增 `RATE_SCALE`（5 段，附 WCAG 實測）＋ `getRateScale()` |
+| `vite.config.js` | `generateThemeScssPlugin` 擴充：生成 `--sm-rate-{n}-bg` / `--sm-rate-{n}-text` |
+| `src/App.vue` | 「查看填答率統計」按鈕換成 RateBar；無 P 型欄時不顯示；換 SID 時重置；世代序號 |
+| `tests/` | 上節測試 |
+| `plan/struct.md` | 補 RateBar 元件說明、StatDialog 升格主流程 drawer |
+| `plan/issue.md` | 記三條：「compareSheets 的 mode 兩型回傳」「不自動預取填答率」為刻意設計；**多個 G／P 欄一律只取 `[0]` 且無任何提示**（既有行為，不改，但要有紀錄免得日後重查）|
+
+### 明確不做
+
+- **不移植 `CountdownButton.vue`**：只取「填充條當按鈕背景 + 文字跨邊界可讀」的視覺點子，
+  照 `JwtCountdownBar.vue` 的骨架重寫。倒數計時功能在本專案沒有落腳處。
+- **不用 `mix-blend-mode`**（理由見上）、**不收 `themeColor` prop**（顏色一律走配色表變數）。
+- 不自動預取、不加 CacheService、不做重新整理鈕、不加連點冷卻。
+
+### 實作註記（2026-09-05）
+
+與規格的兩處差異（都在實作時發現規格沒想周全）：
+
+1. **RPC 的發動移到 App.vue，StatDialog 不再自己打**。規格沒指定由誰抓，但入口按鈕本身要吃
+   同一份數字當填充比例——兩邊各抓一次會多花一次全表掃描，且兩個數字可能不一致。
+   StatDialog 改成 `open(payload, tick)` 只收結果、純呈現；載入態、錯誤態與防競態都在 App.vue。
+   連帶把 StatDialog 內已成死碼的 `ErrorAlert` 拿掉（失敗時 drawer 根本不會開，錯誤走
+   RateBar 的 error 態與 App 的 scriptError）。
+2. **世代序號改用單調遞增計數器，不是 `currentSID`**。規格寫「記下當下的 currentSID」，
+   但那擋不住「同一份問卷離開又回來再點一次」——在途的舊請求會拿到與新請求相同的 token 而被
+   誤放行，寫入較舊的資料。改成每次發射前 `+= 1`，`resetRateBar` 也遞增以作廢在途請求。
+
+另外實作時發現並一併修掉的既有缺陷（規格未涵蓋）：
+
+- **名冊資料列起點錯一列**：`compareSheets` 舊版用 `referArr.splice(0,7)`，但 `dataformat.md`
+  與 `getHeadersFrom_`／`buildSelections` 都是「前 8 列定義、第 9 列起資料」。少切一列會把
+  nullable 定義列當成一筆名冊資料灌進分母。已改 `slice(8)` 並加測試鎖住。
+
+驗證：`npm run lint` 過、`npm test` 443 綠（新增 `tests/compareSheets.test.js` 17 例、
+`tests/rateScale.test.js` 9 例）、`npm run build` 211.22 KB。五段色階的 WCAG 對比度已用
+相對亮度公式複驗：5.44／4.93／4.72／4.99／5.14，全數過 AA。
+**RateBar 的 clip-path 疊層與 el-button 背景覆蓋尚未實機目視確認**（GAS 沙盒／手機直式）。
+
+## Phase 30：計算欄（C-S）升級為運算式——jsep parse ＋ 白名單 evaluator（2026-09-06 設計定案；同日實作完成，未部署——待端對端實機驗證）
+
+### 動機
+
+C-S 計算欄目前只能做「欄位值 × 倍數的加總」（content `S02:170;S03:170;…`），三個限制在真實
+問卷上都踩到了：
+
+1. **常數加不進去**。報名基本費 200 沒有地方寫，作者只好把它塞進題目名稱：
+   「一般生預計考科作業費概算（報名基本費200，**請記得把下面的金額加上200**）」——要填表人自己心算。
+2. **顯示字串寫死**在 `sumUp()` 裡（`6個欄位總和為：1020`），沒有標籤、沒有單位。
+3. **不能分歧**。「中低收／低收」身分決定單價與基本費，現況只能拆成一個身分欄 ＋ 一個計算欄，
+   各算一份攤給學生自己看。
+4. 取值靠 `value.match(/\d+/g)` 取最後一個數字區塊——選項若是「是/否」這種沒有數字的字面值，
+   六欄會**靜默全部當 0**，畫面顯示「6個欄位總和為：0」而沒有任何警告。引用不存在的欄位 ID 亦同。
+
+### 設計決策：宣告式運算式，不是 callback
+
+**明確不做「讓 content 寫 JS callback」**。要把字串當 JS 跑只有 `eval` / `new Function`，
+而這兩條路沒有「只准用內建函數」這個旋鈕——同一個字串也能寫 `fetch(…, {body: …})`。
+關鍵在於**這段字串是在填表人的瀏覽器裡跑**，那個頁面當下持有 JWT、`draftKeys.enc`
+（Phase 20 明訂絕不落地的記憶體金鑰）與使用者正在填的個資明文。對照表單通常分享給
+協作同事編輯，一格公式被改不會有人發現——最壞情況不是「作者算錯自己的表」，
+而是**所有填這份問卷的人個資外流**。另外三個現實理由：`tools/export.js` 的上線前檢查器
+對任意 JS 無法靜態驗證；日後後端若要重算，GAS 端 eval 直接是管理者 Google 帳號權限；
+GAS 沙盒 CSP 是否放行 `unsafe-eval` 未經實測。真要跑任意 JS，唯一站得住的做法是
+sandboxed iframe/Worker ＋ postMessage，工程量大於自己畫白名單。
+
+**改用 jsep（只 parse、不執行）＋ 自寫白名單 evaluator。** 分工要講清楚：jsep 省掉的是
+「手刻 tokenizer/parser 容易寫錯運算子優先序」的**正確性**風險；**資安邊界仍然是我們自己
+畫的那張白名單**（只認五種節點、擋掉 `MemberExpression`、函數查表），這部分沒有現成的可套、
+也不該套——「准許什麼」本來就是本專案的決定。選 jsep 的理由：零相依、不執行任何程式碼、
+min 12KB、有 IIFE 單檔版（日後後端重算貼得進 `Code.js`）。評估過但不採用：**filtrex**
+（把運算式編譯成 JS function，內部用 `new Function`，正是要避開的路）、**expr-eval**
+（維護停滯 ＋ CVE-2025-12735）、**mathjs**（體積過大、歷來有逃逸修補紀錄）。
+
+### content 格式（第 6 列）
+
+三段以 `::` 分隔（沿用 T/U 欄既有的 `::` 慣例）：
+
+```
+顯示模板::運算式::小數位數
+```
+
+- **顯示模板**：`{}` 是結果要插入的位置；沒有 `{}` 就把結果接在字串尾端；整段留空＝只顯示數字。
+- **運算式**：見下節。
+- **小數位數**：空或非數字＝0（`toFixed`）。
+
+真實案例（本 Phase 的驗收範例）：
+
+```
+預計作業費 {} 元（已含報名基本費）::
+科數 = countif("是", S02, S03, S04, S05, S06, S07);
+單價 = match(F01, "低收入戶", 0, "中低收入戶", 85, 170);
+基本費 = match(F01, "低收入戶", 0, "中低收入戶", 100, 200);
+基本費 + 單價 * 科數
+::0
+```
+
+**舊格式（不含 `::`）一律走 legacy 路徑，行為與字串輸出完全不變**（含「抓最後一個數字區塊」
+的取值規則與 `N個欄位總和為：X` 的文案），既有問卷零異動。判定方式：content 含 `::` ＝新格式。
+
+### 運算式文法
+
+語法就是 **JavaScript 的運算式**（jsep 照 JS 文法 parse），因此：等號寫 `==` 不是 `=`；
+只能寫運算式，不能寫 `if` / `return` 這類敘述——分歧用三元 `? :`（jsep 解析成
+`ConditionalExpression`，evaluator 只求值被選中那一支，短路是天然的）。
+
+**具名中間值**：運算式段可用**引號外的分號**切成多行，前面每一行都必須是 `名稱 = 式子`，
+最後一行是結果式。這一層**不是 jsep 在解析**（jsep 預設不吃賦值）——由 `splitStatements()`
+自己切行、只把等號右邊丟給 jsep，所以賦值語意完全在我們手裡。切行**要跳過引號內的分號**
+（選項值可能是 `"是;否"`）。名稱不得與任何欄位 ID 同名（否則報錯，避免遮蔽）。
+中文名稱可用（jsep 對 ≥U+00A0 的字元視為識別字，已實測 `科數`／`單價`／`基本費` 可用，
+不需 `addIdentifierChar`）。
+
+### evaluator 白名單（`src/utils/formula.js`）
+
+**只認以下節點，其餘一律丟錯**（預設拒絕——jsep 日後支援新語法也自動擋下）：
+
+| 節點 | 處理 |
+|---|---|
+| `Literal` | 數字／字串常值原樣回傳 |
+| `Identifier` | 查 scope（先中間值、再欄位 ID）；查無＝丟錯，**不再默默當 0** |
+| `UnaryExpression` | 只認 `-`、`!` |
+| `BinaryExpression` | 白名單運算子 `+ - * / % == != < <= > >= && \|\|`（`&&`/`\|\|` 短路） |
+| `ConditionalExpression` | 三元，只求值選中那支 |
+| `CallExpression` | callee 必須是 `Identifier`，且名稱在函數表內 |
+| 其他全部 | 丟錯——特別是 `MemberExpression`（`a.b`／`a["b"]`，屬性存取的入口）、`ArrayExpression`、箭頭函數、`ThisExpression` |
+
+scope 以 `Object.create(null)` 建（無原型，連 `constructor` 都摸不到，與擋 `MemberExpression`
+互為雙保險）。
+
+**函數表**：`countif(目標值, 欄位…)` 等於目標值的個數／`filled(欄位…)` 非空欄位數／
+`sum(…)`／`min`／`max`／`round(值[, 位數])`／`floor`／`ceil`／`abs`／
+`match(值, 比對1, 結果1, …[, 預設])`（找不到且參數為偶數個時回空字串）。
+加新函數＝函數表加一行 ＋ 一個測試，不動 parser。
+
+**數值轉換**：`toNum()` 用 `parseFloat` 並先剝除 `📝` 前綴（後端防轉型標記，見 issue.md），
+非有限數一律當 0；比較運算子（`==` / `!=`）以字串比對，其餘運算子以數值比對。
+`+` 在兩邊都不是字串時做數值加法（避免字串串接的意外）。
+
+### 欄位取值規則（scope 組裝）
+
+寫式子的人不需要知道「這個值是學生填的還是名冊給的」：
+
+| 被引用欄位 | 取值 |
+|---|---|
+| type F / G / P / A / O | `column.value`，為空字串時退回 `column.savedContent` |
+| type C ＋ format T | `column.savedContent`（名冊該欄文字） |
+| type C ＋ format S | **遞迴計算該欄的結果值**（不是它的顯示字串） |
+| type C ＋ format M / F | 丟錯（說明區塊／檔案檢視沒有可運算的值） |
+
+**循環偵測**：遞迴時帶一個 `stack`，再次遇到同一個欄位 ID ＝丟錯
+「計算欄互相引用形成循環（A → B → A）」，不進無限遞迴。
+
+### 錯誤處理
+
+`computeCalcColumn()` 一律回 `{ ok, text, error }`，**永遠不丟例外到 render**
+（在模板裡呼叫，丟例外會整頁白畫面）。`ok === false` 時 FormField 顯示固定文案
+**「這一題的計算設定有誤，請聯絡問卷管理者」**（danger 色），細節（`error`）走 el-tooltip
+給管理者看，同時 `console.warn` 一次。**絕不讓 `NaN` 出現在畫面上**——結果非有限數
+一律轉成錯誤態。
+
+### 上線前檢查器（`tools/export.js`）
+
+`checkContent_` 的 C-S 分支拆兩路：舊格式維持既有三條檢查；新格式做
+**輕量結構檢查（不 parse）**——`::` 段數、運算式非空、括號配對、
+指派行格式（非最後一行必須是 `名稱 = 式子`）、中間值名稱不得與欄位 ID 衝突、
+**擷取所有識別字 token 比對欄位 ID／中間值／函數名是否都認得**、
+偵測明顯誤用（單一個 `=` 當比較、出現 `.` 屬性存取、`=>`）。
+
+**刻意取捨（要寫進 issue.md）**：檢查器**不引入 jsep**（`tools/export.js` 是手貼進
+container-bound 專案的單檔 GAS 程式碼，塞 12KB 第三方 parser 維護成本不划算），
+因此是 **best-effort 的靜態檢查**，抓得到打錯的欄位 ID、括號沒關、`=` 寫成比較這類
+實際會犯的錯，但不保證文法完全正確。真正的把關在執行期 evaluator 的預設拒絕
+＋ 前端的錯誤態顯示（作者預覽問卷時就會看到）。精靈（新增欄位）的 `calc` 項目
+維持產生舊格式，**新格式手寫**——精靈要出運算式編輯器是另一個題目。
+
+### 相容與遷移
+
+- 舊 content（不含 `::`）行為零變化，不需要改任何既有問卷。
+- 新舊在同一份問卷可並存（逐欄判定）。
+- `sumUp()` 從 `columnRules.js` 搬到 `formula.js`（唯一呼叫點是 FormField），
+  改名 `legacySumUp`，行為與文案原樣保留。
+
+### 測試（`tests/formula.test.js`）
+
+- 三段解析：模板有／無 `{}`、模板空、小數位數空／非數字、`::` 段數不足。
+- 切行：引號內分號不切（`countif("是;否", …)`）、單引號、行尾多餘分號。
+- 真實案例三個身分別的數字（一般 200+170×3=710／中低 100+85×3=355／低收 0）。
+- 三元寫法與 `match` 寫法結果一致。
+- 白名單拒絕：`constructor.constructor("return 1")()`、`window.localStorage`、
+  `(() => 1)()`、`[1,2,3]`、`foo(1)`、`S99 + 1`、`S02 = 999` 全部回 `ok:false` 且**不丟例外**。
+- 取值規則：F 欄 value 空時退回 savedContent、C-T 取 savedContent、C-S 遞迴取結果值、
+  C-M/C-F 引用報錯、`📝` 前綴剝除。
+- 循環偵測：A→B→A 與自我引用都回錯誤、不 stack overflow。
+- 錯誤態：結果為 NaN／Infinity／除以零 → `ok:false`，畫面不出現 `NaN`。
+- legacy：既有 `S02:170;…` 的輸出字串與舊 `sumUp` 完全一致（含 `N個欄位總和為：`）。
+- 檢查器純函數（與 export.js 同規則的那份）：打錯欄位 ID、括號不配對、`=` 誤用。
+
+### 檔案異動
+
+| 檔案 | 異動 |
+|---|---|
+| `src/utils/formula.js` | **新增**：jsep 白名單 evaluator、`splitStatements`、`parseCalcContent`、`computeCalcColumn`、`legacySumUp`、`validateCalcExpression`（檢查器共用規則） |
+| `src/utils/columnRules.js` | 移除 `sumUp`（搬到 formula.js） |
+| `src/components/FormField.vue` | C-S 改用 `computeCalcColumn`，加錯誤態顯示（danger ＋ tooltip） |
+| `package.json` / `vite.config.js` | 新增相依 `jsep`，加進 `CDN_IMPORT_MAP` |
+| `tools/export.js` | `checkContent_` 的 C-S 分支支援新格式（輕量結構檢查） |
+| `tests/formula.test.js` | 上節測試 |
+| `plan/dataformat.md` | S 欄 content 說明改寫、C type 說明、實務用法補充改用新格式 |
+| `plan/struct.md`、`CLAUDE.md` | utils 清單加 formula.js；相依表加 jsep |
+| `plan/issue.md` | 記兩條：不做 callback 的理由、檢查器 best-effort 的取捨 |
+
+### 明確不做
+
+- **不做 callback / eval / new Function**（理由見上）、不引入 sandboxed iframe 或 Worker。
+- **不把計算結果落地到紀錄表**。C-S 是唯讀展示欄，`writeRecord_` 對它維持不寫入
+  （現況是 fall through 剛好寫成空字串，本 Phase 只補上註解說明這是刻意的）。
+  真要留痕必須由後端用同一支 parser 重算（前端送來的數字不可信），那要把 jsep ＋
+  evaluator 複製進 `Code.js` 並用測試鎖住兩邊一致——留待確有需求時另開 Phase。
+- **不做精靈的運算式編輯器**、不支援迴圈／自訂函數／變數重新賦值／屬性存取。

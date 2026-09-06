@@ -32,7 +32,14 @@
     <!-- 唯讀展示欄（type=C）：直接把值攤出來給人看，沒有「答案來源」可切
          C-S 計算欄＝即時運算結果；C-T＝名冊該欄的文字；C-F＝名冊指定的檔案 -->
     <div v-if="formatDetector('S', 'C', column)" class="xs12 breakword">
-      {{ sumUp(column, columnDb) }}
+      <span v-if="calcResult.ok">{{ calcResult.text }}</span>
+      <!-- 設定有誤：只給填表人一句可行動的話，細節（給管理者看）走 tooltip；畫面絕不出現 NaN -->
+      <el-tooltip v-else :content="calcResult.error" placement="top">
+        <span class="calc-error">
+          <el-icon class="el-icon--left"><i class="fa-solid fa-triangle-exclamation"></i></el-icon>
+          這一題的計算設定有誤，請聯絡問卷管理者
+        </span>
+      </el-tooltip>
     </div>
     <div v-if="formatDetector('T', 'C', column)" class="xs12 breakword">
       {{ column.savedContent }}
@@ -173,10 +180,10 @@ import {
   formatHelper,
   statusDetector,
   groupTip,
-  sumUp,
   validateColumn,
   noneDeclared,
 } from '../utils/columnRules';
+import { computeCalcColumn } from '../utils/formula';
 import { REUSE_LAST_FILE } from '../utils/sentinels';
 import { markUserInput, differsFromLast } from '../utils/fieldSources';
 import FieldValueSwitch from './FieldValueSwitch.vue';
@@ -191,6 +198,13 @@ const props = defineProps({
 
 defineEmits(['query-pc', 'upload-file', 'multi-select']);
 
+// 計算欄（C-S）的顯示結果（Phase 30）：computeCalcColumn 永遠不丟例外，
+// 設定有誤回 { ok: false, error }——在 render 裡丟例外會整頁白畫面
+const calcResult = computed(() =>
+  formatDetector('S', 'C', props.column)
+    ? computeCalcColumn(props.column, props.columnDb)
+    : { ok: true, text: '', error: '' }
+);
 // 左側狀態邊界條：只有作答欄（F-type）有；說明欄（M-C）與分組欄（G）不是題目，不掛
 const showStatusBar = computed(() => formatDetector('', 'F', props.column));
 const fieldStatus = computed(
@@ -232,6 +246,12 @@ function validate() {
 </script>
 
 <style scoped>
+/* 計算欄設定有誤時的提示（Phase 30）：配色走全域變數，不寫死 hex */
+.calc-error {
+  color: var(--el-color-danger);
+  cursor: help;
+}
+
 /* 每題＝左側狀態邊界條 ＋ 右側內容。邊界條是一條細線（撐滿題高，當「這題到哪為止」的界線——
    長問卷裡題與題原本黏成一片），頂端一個圖示標填答狀態；狀態文字走 tooltip，不佔版面。
    顏色一律走配色表變數（用 currentColor 讓線與圖示同色），不寫死 hex。 */

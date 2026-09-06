@@ -531,7 +531,8 @@ sheet-machine/
 │   │   ├── MultiSelectDrawer.vue  # 多選欄位的卡片式 transfer（手機適配）
 │   │   ├── FileUploadDrawer.vue   # 檔案上傳 drawer（自打 saveFile RPC）
 │   │   ├── TempTransferDrawers.vue # 匯出/匯入暫存檔 drawer
-│   │   ├── StatDialog.vue         # 填答率統計
+│   │   ├── StatDialog.vue         # 填答率統計（主流程 btt 100% drawer）
+│   │   ├── RateBar.vue            # 填答率條（入口按鈕形態＋表格內唯讀形態）
 │   │   ├── MyStatusDrawer.vue     # 查詢我填答了沒（需認證的唯讀查詢）（Phase 26）
 │   │   ├── JwtCountdownBar.vue    # 登入時效倒數條（sticky 嵌入各主 drawer、警告態點擊續約）
 │   │   ├── FormToolbar.vue        # 填問卷 drawer 的 sticky 控制列（暫存▾/下載/編輯雙態鈕/狀態 tag）
@@ -557,6 +558,7 @@ sheet-machine/
 │   │   └── useSignatures.js       # 簽名板：SignaturePad 管理、比例檢查、旋轉重建
 │   ├── utils/
 │   │   ├── columnRules.js         # 欄位規則純函數：formatDetector、驗證、提示文字
+│   │   ├── formula.js             # 計算欄（C-S）運算式：jsep parse ＋ 白名單 evaluator（Phase 30）
 │   │   ├── columnPrep.js          # 登入後欄位整理（App.vue 與 InviteeSignDialog 共用）
 │   │   ├── tempQueue.js           # 暫存 queue 純邏輯：組裝、有效性判斷、還原（含 draftOrigin 標記）
 │   │   ├── sentinels.js           # 哨兵常數單一來源（REUSE_LAST_FILE；另見 issue.md 三哨兵）（Phase 23）
@@ -618,6 +620,9 @@ sticky 條（JwtCountdownBar/FormToolbar）捲動時才能越過標題升到 y=0
   segmented 旁的差異 tag）；
   右欄＝題名＋答案來源切換器＋輸入元件＋提示。M-C 說明欄與 G 分組欄不掛（非作答題）；
   唯讀展示欄（C-T 文字／C-F 檔案／C-S 計算）直接把值攤出來，沒有「來源」可切。
+  **C-S 計算欄（Phase 30）**走 `utils/formula.js` 的 `computeCalcColumn`——它永遠不丟例外
+  （在 render 裡丟＝整頁白畫面），設定有誤回 `{ ok:false, error }`，畫面顯示固定文案
+  「這一題的計算設定有誤，請聯絡問卷管理者」＋ tooltip 給細節，**絕不讓 NaN 上畫面**。
   原本每題固定兩行的唯讀文字（[系統原本儲存的答案]／[你上次輸入的答案]，空值也佔版面）已移除，
   收進 FieldValueSwitch。
 - **FieldValueSwitch**（Phase 23）：每題的**答案來源切換器**（`el-segmented`）——
@@ -646,7 +651,22 @@ sticky 條（JwtCountdownBar/FormToolbar）捲動時才能越過標題升到 y=0
 - **TempTransferDrawers**：匯出/匯入暫存檔的兩個 drawer。加密金鑰＝id 假名（draftKeys.id）＋
   使用者密碼（Phase 20）；匯入解密失敗自動 fallback 舊格式金鑰（主鍵值＋密碼）再試一次，
   匯入成功以 tempStorage.saveQueue 加密存回。
-- **StatDialog**：填答率統計（`compareSheets`，不需認證的群組統計）。
+- **RateBar**（Phase 29）：填答率條。兩個形態共用同一套填充與文字邏輯——`clickable=true`
+  是登入頁的入口按鈕（**el-button 外殼**，只用 `:style` 覆蓋 background 成 `linear-gradient`
+  硬斷點，保留 EP 的尺寸/focus ring/disabled）、`clickable=false` 是 StatDialog 表格內每列的
+  唯讀條（`role="progressbar"`）。**跨填充邊界的文字對比走 clip-path 疊兩層**（底層＝未填充區
+  文字色、上層＝填充區文字色 clip 到填充寬度），**不用 `mix-blend-mode`**——那會把底色變負片
+  （`#020180` → 亮黃 `#fdfe7f`）且不受配色表控制。顏色一律讀 `--sm-rate-{1..5}-*`
+  （來源 `colors.config.js` 的 `RATE_SCALE`，五段全白字、明度壓在 4.7～5.4:1 避免文字色中途翻轉）。
+  視覺點子取自 scoringSystem-cf 的 `CountdownButton`，但**不移植該元件**（70% 是倒數計時器的
+  東西、顏色寫死 hex），骨架照 `JwtCountdownBar` 長。
+- **StatDialog**：填答率統計（`compareSheets`，不需認證的群組統計）。**Phase 29 起本元件不自己
+  打 RPC**——入口按鈕（RateBar）本身要吃同一份數字當填充比例，兩邊各抓一次會多花一次全表掃描
+  且可能不一致，故 RPC 的發動、防競態與載入態都在 App.vue，`open(payload, tick)` 只收結果。
+  升格主流程 drawer（`btt` 100% ＋ `with-header=false` ＋ `.drawer-flow-title`，照 MyStatusDrawer）。
+  兩種 mode：`grouped` 畫三欄表格（班級／RateBar／未完成者）、`overall`（名冊無 G 欄）不畫表格
+  只給總數＋一條 RateBar。顯示「統計於 HH:mm:ss」——不是為了重新整理（關掉再點就是全新的即時
+  查詢，故**不做重新整理鈕**），是因為 drawer 開著不動時資料會變舊。
 - **MyStatusDrawer**（Phase 26）：「查詢我填答了沒」——登入頁上與填答率統計並排的第二顆按鈕，
   走需認證的 `mySubmitStatus`。認證欄位沿用登入頁上方已填的 authDB（不重畫輸入框，按鈕
   `:disabled="checkAuth()"`），只顯示自己的送出次數／**送出與登入合併的倒序活動時間線**

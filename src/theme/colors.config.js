@@ -84,6 +84,41 @@ export const SURFACE_COLORS = {
 };
 
 /**
+ * 填答率五段色階（Phase 29）
+ *
+ * 給 RateBar 的填充用：條上疊著文字、且文字會跨過填充邊界，所以每一段都要
+ * 「底色 + 配對文字色 + 實測對比度」三件一組。
+ *
+ * 設計約束：
+ * - **五段全用白字**，明度刻意壓在相近區間（4.7～5.4:1），避免文字色在色階中途翻轉造成視覺跳動。
+ * - **蜜桃橘 warning 刻意不入列**——它是淺底配深棕字，放進來會逼文字色中途翻轉。
+ * - 兩端沿用既有語義色（danger / success），中間三段是本色階自有。
+ * - 色相近乎等明度對色覺障礙者不利，但此處顏色是**冗餘編碼**——填充寬度與條上的
+ *   「已填 128/175（73%）」數字都獨立表達同一個值，色相只是輔助。
+ *
+ * max 為該段的上界（%），由小到大，最後一段必為 100。
+ */
+export const RATE_SCALE = [
+  { max: 20, background: '#c0392b', text: '#ffffff', contrast: 5.4, description: '珊瑚紅（沿用 danger）' },
+  { max: 40, background: '#b4551d', text: '#ffffff', contrast: 4.9, description: '鏽橙' },
+  { max: 60, background: '#8a7113', text: '#ffffff', contrast: 4.7, description: '芥末褐' },
+  { max: 80, background: '#4d7c0f', text: '#ffffff', contrast: 5.0, description: '橄欖綠' },
+  { max: 100, background: '#008000', text: '#ffffff', contrast: 5.1, description: '校徽綠（沿用 success）' },
+];
+
+/**
+ * 依填答率百分比取該段的色階設定
+ *
+ * @param {number} percentage - 0～100
+ * @returns {{max: number, background: string, text: string, contrast: number}} 色階段
+ */
+export function getRateScaleStep(percentage) {
+  const pct = Number(percentage);
+  const safe = Number.isFinite(pct) ? Math.min(100, Math.max(0, pct)) : 0;
+  return RATE_SCALE.find((step) => safe <= step.max) || RATE_SCALE[RATE_SCALE.length - 1];
+}
+
+/**
  * 問卷列表 tag 的循環色盤（取代 randomcolor）
  *
  * 只收「底色 + 文字色」都合規的組合；奶油米太接近頁面底色故不納入。
