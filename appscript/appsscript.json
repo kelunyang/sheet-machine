@@ -1,6 +1,13 @@
 {
   "timeZone": "Asia/Taipei",
   "dependencies": {
+    "enabledAdvancedServices": [
+      {
+        "userSymbol": "Drive",
+        "serviceId": "drive",
+        "version": "v3"
+      }
+    ],
     "libraries": [
       {
         "userSymbol": "LodashGS",

@@ -62,16 +62,21 @@ npm run build      # 產生 dist/index.html（GAS 部署格式）
 
 1. 新建一份 Google 試算表（這就是母表）。
 2. 把**第一個分頁改名為 `問卷列表`**（名稱必須一模一樣）。
-3. 在第 1 列填 **15 欄標題（A:O）**——web app 把第 1 列當標題略過、第 2 列起才是問卷：
+3. 在第 1 列填 **16 欄標題（A:P）**——web app 把第 1 列當標題略過、第 2 列起才是問卷：
 
    > A 表單名稱｜B 對照表單ID｜C 新表單ID｜D 填表截止日期Timestamp｜E 檢視截止時間Timestamp｜
    > F 預設修改｜G 簽名｜H 登入後說明｜I 登入前說明｜J 填寫完畢備註語｜K 登入失敗備註語｜
-   > L 顯示｜M 管理員Email｜N 開放進入｜O 亂數出題
+   > L 顯示｜M 管理員Email｜N 開放進入｜O 亂數出題｜P 輸出PDF
 
    各欄語意（timestamp 用毫秒、布林填「是/否」等）見 [`plan/dataformat.md`](plan/dataformat.md) 第 1 節。
 4. 記下這份試算表的 **Sheet ID**（網址 `/d/` 後那段），等一下要填進 web app 專案的 `listSheetID`。
 
 > 資料列不必手動填——建好空表頭即可，之後全用下面步驟 3(B) 的「問卷管理」選單新增問卷。
+
+> **P 欄「輸出PDF」（2026-09-16 Phase 31 新增）**：填 Google 文件範本 ID 的問卷，送出後會自動產生 PDF。
+> 加在尾端、不位移既有欄位——**既有 15 欄母表不必遷移**（web app 依實際欄數決定讀 A:O 或 A:P，
+> 選單「修改問卷設定」存檔時會自動補欄），要用時補上 P1 標題即可。範本語法與限制見
+> [`plan/dataformat.md`](plan/dataformat.md)「輸出 PDF 範本」。
 
 > ⚠️ **從 2026-07-31 之前的版本升級**：舊版母表在 M 與「開放進入」之間多一欄 **N 固定ID**（A~P 共 16 欄），
 > 該欄已整欄刪除、原 O/P 前移成 N/O。既有母表請在**問卷列表容器綁定專案**的 Apps Script 編輯器
@@ -98,6 +103,10 @@ npm run gpush            # 複製 Code.js + dist/index.html 到 appscript/ 並 c
 執行身分 = 部署者、存取權 = 任何人（匿名），拿到 web app 網址。
 （設定已寫在 `appscript/appsscript.json`：`executeAs: USER_DEPLOYING`、`access: ANYONE_ANONYMOUS`。）
 
+> **Phase 31（輸出 PDF）起**：manifest 啟用了**進階 Drive 服務**（`enabledAdvancedServices` Drive v3，
+> 用來覆蓋 PDF 版本），程式也多用了 `DocumentApp`。推上去後第一次執行會要求**重新授權**
+> （多「管理 Google 文件」等權限）——在編輯器隨便執行一支函數（例如 `getQList`）走完授權流程再部署。
+
 **(B) 問卷列表容器綁定專案** — 管理者建卷/改卷/匯出的工具，程式碼在 [`tools/export.js`](tools/export.js)：
 把該檔內容手動貼進**步驟 2 建的那份問卷列表母表**的「擴充功能 → Apps Script」，存檔後重整試算表，
 會多一個「問卷管理」選單（新增問卷、建立新問卷骨架、欄位輔助精靈、修改設定/內容、輸出、格式檢查）。
@@ -107,6 +116,14 @@ npm run gpush            # 複製 Code.js + dist/index.html 到 appscript/ 並 c
 
 兩個專案都要各自設（web app 的 `listSheetID` 填步驟 2 母表的 Sheet ID）。
 設完就能用；改參數即時生效、**不必重新部署**。
+
+**Web app 專案可以先跑一次 `setupScriptProperties()`**（Apps Script 編輯器選這支按「執行」，
+不用掛觸發器，只有部署帳號本人執行才會動作）：
+- 有預設值的 13 項直接補上（數值和程式內建預設一樣，補了行為不變，只是讓你在設定頁看得到、好調）。
+- **已經有值的一律不動**，重跑安全；三把密鑰（`jwtSecret`／`draftEncSecret`／`pdfNameSecret`）
+  與 `loginScanCursor` 完全不碰。
+- 沒有預設值的 9 項（`listSheetID`、`systemTitle`、各種資料夾 ID…）不會亂填，
+  而是列在執行紀錄裡，照著手動填完即可。
 
 ### 5. 用「問卷管理」選單長出子表
 
@@ -132,6 +149,9 @@ npm test           # Vitest 純函數測試（可離線）
 
 ### 4-A. Web app 專案（`appscript/` 這個專案）
 
+程式共讀 26 個 property：有預設值 13、要手動填 9、自動生成或系統維護 4（三把密鑰＋`loginScanCursor`）。
+有預設值的可用 `setupScriptProperties()` 一次補齊（見上方步驟 4）。
+
 **必填 / 核心**
 
 | Property | 說明 |
@@ -145,6 +165,7 @@ npm test           # Vitest 純函數測試（可離線）
 |----------|------|-----------|
 | `jwtSecret` | 登入 JWT 簽章密鑰 | 輪替＝已發 token 全失效，使用者重登即可（傷害小） |
 | `draftEncSecret` | 暫存加密的 HMAC 派生密鑰 | **輪替/遺失＝所有暫存（雲端＋裝置＋匯出檔）解不開**，視同暫存全歸零。沒有極端理由別動 |
+| `pdfNameSecret` | （Phase 31）輸出 PDF 檔名的 HMAC 密鑰 | **不可輪替**：換掉或遺失＝每個人下次產生 PDF 都找不到舊檔、另建新檔，**舊連結停在舊版**（拿舊版去核章的風險） |
 
 **功能開關 / 選配**（未設 = 該功能停用，其餘照常）
 
@@ -153,8 +174,11 @@ npm test           # Vitest 純函數測試（可離線）
 | `draftSheetID` | 暫存試算表 ID。開啟「線上暫存 + 遠端簽名邀請 + `_logins` 登入稽核 + `_file` 上傳檔案歸屬驗證 + `_email` 寄信稽核」。未設＝五者停用（登入冷卻防線仍運作；檔案欄退回「相信前端傳來的 fileID」的舊行為；寄信照常但無紀錄）。**此表永不對外分享** |
 | ~~`emailLog`~~ | **（Phase 25 起退役，2026-07-17）** 舊的獨立寄信記錄試算表 ID。寄信紀錄已改記到 `draftSheetID` 試算表的 `_email` 分頁（8 欄：時間/referSSID/信件類型/主旨/收件信箱/主鍵明文/結果/寄後剩餘配額，五種信全記）。此 property 已不再讀取；舊試算表留作歷史檔案、不搬移，查舊紀錄回舊表、新舊以部署日切分。可安全刪除 |
 | `universalStorageID` | 檔案上傳欄位的**預設** Drive 資料夾 ID（欄位可各自覆寫） |
+| `pdfGenMax`／`pdfGenWindowMinutes` | （Phase 31）每人每份問卷產生 PDF 的次數上限（預設 10 次／360 分鐘）。保護全系統共用的「建立文件」每日額度；超過時送出照常，只是這次不產生，使用者之後到登入頁補拿。見 `plan/security.md` §2-1b |
+| `pdfFolderID` | （Phase 31）輸出 PDF 的存放資料夾 ID。問卷列表 P 欄有設範本、這裡沒設＝紀錄照常寫入但 PDF 產生失敗。管理者自行把資料夾開「知道連結可檢視」（與上傳檔資料夾同模型）；檔名是 HMAC、看不出是誰，要對照在編輯器執行 `listRecordPdfs()` |
 | `postCodeAPI` | 地址/郵遞區號查詢 API 的前綴 URL（地址型欄位呼叫，會接 `encodeURIComponent(地址)`） |
 | `announcement` | 問卷列表頁的重要公告（Markdown）；有設才顯示 |
+| `loadingGameDefault` | loading 小遊戲的預設值。設 `0`＝沒自己切過開關的使用者，等待時只看到一行進度文字（如「確認身分中…」）、不跳遊戲；設 `1` 或未設＝照常顯示遊戲。只改預設：使用者自己在卡片上切過開關就以使用者為準。見第五節 |
 | `inviteTtlMinutes` | 邀請碼有效期（**分鐘**），未設＝7 天（10080）；實際到期不晚於問卷截止 |
 | `draftBackupFolderID` | 離線重建暫存表（`rebuildDraftSpreadsheet()`）的備份資料夾 ID；未設不重建 |
 | `draftRebuildMinRows` | 離線重建的列數門檻（正整數），低於此不重建 |
@@ -212,6 +236,20 @@ three.js 走 CDN 且**只在抽中 3D 時動態 import**，載不到就整場留
 制服小人、射擊隊外套、天文望遠鏡等，別的單位拿去多半要改或關掉。使用者已有兩個內建開關
 （遊戲卡上的「我不要再看到遊戲了」「載入完成也不結束遊戲」，存 localStorage），
 但那是**每個使用者自己選**；下面是**部署者**層級的改法。
+
+### 選項 0：不改程式，用 ScriptProperties 預設關掉（推薦先試這個）
+
+在 web app 專案的 ScriptProperties 加 **`loadingGameDefault` = `0`**（改回 `1` 或刪掉這筆＝恢復顯示遊戲），重新整理網頁就生效，
+不必重新建置或部署。效果：
+
+- 沒自己切過開關的使用者，等待時只看到一行進度文字卡（如「確認身分中…」），不會跳遊戲。
+- 文字卡下方仍有一顆「重新顯示 loading 小遊戲」按鈕；有人按了，**那台裝置、那個瀏覽器**
+  之後就會看到遊戲（他自己的選擇優先於部署預設）。想讓所有人都完全看不到，用選項 A。
+- 開頁那幾秒的首屏動畫（校園 emoji 波浪）不是遊戲，不受這個設定影響，只是進度文字
+  從「準備遊戲…」改成「準備畫面…」。
+- ScriptProperties 是**跟著 GAS 專案走**的：要給另一個單位用、而且只有那邊關，
+  那個單位要有自己的 web app 專案（本來就需要自己的 `listSheetID`）。
+  同一個專案開多個部署網址，會共用同一個設定。
 
 > ⚠️ **本系統大量使用「像素小人」元素，不只在 loading 遊戲裡**——同一套小人 sprite
 > （`src/utils/pixelSprites.js` 匯出的 `BOY`/`GIRL` 側面、`BOY_FRONT`/`GIRL_FRONT` 正面）
@@ -286,6 +324,8 @@ three.js 走 CDN 且**只在抽中 3D 時動態 import**，載不到就整場留
 - 檔案欄與簽名的 Drive fileID **一律伺服器端裁決**：簽名不收前端 fileID；檔案欄的新上傳要在
   `_file` 登記表對得上（同問卷＋同人＋同欄位）、「沿用上次的檔案」只送哨兵由伺服器查出真 fileID
   （需設 `draftSheetID`，未設則退回舊行為）。
+- **輸出 PDF（Phase 31）走連結分享**：拿到 `pdfFolderID` **資料夾**網址的人看得到所有人的 PDF；
+  檔案連結永久有效、可匿名開啟、查不到誰看過。檔名 HMAC 只藏主鍵、不藏內容。資料夾網址別外流。
 - 完整機制、誠實邊界（防什麼、不防什麼）、維運手冊見 **[`plan/security.md`](plan/security.md)**。
 
 ---

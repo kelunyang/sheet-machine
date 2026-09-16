@@ -48,10 +48,10 @@ Sheet Machine 是一個基於 Google Apps Script 和 Vue.js 的動態表單系�
 │  │  寫入紀錄   │   │  上傳檔案   │   │    統計填寫率        │   │
 │  └─────────────┘   └─────────────┘   └─────────────────────┘   │
 │                                                                 │
-│                    ┌─────────────────────────────────────────┐  │
-│                    │            mySubmitStatus               │  │
-│                    │  查自己填了幾次／最後時間／簽名（需認證）  │  │
-│                    └─────────────────────────────────────────┘  │
+│  ┌─────────────────────────────┐   ┌─────────────────────────┐  │
+│  │       mySubmitStatus        │   │      myRecordPdf        │  │
+│  │ 查自己填了幾次／簽名（需認證）│   │ 取得我的 PDF（需認證）   │  │
+│  └─────────────────────────────┘   └─────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
           │                 │                    │
           ▼                 ▼                    ▼
@@ -513,6 +513,45 @@ draftSheetID 未設則靜默不記）。只有 metadata，無檔案內容、無�
 `_logins` 的靜默降級）；`_file` 上線前上傳、且不在紀錄表最後一列的 fileID 會被要求重傳
 （一次性過渡成本）。
 
+## 輸出 PDF（2026-09 Phase 31）
+
+問卷列表 P 欄「輸出PDF」＝Google 文件範本 ID。規格與取捨見 plan.md Phase 31、範本語法見 dataformat.md。
+
+### 兩個入口，同一支產生函數
+
+1. **送出時**：`writeRecord_` appendRow 之後，用剛落地的 `pureData` 呼叫 `generateRecordPdf_`；
+   失敗只回 `pdfError`、不擋送出。回傳多 `pdf: {url}|null`、`pdfError`，回條信多一行連結。
+2. **登入頁「取得我的 PDF」**（`myRecordPdf`）：認證走 `readonlyAuthGate_`（與 `mySubmitStatus_` 共用的
+   骨架：冷卻 → authRecord → `_logins` → 開放進入 → 伺服器判定主鍵 → 名冊列）。取紀錄表最後一列；
+   資料夾裡同名檔的 description 與 `pdfDescription_(送出ms, 範本ID, 範本最後修改ms)` 完全相同就直接回連結，
+   否則重產（涵蓋：功能中途才開、送出時失敗、範本改版）。
+
+### 產生流程
+
+`pdfTarget_`（範本、資料夾、HMAC 檔名、description）→ `pdfValueMap_`（純函數組值）→
+`renderRecordPdf_`：範本 `makeCopy` 到部署帳號根目錄 → `fillPdfDocument_` 兩輪替換（佔位符 → nonce 記號 →
+值，填寫者輸入的 `{{…}}` 不會被再換一次）→ `saveAndClose` → `getAs('application/pdf')` → `finally` 暫存文件丟垃圾桶
+→ `storeRecordPdf_`：先不上鎖找同名檔（多個時留**最早建立**的，其餘丟垃圾桶），有就 `Drive.Files.update`
+覆蓋（帶 `supportsAllDrives`；現有 description 的送出時間比較新就不寫；連結不變、舊版留在管理版本）；
+沒有才拿 ScriptLock、鎖內再找一次、確定沒有才 `createFile`——鎖只包新建那一小段。
+產生前 `claimPdfGeneration_` 佔用次數額度（每人每問卷 `pdfGenMax` 次／`pdfGenWindowMinutes`，CacheService），
+超過丟帶 `pdfThrottled` 的錯。`pdfTarget_` 在任何 Drive 讀寫前先確認進階 Drive 服務、範本 ID 格式與 `pdfFolderID`。
+連結一律 `getUrl()`。
+
+### 不落地任何對照表
+
+「誰對應哪個 PDF」靠檔名（`HMAC(pdfNameSecret, ['pdf', refer, record, 主鍵])`）、「是不是最新版」靠檔案
+description——不依賴 `draftSheetID`，暫存表重建或 `draftEncSecret` 輪替都不影響。管理者要對照檔案是誰的，
+在編輯器執行 `listRecordPdfs()`（開頭擋「必須是部署帳號本人」，因為 public 函數 google.script.run 也叫得到）。
+
+### 前端
+
+`utils/recordPdf.js`：`pdfResultKind`（分類 myRecordPdf 回應；登入冷卻 `throttled` 與產生次數限制 `tooFrequent`
+是兩回事）、`submitPdfState`（結束頁 `{url, message}`）、`pdfTooFrequentMessage`、`PDF_MESSAGES`。
+`myPdf` 以 watch 綁住認證欄位的值：欄位一變（換人、登入、送出、結束）就收掉，共用電腦不會留下上一個人的連結。
+App.vue：`currentSheet.pdfEnabled` 時登入頁藍色按鈕換成「取得我的 PDF」（冷卻共用登入倒數），成功顯示
+「開啟 PDF」連結＋版本時間；結束頁顯示連結或產生失敗提示；換問卷時 `resetPdfState()`。
+
 ## 檔案結構
 
 > 2026-07 Phase 3 拆分：App.vue 由 2600+ 行 Options API 轉為 `<script setup>` + composables。
@@ -564,6 +603,7 @@ sheet-machine/
 │   │   ├── sentinels.js           # 哨兵常數單一來源（REUSE_LAST_FILE；另見 issue.md 三哨兵）（Phase 23）
 │   │   ├── fieldSources.js        # 答案來源：選項導出、切換帶入（per-format 轉換）、markUserInput（Phase 23）
 │   │   ├── submitDiff.js          # 送出前 diff：文字組裝、基準取值、零差異判定、檔案對照（Phase 23）
+│   │   ├── recordPdf.js           # 輸出 PDF：myRecordPdf 回應分類、結束頁狀態、提示文案（Phase 31）
 │   │   ├── tempStorage.js         # localStorage 暫存存取層（Phase 20：假名 key＋smd1 密文、一次性搬家）
 │   │   ├── draftCipher.js         # 草稿端到端加密（sealDraft/openDraft：gzip→AES，smd1:<g|r>: 前綴）
 │   │   ├── multiSelect.js         # 多選已選區排序純函數
@@ -586,7 +626,7 @@ sheet-machine/
 ├── appscript/                     # clasp 部署目錄
 │   ├── Code.js                    # 複製自 src/
 │   ├── index.html                 # 建置後複製自 dist/
-│   └── appsscript.json            # GAS 設定（含 LodashGS 函式庫、webapp 存取設定）
+│   └── appsscript.json            # GAS 設定（LodashGS 函式庫、進階 Drive 服務 v3、webapp 存取設定）
 ├── dist/                          # Vite 建置輸出
 ├── vite.config.js                 # Vite 設定 (singlefile)
 ├── vitest.config.js               # Vitest 設定
@@ -777,7 +817,10 @@ sticky 條（JwtCountdownBar/FormToolbar）捲動時才能越過標題升到 y=0
   取消時 reject('cancel')。
 - **useLoadingGame**：loading 遊戲單例：計數器式 beginLoading(label) 回傳冪等收尾函數，
   重疊 RPC 不閃爍；RPC 全結束後 settling 2 秒看分數再關，keepPlaying 開啟改進 overtime
-  加班模式；兩開關存 localStorage；比賽狀態存 module 層跨顯示延續。
+  加班模式；兩開關存 localStorage；比賽狀態存 module 層跨顯示延續。hidden 的預設值
+  （localStorage 無值時）吃部署者設定：ScriptProperties `loadingGameDefault=0`（`1`／未設＝顯示） → doGet 注入
+  `window.__SM_LOADING_GAME_OFF__=true`（固定字面值、無外部輸入）→ 預設不顯示遊戲；
+  使用者切過開關（存 `'1'`/`'0'`）就以使用者為準。
 
 ## 開發與部署流程
 

@@ -107,7 +107,8 @@ function loadGas({ recordRows = [], fileRows = null, draftEnabled = true } = {})
         };
       }
       if (id === 'EMAIL_LOG_ID') return { getSheets: () => [{ appendRow: () => {} }] };
-      return { getSheets: () => [{ getRange: () => ({ getValues: () => [makeListRow()] }) }] };
+      // 舊版 15 欄問卷列表（無 P 欄「輸出PDF」）：listValues_ 依 getMaxColumns 只讀 A:O
+      return { getSheets: () => [{ getMaxColumns: () => 15, getRange: () => ({ getValues: () => [makeListRow()] }) }] };
     },
   };
   const fakeUtilities = {

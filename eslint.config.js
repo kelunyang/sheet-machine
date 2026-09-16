@@ -11,6 +11,9 @@ const gasGlobals = {
   Session: 'readonly',
   LockService: 'readonly',
   DriveApp: 'readonly',
+  DocumentApp: 'readonly',
+  // 進階 Drive 服務（appsscript.json 的 enabledAdvancedServices，Phase 31 覆蓋 PDF 版本用）
+  Drive: 'readonly',
   CacheService: 'readonly',
   UrlFetchApp: 'readonly',
   Utilities: 'readonly',

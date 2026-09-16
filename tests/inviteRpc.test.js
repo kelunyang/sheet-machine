@@ -164,7 +164,7 @@ function loadGasRpc({
         };
       }
       // 清單分頁（getRange('A:O') 不帶數字參數）
-      return { getSheets: () => [{ getRange: () => ({ getValues: () => listRows }) }] };
+      return { getSheets: () => [{ getMaxColumns: () => 15, getRange: () => ({ getValues: () => listRows }) }] };
     },
   };
   const fakeUtilities = {

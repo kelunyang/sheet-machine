@@ -19,6 +19,11 @@ function doGet(e) {
     if(sheetParamValid_(sheetParam)) {
       content = content.replace('<head>', '<head><script>window.__SM_SHEET_REFER__=' + JSON.stringify(sheetParam) + ';</script>');
     }
+    // loading 小遊戲的部署者預設（ScriptProperties loadingGameDefault=0）：注入固定字面值、
+    // 不含任何外部輸入；前端只拿它當「使用者沒自己切過開關」時的預設
+    if(loadingGameDefaultOff_()) {
+      content = content.replace('<head>', '<head><script>window.__SM_LOADING_GAME_OFF__=true;</script>');
+    }
     let htmlOutput = HtmlService.createHtmlOutput(content)
       .setTitle(appProperties.getProperty('systemTitle'));
     htmlOutput.addMetaTag('viewport', 'width=device-width, initial-scale=1');
@@ -192,11 +197,17 @@ function sheetCreatedAt_(referSSID) {
   }
 }
 
+// 問卷列表讀到 P 欄「輸出PDF」（Phase 31）。舊表可能只有 15 欄（A~O）——對它直接
+// getRange("A:P") 會丟「範圍超出工作表」讓整站掛掉，所以依實際欄數決定讀到哪；
+// 15 欄的表讀出來 row[15] 是 undefined，一律經 pdfTemplateOf_ 取值。只用到 A~O 的讀取點不必改
+function listValues_(listSheet) {
+  return listSheet.getRange(listSheet.getMaxColumns() >= 16 ? "A:P" : "A:O").getValues();
+}
+
 function getQList_() {
   let listSS = SpreadsheetApp.openById(appProperties.getProperty('listSheetID'));
   let listSheet = listSS.getSheets()[0];
-  let listRange = listSheet.getRange("A:O");
-  let listArr = listRange.getValues();
+  let listArr = listValues_(listSheet);
   let lists = [];
   if(listArr.length > 1) {
     for(let i=1; i<listArr.length; i++) {
@@ -218,7 +229,9 @@ function getQList_() {
               loginfailTip: row[10].toString().trim(),
               email: row[12].toString().trim(),
               writeAllowed: row[13].toString().trim() === "是" ? true : false,
-              randomQ: row[14].toString().trim() === "是" ? true : false
+              randomQ: row[14].toString().trim() === "是" ? true : false,
+              // P 欄有範本 ID＝這份問卷送出後產生 PDF（只給布林，範本 ID 不必傳到前端）
+              pdfEnabled: pdfTemplateOf_(row) !== ""
             });
           }
         }
@@ -494,6 +507,13 @@ function inviteTokenValid_(token) {
 // Drive 檔案 ID 格式白名單：?sheet= 深連結的 doGet 注入閘門（實際約 44 字元，範圍放寬）
 function sheetParamValid_(id) {
   return typeof id === "string" && /^[A-Za-z0-9_-]{20,100}$/.test(id);
+}
+
+// loading 小遊戲部署者預設：只有 loadingGameDefault 設成 0（容忍前後空白）才關，
+// 未設、1 或其他值一律維持開（沿用舊行為，既有部署不必動）
+function loadingGameDefaultOff_() {
+  let value = appProperties.getProperty('loadingGameDefault');
+  return value !== null && value.toString().trim() === "0";
 }
 
 function newInviteToken_() {
@@ -1386,7 +1406,11 @@ function scanAlertCooldownSec_() { return positiveIntProp_('scanAlertCooldownMin
 // 失敗時無伺服器裁決值可用，用前端傳來的嘗試值；Gmail 取 Session。
 // 取不到（無 P 欄或空值）回 null → 呼叫端跳過限流（空嘗試不是有意義的枚舉）
 function loginPseudonym_(referSSID, auth) {
-  let attempted = draftKey_(referSSID, auth);
+  return loginPseudonymOf_(referSSID, draftKey_(referSSID, auth));
+}
+
+// 已經算好主鍵嘗試值時直接派生（readonlyAuthGate_ 用，省一次 draftKey_ 讀名冊）
+function loginPseudonymOf_(referSSID, attempted) {
   if(attempted === null) { return null; }
   return deriveDraftKey_('log', referSSID, attempted);
 }
@@ -2100,8 +2124,7 @@ function writeRecord_(referSSID, recordSSID, token, record, accept, signatures, 
   let auth = authArrayFromClaims_(referSSID, claims);
   let listSS = SpreadsheetApp.openById(appProperties.getProperty('listSheetID'));
   let listSheet = listSS.getSheets()[0];
-  let listRange = listSheet.getRange("A:O");
-  let listArr = listRange.getValues();
+  let listArr = listValues_(listSheet);
   let pureData = [writeTick.getTime(), accept];
   let proceedWrite = true;
   let errorLog = [];
@@ -2110,6 +2133,10 @@ function writeRecord_(referSSID, recordSSID, token, record, accept, signatures, 
   let hasGroup = false;
   let result = false;
   let recieved = [];
+  // 輸出 PDF（Phase 31）：送出成功後才產生；產生失敗只標 pdfError（太頻繁另標 pdfThrottled），不影響已寫入的紀錄
+  let pdfUrl = "";
+  let pdfError = false;
+  let pdfThrottled = null;
   let currentSheet = _.filter(listArr, (sheet) => {
     if(sheet[1].toString().trim() === referSSID) {
       if(sheet[2].toString().trim() === recordSSID) {
@@ -2513,6 +2540,28 @@ function writeRecord_(referSSID, recordSSID, token, record, accept, signatures, 
                 console.error('writeRecord invite cleanup failed: ' + (err.stack || err));
               }
             }
+            // 輸出 PDF（Phase 31）：用剛落地的這筆紀錄（pureData）產生，與事後在登入頁補產生
+            // 走同一支 generateRecordPdf_，兩條路印出來的內容一致。紀錄已寫入，失敗不擋送出
+            if(pdfTemplateOf_(currentSheet[0]) !== "") {
+              try {
+                let target = pdfTarget_(referSSID, recordSSID, currentSheet[0], primaryData, pureData[0]);
+                pdfUrl = generateRecordPdf_({
+                  listRow: currentSheet[0],
+                  headers: headers,
+                  recordRow: pureData,
+                  rosterRow: userRow,
+                  pkey: primaryData
+                }, target);
+                csvOutput += "你的 PDF 文件： " + pdfUrl + "\n";
+              } catch (err) {
+                pdfError = true;
+                if(err.pdfThrottled === true) {
+                  pdfThrottled = { retryMinutes: err.retryMinutes };
+                } else {
+                  console.error('writeRecord PDF failed: ' + (err.stack || err));
+                }
+              }
+            }
             if(/^\w+((-\w+)|(\.\w+))*@[A-Za-z0-9]+((\.|-)[A-Za-z0-9]+)*\.[A-Za-z]+$/.test(email)) {
               if(MailApp.getRemainingDailyQuota() > 0) {
                 let replyEmail = currentSheet[0][12].toString().trim();
@@ -2543,7 +2592,10 @@ function writeRecord_(referSSID, recordSSID, token, record, accept, signatures, 
     status: result,
     errorLog: errorLog,
     data: recieved,
-    tick: writeTick.getTime()
+    tick: writeTick.getTime(),
+    pdf: pdfUrl !== "" ? { url: pdfUrl } : null,
+    pdfError: pdfError,
+    pdfThrottled: pdfThrottled
   };
 }
 
@@ -2669,33 +2721,54 @@ function mySubmitStatus(referSSID, recordSSID, auth) {
   return logged_('mySubmitStatus', () => mySubmitStatus_(referSSID, recordSSID, auth));
 }
 
-function mySubmitStatus_(referSSID, recordSSID, auth) {
+// 需認證唯讀查詢的共用認證骨架（Phase 31 自 mySubmitStatus_ 抽出，myRecordPdf_ 共用）。
+// 規則與 readRecord_ 相同：冷卻 → authRecord → _logins 稽核＋冷卻計數 → N 欄「開放進入」＝是 →
+// 伺服器端判定主鍵 → 名冊有這個人。**新的認證入口一律走這支**，自己另寫一套就是 Phase 21
+// 防枚舉的旁路（攻擊者改打新入口即可無限試）。
+// 不通過回 { response }（呼叫端原樣回給前端：冷卻形狀或 false）；
+// 通過回 { serverPkey, listRow, rosterRow, headers }（headers 給呼叫端用，不必再讀一次名冊）
+function readonlyAuthGate_(referSSID, recordSSID, auth) {
   let nowMs = (new Date()).getTime();
+  // 主鍵值一律由伺服器端判定（Gmail 主鍵取 Session），不信前端傳來的值。算一次重複用：
+  // 冷卻假名、_logins 稽核、通過後的伺服器主鍵都是它（draftKey_ 每叫一次就讀一次名冊）
   let loginId = draftKey_(referSSID, auth);
-  let pseudonym = loginPseudonym_(referSSID, auth);
+  let pseudonym = loginPseudonymOf_(referSSID, loginId);
   if(pseudonym !== null) {
     let throttle = checkLoginThrottle_(referSSID, pseudonym, nowMs);
     if(!throttle.allowed) {
       // 一致化回應：與 readRecord_ 同一個形狀，前端共用倒數顯示；不洩漏主鍵值在不在名冊
-      return { throttled: true, cooldownSeconds: Math.ceil(throttle.cooldownRemainMs / 1000) };
+      return { response: { throttled: true, cooldownSeconds: Math.ceil(throttle.cooldownRemainMs / 1000) } };
     }
   }
   let passed = authRecord(referSSID, auth);
   if(pseudonym !== null) { recordLoginAttempt_(referSSID, pseudonym, loginId, passed, nowMs); }
-  if(!passed) { return false; }
+  if(!passed) { return { response: false }; }
   let listSS = SpreadsheetApp.openById(appProperties.getProperty('listSheetID'));
-  let listSheet = listSS.getSheets()[0];
-  let listArr = listSheet.getRange("A:O").getValues();
+  let listArr = listValues_(listSS.getSheets()[0]);
   let currentSheet = _.filter(listArr, (sheet) => {
     return sheet[1].toString().trim() === referSSID && sheet[2].toString().trim() === recordSSID;
   });
-  // O 欄＝「開放進入」，與 readRecord_ 同一道判斷（不新增可存取面）
-  if(currentSheet.length === 0) { return false; }
-  if(currentSheet[0][13].toString().trim() !== "是") { return false; }
-  // 主鍵值一律由伺服器端判定（Gmail 主鍵取 Session），不信前端傳來的值
-  let serverPkey = draftKey_(referSSID, auth);
-  if(serverPkey === null) { return false; }
-  if(getUserRow(referSSID, auth).length === 0) { return false; }
+  // N 欄＝「開放進入」，與 readRecord_ 同一道判斷（不新增可存取面）
+  if(currentSheet.length === 0) { return { response: false }; }
+  if(currentSheet[0][13].toString().trim() !== "是") { return { response: false }; }
+  let serverPkey = loginId;
+  if(serverPkey === null) { return { response: false }; }
+  // 名冊列用伺服器判定的主鍵查（PDF 會把名冊值印出來，不能被竄改的 auth 帶去別人那列）。
+  // 名冊只讀這一次：欄位定義與名冊列都從同一份陣列取（資料列從第 9 列起，見 issue.md）
+  let referArr = SpreadsheetApp.openById(referSSID).getSheets()[0].getDataRange().getValues();
+  let headers = getHeadersFrom_(referArr, referSSID);
+  let pkeyColumn = _.find(headers, (header) => /P/.test(header.type));
+  if(pkeyColumn === undefined) { return { response: false }; }
+  let rosterRow = _.find(referArr.slice(8), (row) => row[pkeyColumn.pos].toString() === serverPkey);
+  if(rosterRow === undefined) { return { response: false }; }
+  return { serverPkey: serverPkey, listRow: currentSheet[0], rosterRow: rosterRow, headers: headers };
+}
+
+function mySubmitStatus_(referSSID, recordSSID, auth) {
+  let gate = readonlyAuthGate_(referSSID, recordSSID, auth);
+  if(gate.response !== undefined) { return gate.response; }
+  let serverPkey = gate.serverPkey;
+  let currentSheet = [gate.listRow];
   let recordSS = SpreadsheetApp.openById(recordSSID);
   let recordArr = recordSS.getSheets()[0].getDataRange().getValues();
   let summary = summarizeUserRecords_(recordArr, serverPkey);
@@ -2719,7 +2792,7 @@ function mySubmitStatus_(referSSID, recordSSID, auth) {
     // 最後一次送出的答案（欄位名＋值），給查詢 drawer 的「下載我上次填寫的結果」用。
     // 這是**本人自己的資料**、認證強度與 readRecord 相同（同一組認證欄位＋同一套冷卻/稽核），
     // 故回傳自己的答案與 readRecord 的既有行為一致；仍不回主鍵值、不發 token
-    lastAnswers: answersFromRecordRow_(getHeaders(referSSID), summary.lastRow)
+    lastAnswers: answersFromRecordRow_(gate.headers, summary.lastRow)
   };
 }
 
@@ -2812,6 +2885,530 @@ function filterLoginRows_(rows, referSSID, account, limit) {
     out.push({ tick: tick, success: row[3].toString().trim() === "成功" });
   }
   return out;
+}
+
+// ===== 輸出 PDF（Phase 31）=====
+// 問卷列表 P 欄「輸出PDF」放 Google 文件範本 ID。送出成功後複製範本、把 {{欄位ID}} 換成這筆紀錄的值、
+// 轉成 PDF 存進 pdfFolderID 資料夾（管理者開「知道連結可檢視」，與 F-F 上傳檔同模型），回傳檔案連結。
+// 每人每份問卷只有一個檔：檔名＝HMAC(pdfNameSecret, [refer, record, 主鍵])，重新送出時用進階 Drive
+// 服務覆蓋同一檔（連結不變、舊版留在「管理版本」）。對照不落任何試算表——靠檔名找檔、靠 description
+// 判斷是不是最新版——所以不依賴 draftSheetID，也不怕暫存表重建或 draftEncSecret 輪替。
+// pdfNameSecret **不可輪替**：換掉或遺失＝每個人下次產生都找不到舊檔、另建新檔，舊連結停在舊版。
+// 不共用 jwtSecret（有狀況要能立刻換）或 draftEncSecret（暫存出事時要換），見 plan/issue.md
+const PDF_LIST_COL = 15;              // 問卷列表 P 欄（0-based）
+const PDF_SIGNATURE_MAX_WIDTH = 180;  // 簽名圖插入寬度上限（px）
+const PDF_SIGN_KEY_PREFIX = '簽名:';
+const PDF_KEY_SUBMITTED_AT = '送出時間';
+const PDF_KEY_FORM_NAME = '問卷名稱';
+const PDF_KEEP_SENTINELS = ["不提供資料", "無資料"]; // 哨兵照原樣印，不當成檔案 ID／多選拆開
+const PDF_TEMPLATE_ID_PATTERN = /^[-\w]{25,}$/;     // Drive 檔案 ID（與 tools/export.js 的檢查同規則）
+// 產生次數限制：每人每份問卷在窗口內最多產生幾次。每次產生都用掉一份「建立文件」每日額度（全系統共用），
+// 送出又沒有次數限制——拿著有效 token 反覆送出就能把額度燒光。CacheService 存活上限 6 小時，窗口不能更長
+const PDF_GEN_MAX_DEFAULT = 10;
+const PDF_GEN_WINDOW_MINUTES_DEFAULT = 360;
+const CACHE_TTL_MAX_SEC = 21600;
+
+function pdfGenMax_() { return positiveIntProp_('pdfGenMax', PDF_GEN_MAX_DEFAULT); }
+function pdfGenWindowMs_() {
+  return Math.min(CACHE_TTL_MAX_SEC, positiveIntProp_('pdfGenWindowMinutes', PDF_GEN_WINDOW_MINUTES_DEFAULT) * 60) * 1000;
+}
+
+function getPdfNameSecret_() {
+  let secret = appProperties.getProperty('pdfNameSecret');
+  if(secret === null || secret.toString().trim() === "") {
+    // 首次使用自動生成（比照 getJwtSecret_）。上鎖再讀一次：兩人同時第一次產生時各生一把，
+    // 後寫的蓋掉先寫的，先產生的那份 PDF 就再也找不到了
+    let lock = LockService.getScriptLock();
+    lock.waitLock(10000);
+    try {
+      secret = appProperties.getProperty('pdfNameSecret');
+      if(secret === null || secret.toString().trim() === "") {
+        secret = Utilities.getUuid().replace(/-/g, "") + Utilities.getUuid().replace(/-/g, "");
+        appProperties.setProperty('pdfNameSecret', secret);
+      }
+    } finally {
+      lock.releaseLock();
+    }
+  }
+  return secret;
+}
+
+function pdfFolderId_() {
+  let id = appProperties.getProperty('pdfFolderID');
+  return id === null ? "" : id.toString().trim();
+}
+
+// 純函數：問卷列表列的 P 欄範本 ID。不是 Drive ID 的內容（管理者寫的備註、舊 15 欄表沒有這格）
+// 一律當沒設——不然隨手一個備註就會打開 PDF 功能、每次送出都失敗。「檢查問卷格式」會報這種錯
+function pdfTemplateOf_(listRow) {
+  if(listRow === null || listRow === undefined) { return ""; }
+  let cell = listRow[PDF_LIST_COL];
+  let id = cell === null || cell === undefined ? "" : cell.toString().trim();
+  return PDF_TEMPLATE_ID_PATTERN.test(id) ? id : "";
+}
+
+// 檔名：JSON.stringify 複合鍵防串接碰撞（比照 deriveDraftKey_）；帶 'pdf' 前綴做用途區隔。
+// secret 可由呼叫端先讀好傳入（listRecordPdfs 一次算上千人，不必每人讀一次 ScriptProperties）
+function pdfFileName_(referSSID, recordSSID, pkeyValue, secret) {
+  return base64UrlEncode_(Utilities.computeHmacSha256Signature(
+    JSON.stringify(['pdf', referSSID, recordSSID, pkeyValue.toString()]),
+    secret === undefined ? getPdfNameSecret_() : secret
+  )) + '.pdf';
+}
+
+// 純函數：PDF 檔的 description＝「用哪一筆送出、哪一版範本產生的」。取得時字串完全相同才沿用現有檔，
+// 送出時間或範本（改內容或換 ID）任何一個變了就重新產生
+function pdfDescription_(tick, templateId, templateUpdatedMs) {
+  return 'sheet-machine PDF tick=' + tick + ' template=' + templateId + '@' + templateUpdatedMs;
+}
+
+// 純函數：從 description 取回送出時間（覆蓋前比對用）；不是本系統寫的 description 回 NaN
+function pdfTickOf_(description) {
+  let match = /^sheet-machine PDF tick=(\d+) /.exec(description === null || description === undefined ? "" : description.toString());
+  return match === null ? NaN : parseInt(match[1], 10);
+}
+
+function hasOwn_(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+// 純函數：從文件文字抽出佔位符 {{…}}。raw 是文件裡的原字串（第一輪替換要原樣比對），
+// key 去頭尾空白、全形冒號視同半形（{{簽名：家長}} 也認）。同一個 raw 只回一次
+function pdfPlaceholders_(text) {
+  let seen = Object.create(null);
+  let out = [];
+  let re = /\{\{([^{}\r\n]{1,80})\}\}/g;
+  let match;
+  while((match = re.exec(text)) !== null) {
+    if(seen[match[0]] === true) { continue; }
+    seen[match[0]] = true;
+    out.push({ raw: match[0], key: match[1].trim().replace(/：/g, ":") });
+  }
+  return out;
+}
+
+// 純函數：對不到值的 key（去重）——打錯的欄位 ID，或 C-M／C-S／C-F 這類沒有可印值的欄位
+function pdfMissingKeys_(placeholders, valueMap) {
+  return _.uniq(placeholders.filter((ph) => !hasOwn_(valueMap, ph.key)).map((ph) => ph.key));
+}
+
+// 純函數：儲存格 → 字串。Sheets 會把長得像日期的字串自動轉成 Date，交給 formatDate 印回日期
+function pdfCellText_(cell, formatDate) {
+  if(cell === null || cell === undefined) { return ""; }
+  if(Object.prototype.toString.call(cell) === '[object Date]') { return formatDate(cell); }
+  return cell.toString().trim();
+}
+
+// 純函數：組出「佔位符 key → 值」，值為 { text } 或簽名 { signFileId }。
+// 送出當下（pureData）與事後補產生（紀錄表讀回的列）走同一支，兩條路印出來的內容才會一致。
+// - 填寫欄（type F）：紀錄列 pos+5；📝 資料標記剝除；檔案欄 fileID 轉連結（ctx.fileUrl）；多選 a;b 印成 a、b
+// - 主鍵（type P）：伺服器判定的主鍵值（ctx.pkey）
+// - 名冊欄（type A／O／G、C-T）：名冊列 pos（產生當下的名冊）
+// - C-M／C-S／C-F：不進對照（C-S 計算結果不落地，後端算不出來）
+// - 系統鍵「送出時間」「問卷名稱」、簽名「簽名:格名」：與欄位 ID 撞名時欄位優先
+// ctx: { headers（要有 pos）, recordRow, rosterRow, listRow, pkey, formatTick(ms), formatDate(Date), fileUrl(fileId) }
+function pdfValueMap_(ctx) {
+  let map = Object.create(null);
+  let recordRow = ctx.recordRow;
+  let rosterRow = ctx.rosterRow || [];
+  for(let i=0; i<ctx.headers.length; i++) {
+    let column = ctx.headers[i];
+    if(column.id === "") { continue; }
+    let text = null;
+    if(/F/.test(column.type)) {
+      text = pdfCellText_(recordRow[column.pos + 5], ctx.formatDate).replace(/📝/g, "");
+      if(text !== "" && PDF_KEEP_SENTINELS.indexOf(text) === -1) {
+        if(formatDetector('F', 'F', column)) {
+          text = text.split(";").map((id) => id.trim()).filter((id) => id !== "").map(ctx.fileUrl).join(" ");
+        } else if(formatDetector('U', 'F', column)) {
+          text = text.split(";").map((item) => item.trim()).filter((item) => item !== "").join("、");
+        }
+      }
+    } else if(/P/.test(column.type)) {
+      text = ctx.pkey.toString();
+    } else if(/A|O|G/.test(column.type) || formatDetector('T', 'C', column)) {
+      text = pdfCellText_(rosterRow[column.pos], ctx.formatDate).replace(/📝/g, "");
+    }
+    if(text !== null) { map[column.id] = { text: text }; }
+  }
+  if(!hasOwn_(map, PDF_KEY_SUBMITTED_AT)) {
+    let tick = parseInt(pdfCellText_(recordRow[0], ctx.formatDate), 10);
+    map[PDF_KEY_SUBMITTED_AT] = { text: isNaN(tick) ? "" : ctx.formatTick(tick) };
+  }
+  if(!hasOwn_(map, PDF_KEY_FORM_NAME)) {
+    map[PDF_KEY_FORM_NAME] = { text: pdfCellText_(ctx.listRow[0], ctx.formatDate) };
+  }
+  // 簽名：紀錄列 D 欄的 fileID 依問卷列表 G 欄格名順序以 ; 串接（writeRecord_ 的 resolveSignatureSources_
+  // 順序）。不濾空字串，索引才對得齊
+  let signNames = pdfCellText_(ctx.listRow[6], ctx.formatDate);
+  signNames = signNames === "" ? [] : signNames.split(";");
+  let signIds = pdfCellText_(recordRow[3], ctx.formatDate).split(";");
+  for(let k=0; k<signNames.length; k++) {
+    let name = signNames[k].trim();
+    let key = PDF_SIGN_KEY_PREFIX + name;
+    if(name === "" || hasOwn_(map, key)) { continue; }
+    let fileId = signIds[k] === undefined ? "" : signIds[k].trim();
+    map[key] = fileId === "" ? { text: "" } : { signFileId: fileId };
+  }
+  return map;
+}
+
+function escapeRegex_(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// 內文＋頁首＋頁尾（沒設頁首／頁尾時是 null）
+function pdfSections_(doc) {
+  return [doc.getBody(), doc.getHeader(), doc.getFooter()].filter((section) => section !== null && section !== undefined);
+}
+
+// 把範本佔位符換成值，分兩輪。第一輪：佔位符 → 這次產生專用的記號（nonce 每次亂數、不可預測）；
+// 第二輪：記號 → 值。使用者填的值第二輪才進文件，所以填寫者在文字欄打 {{P01}} 不會被當成佔位符
+// 再換一次（逐個 replaceText 的話，先換進去的值會被後面的替換吃掉）。
+// 只對「文字裡真的有這個佔位符」的區段呼叫替換（每次都是遠端呼叫，範本佔位符一多就差好幾秒）。
+// 回傳 PDF 上會原樣留下的 key：對不到值的，加上被超連結／智慧型方塊等切開、replaceText 換不到的
+function fillPdfDocument_(doc, valueMap) {
+  let sections = pdfSections_(doc);
+  let texts = sections.map((section) => section.getText());
+  let placeholders = pdfPlaceholders_(texts.join("\n"));
+  let leftover = pdfMissingKeys_(placeholders, valueMap);
+  let markerPrefix = 'SMPDF' + Utilities.getUuid().replace(/-/g, "") + 'N';
+  let slots = [];
+  placeholders.forEach((ph) => {
+    if(!hasOwn_(valueMap, ph.key)) { return; }
+    let marker = markerPrefix + slots.length + 'E';
+    slots.push({ key: ph.key, marker: marker });
+    sections.forEach((section, i) => {
+      if(texts[i].indexOf(ph.raw) !== -1) { section.replaceText(escapeRegex_(ph.raw), marker); }
+    });
+  });
+  if(slots.length > 0) {
+    let marked = sections.map((section) => section.getText());
+    // 文字裡有佔位符、第一輪卻沒換成記號＝被格式切成好幾段（replaceText 只比對單一文字段），會原樣印出
+    slots.forEach((slot) => {
+      if(marked.join("\n").indexOf(slot.marker) === -1 && leftover.indexOf(slot.key) === -1) {
+        leftover.push(slot.key);
+      }
+    });
+    let pattern = markerPrefix + '[0-9]+E';
+    sections.forEach((section, i) => {
+      if(marked[i].indexOf(markerPrefix) === -1) { return; }
+      // 每換掉一個記號就從頭再找（前面的已經不見了）；guard 防止記號因故沒刪掉時無窮迴圈
+      let found = section.findText(pattern);
+      for(let guard = 0; found !== null && guard < 5000; guard++) {
+        let el = found.getElement().asText();
+        let start = found.getStartOffset();
+        let end = found.getEndOffsetInclusive();
+        let slot = slots[parseInt(el.getText().substring(start + markerPrefix.length, end), 10)];
+        let entry = valueMap[slot.key];
+        if(entry.signFileId !== undefined) {
+          insertPdfSignature_(el, start, end, entry.signFileId);
+        } else {
+          replacePdfMarker_(el, start, end, entry.text);
+        }
+        found = section.findText(pattern);
+      }
+    });
+  }
+  if(leftover.length > 0) {
+    console.warn('PDF 範本有佔位符沒換到、會原樣印出（打錯 ID、沒有可印值的欄位，或被超連結等格式切開）：' + leftover.join('、'));
+  }
+  return leftover;
+}
+
+// 先插值再刪記號：記號還在時這段文字一定非空，避免「整段刪光、Text 元素被移除」後插到已分離的元素上
+function replacePdfMarker_(el, start, end, text) {
+  if(text !== "") {
+    if(end + 1 >= el.getText().length) {
+      el.appendText(text);
+    } else {
+      el.insertText(end + 1, text);
+    }
+  }
+  el.deleteText(start, end);
+}
+
+// 簽名圖：記號在這段文字開頭 → 圖插在前面；其他位置 → 插在這段文字後面（不拆字串，所以範本要把
+// 簽名佔位符單獨放一行或一格）。插圖失敗只刪記號，不讓一張簽名拖垮整份 PDF
+function insertPdfSignature_(el, start, end, fileId) {
+  try {
+    let parent = el.getParent();
+    let index = parent.getChildIndex(el);
+    let image = parent.insertInlineImage(start === 0 ? index : index + 1, DriveApp.getFileById(fileId).getBlob());
+    let width = image.getWidth();
+    if(width > PDF_SIGNATURE_MAX_WIDTH) {
+      image.setHeight(Math.round(image.getHeight() * PDF_SIGNATURE_MAX_WIDTH / width));
+      image.setWidth(PDF_SIGNATURE_MAX_WIDTH);
+    }
+  } catch (err) {
+    console.error('PDF signature insert failed: ' + (err.stack || err));
+  }
+  el.deleteText(start, end);
+}
+
+// 產生目標：範本、存放資料夾、檔名、description。拆出來讓 myRecordPdf_ 先判斷「現有檔是不是最新版」。
+// 設定檢查全放這裡、在任何 Drive 讀寫之前：沒開進階 Drive 服務的話，後面複製範本、改文件、轉檔全是白做，
+// 還白白用掉建立文件的額度
+function pdfTarget_(referSSID, recordSSID, listRow, pkeyValue, tick) {
+  if(typeof Drive === 'undefined') {
+    throw new Error('未啟用進階 Drive 服務（appsscript.json 的 enabledAdvancedServices），無法覆蓋 PDF 版本');
+  }
+  let templateId = pdfTemplateOf_(listRow);
+  if(templateId === "") { throw new Error('問卷列表 P 欄沒有範本 ID'); }
+  let folderId = pdfFolderId_();
+  if(folderId === "") { throw new Error('未設定 ScriptProperties 的 pdfFolderID（PDF 存放資料夾）'); }
+  let templateUpdated = DriveApp.getFileById(templateId).getLastUpdated().getTime();
+  return {
+    templateId: templateId,
+    folderId: folderId,
+    tick: tick,
+    fileName: pdfFileName_(referSSID, recordSSID, pkeyValue),
+    description: pdfDescription_(tick, templateId, templateUpdated)
+  };
+}
+
+// 資料夾裡某檔名的現有 PDF（未丟垃圾桶）。同名多個時**留最早建立的**——它的連結最早發出去
+// （結束頁、回條信），留最新的會把使用者手上的連結丟進垃圾桶。同名檔只會來自同一人幾乎同時產生兩次
+// （Drive 搜尋對剛建的檔可能還沒索引到）。trashExtras＝順手把多的丟垃圾桶；規則固定，兩支同時跑也選同一個
+function existingPdfFile_(folder, fileName, trashExtras) {
+  let files = [];
+  let it = folder.getFilesByName(fileName);
+  while(it.hasNext()) {
+    let file = it.next();
+    if(!file.isTrashed()) { files.push(file); }
+  }
+  if(files.length === 0) { return null; }
+  files.sort((a, b) => a.getDateCreated().getTime() - b.getDateCreated().getTime());
+  if(trashExtras) {
+    for(let i=1; i<files.length; i++) {
+      try {
+        files[i].setTrashed(true);
+      } catch (err) {
+        console.error('PDF duplicate trash failed: ' + (err.stack || err));
+      }
+    }
+  }
+  return files[0];
+}
+
+// 純函數：產生次數限制的判斷。state＝cache 裡的 {count, since}（沒有或窗口已過＝重新計）
+function pdfGenDecision_(state, nowMs, max, windowMs) {
+  if(state === null || typeof state.count !== 'number' || typeof state.since !== 'number' || nowMs - state.since >= windowMs) {
+    return { allowed: true, next: { count: 1, since: nowMs }, retryMs: 0 };
+  }
+  if(state.count >= max) {
+    return { allowed: false, next: state, retryMs: state.since + windowMs - nowMs };
+  }
+  return { allowed: true, next: { count: state.count + 1, since: state.since }, retryMs: 0 };
+}
+
+// 佔用一次產生額度；超過就丟帶 pdfThrottled 的錯（呼叫端據此回「太頻繁」而不是「失敗」）。
+// check 與 put 之間不上鎖（比照登入冷卻：並發下多擠一兩次可接受）；cache 被驅逐＝計數歸零，防線暫鬆非破口
+function claimPdfGeneration_(target, nowMs) {
+  let cache = CacheService.getScriptCache();
+  let key = 'pdfgen_' + target.fileName;
+  let state = null;
+  let raw = cache.get(key);
+  if(raw !== null) {
+    try { state = JSON.parse(raw); } catch { state = null; } // 壞掉的值當沒有
+  }
+  let windowMs = pdfGenWindowMs_();
+  let decision = pdfGenDecision_(state, nowMs, pdfGenMax_(), windowMs);
+  if(!decision.allowed) {
+    let err = new Error('PDF 產生太頻繁');
+    err.pdfThrottled = true;
+    err.retryMinutes = Math.max(1, Math.ceil(decision.retryMs / 60000));
+    throw err;
+  }
+  cache.put(key, JSON.stringify(decision.next), Math.max(1, Math.ceil((decision.next.since + windowMs - nowMs) / 1000)));
+}
+
+// 範本複製到部署帳號根目錄（不進分享資料夾——暫存文件是整份明文）→ 填值 → 存檔 → 轉 PDF；
+// 暫存文件不論成敗都丟垃圾桶
+function renderRecordPdf_(templateId, valueMap, fileName) {
+  let copy = DriveApp.getFileById(templateId).makeCopy('[PDF 產生中暫存] ' + fileName, DriveApp.getRootFolder());
+  try {
+    let doc = DocumentApp.openById(copy.getId());
+    fillPdfDocument_(doc, valueMap);
+    doc.saveAndClose(); // 少這行，轉出來的 PDF 是替換前的內容（而且不會報錯）
+    return Utilities.newBlob(copy.getAs('application/pdf').getBytes(), 'application/pdf', fileName);
+  } finally {
+    try {
+      copy.setTrashed(true);
+    } catch (err) {
+      console.error('PDF temp doc trash failed: ' + (err.stack || err));
+    }
+  }
+}
+
+// 存進資料夾，回傳檔案物件。只有「新建」要上鎖：先不上鎖找檔，有就直接覆蓋；沒有才拿 ScriptLock、
+// 鎖內再找一次、確定沒有才建——鎖只包住找檔＋建檔這一小段，且每人只在第一次產生時拿一次。
+// 不能整段包在鎖裡：Drive 上傳要好幾秒，尖峰時線上暫存、上傳登記等只等 10 秒的功能會等不到鎖而失敗。
+// 覆蓋前比對送出時間：現有檔已經是更新的送出（比較慢的舊版產生晚到），就不覆蓋
+function storeRecordPdf_(target, blob) {
+  let folder = DriveApp.getFolderById(target.folderId);
+  let existing = existingPdfFile_(folder, target.fileName, true);
+  if(existing === null) {
+    let lock = LockService.getScriptLock();
+    lock.waitLock(20000);
+    try {
+      existing = existingPdfFile_(folder, target.fileName, true);
+      if(existing === null) {
+        let created = folder.createFile(blob);
+        created.setDescription(target.description);
+        return created;
+      }
+    } finally {
+      lock.releaseLock();
+    }
+  }
+  if(pdfTickOf_(existing.getDescription()) > target.tick) {
+    return existing;
+  }
+  // supportsAllDrives：資料夾在共用雲端硬碟時，不帶這個參數 Drive API 會回 404
+  Drive.Files.update({ description: target.description }, existing.getId(), blob, { supportsAllDrives: true });
+  return existing;
+}
+
+// 檔案 ID → 連結：用 Drive 回的正式連結（需要時自帶 resourcekey 等參數），不自己拼網址。
+// 範本裡的檔案欄用；檔案被刪或沒權限時不讓整份 PDF 失敗
+function pdfFileUrl_(fileId) {
+  try {
+    return DriveApp.getFileById(fileId).getUrl();
+  } catch (err) {
+    console.warn('PDF file field url failed for ' + fileId + ': ' + err);
+    return '（找不到檔案）';
+  }
+}
+
+// 產生並存放，回傳檔案連結。先佔產生額度（超過丟 pdfThrottled 錯）才開始複製範本。
+// ctx: { listRow, headers（要有 pos）, recordRow, rosterRow, pkey }
+function generateRecordPdf_(ctx, target) {
+  claimPdfGeneration_(target, (new Date()).getTime());
+  let timeZone = Session.getScriptTimeZone();
+  let valueMap = pdfValueMap_({
+    headers: ctx.headers,
+    recordRow: ctx.recordRow,
+    rosterRow: ctx.rosterRow,
+    listRow: ctx.listRow,
+    pkey: ctx.pkey,
+    formatTick: (ms) => Utilities.formatDate(new Date(ms), timeZone, 'yyyy/MM/dd HH:mm:ss'),
+    formatDate: (date) => Utilities.formatDate(date, timeZone, 'yyyy/MM/dd'),
+    fileUrl: pdfFileUrl_
+  });
+  let blob = renderRecordPdf_(target.templateId, valueMap, target.fileName);
+  return storeRecordPdf_(target, blob).getUrl();
+}
+
+// 登入頁「取得我的 PDF」：認證與 mySubmitStatus_ 共用 readonlyAuthGate_（冷卻＋_logins 照走）。
+// 現有檔是最新版（description 相同）就直接回連結；沒有檔（功能中途才開、送出時產生失敗）或
+// 送出／範本有變才產生。回：認證不過 false／冷卻形狀；P 欄空 {pdfDisabled}；沒送出過 {noRecord}；
+// 產生太頻繁 {pdfThrottled, retryMinutes}；產生失敗 {failed}；成功 {url, lastTick, generated}
+function myRecordPdf(referSSID, recordSSID, auth) {
+  return logged_('myRecordPdf', () => myRecordPdf_(referSSID, recordSSID, auth));
+}
+
+function myRecordPdf_(referSSID, recordSSID, auth) {
+  let gate = readonlyAuthGate_(referSSID, recordSSID, auth);
+  if(gate.response !== undefined) { return gate.response; }
+  if(pdfTemplateOf_(gate.listRow) === "") { return { pdfDisabled: true }; }
+  let recordArr = SpreadsheetApp.openById(recordSSID).getSheets()[0].getDataRange().getValues();
+  let recordRow = latestRecordRowFor_(recordArr, gate.serverPkey);
+  if(recordRow === null) { return { noRecord: true }; }
+  let tick = parseInt(recordRow[0].toString(), 10);
+  try {
+    let target = pdfTarget_(referSSID, recordSSID, gate.listRow, gate.serverPkey, tick);
+    let existing = existingPdfFile_(DriveApp.getFolderById(target.folderId), target.fileName, false);
+    if(existing !== null && existing.getDescription() === target.description) {
+      return { url: existing.getUrl(), lastTick: tick, generated: false };
+    }
+    let url = generateRecordPdf_({
+      listRow: gate.listRow,
+      headers: gate.headers,
+      recordRow: recordRow,
+      rosterRow: gate.rosterRow,
+      pkey: gate.serverPkey
+    }, target);
+    return { url: url, lastTick: tick, generated: true };
+  } catch (err) {
+    if(err.pdfThrottled === true) {
+      return { pdfThrottled: true, retryMinutes: err.retryMinutes };
+    }
+    console.error('myRecordPdf failed: ' + (err.stack || err));
+    return { failed: true };
+  }
+}
+
+// 純函數：紀錄表每個主鍵的最後一列（A 欄不是數字的列＝標題列，跳過）
+function latestRecordRowsByPkey_(recordArr) {
+  let latest = Object.create(null);
+  for(let i=0; i<recordArr.length; i++) {
+    if(isNaN(parseInt(recordArr[i][0].toString(), 10))) { continue; }
+    let pkey = recordArr[i][2].toString().trim();
+    if(pkey !== "") { latest[pkey] = recordArr[i]; }
+  }
+  return latest;
+}
+
+// 管理者手動工具：Apps Script 編輯器選這支按「執行」，把每份有開 PDF 的問卷、每人最後一次送出
+// 對應的 PDF 連結印到執行紀錄——檔名是 HMAC，從資料夾看不出誰是誰，要靠這支對照。輸出含主鍵明文，
+// 只有專案編輯者看得到執行紀錄。
+// 編輯器只能執行沒有底線的函數，代價是 google.script.run 也叫得到它：所以開頭先擋「執行者必須是
+// 部署帳號本人」（匿名存取時 getActiveUser 是空字串），而且什麼都不回傳給呼叫端
+function listRecordPdfs() {
+  let active = Session.getActiveUser().getEmail();
+  if(active === "" || active !== Session.getEffectiveUser().getEmail()) {
+    console.warn('listRecordPdfs 只允許部署帳號本人在 Apps Script 編輯器執行');
+    return;
+  }
+  let folderId = pdfFolderId_();
+  if(folderId === "") {
+    console.log('未設定 pdfFolderID，沒有 PDF 可列');
+    return;
+  }
+  let timeZone = Session.getScriptTimeZone();
+  let secret = getPdfNameSecret_();
+  // 資料夾整批讀一次（同名多檔取最早建立的，與 existingPdfFile_ 同規則），不逐人搜尋
+  let byName = Object.create(null);
+  let it = DriveApp.getFolderById(folderId).getFiles();
+  while(it.hasNext()) {
+    let file = it.next();
+    if(file.isTrashed()) { continue; }
+    let prev = byName[file.getName()];
+    if(prev === undefined || file.getDateCreated().getTime() < prev.getDateCreated().getTime()) {
+      byName[file.getName()] = file;
+    }
+  }
+  let listArr = listValues_(SpreadsheetApp.openById(appProperties.getProperty('listSheetID')).getSheets()[0]);
+  for(let i=1; i<listArr.length; i++) {
+    let row = listArr[i];
+    let templateId = pdfTemplateOf_(row);
+    if(row[0].toString().trim() === "" || templateId === "") { continue; }
+    let formName = row[0].toString().trim();
+    let referSSID = row[1].toString().trim();
+    let recordSSID = row[2].toString().trim();
+    let templateUpdated;
+    try {
+      templateUpdated = DriveApp.getFileById(templateId).getLastUpdated().getTime();
+    } catch (err) {
+      console.log('【' + formName + '】範本打不開：' + err);
+      continue;
+    }
+    let latest = latestRecordRowsByPkey_(SpreadsheetApp.openById(recordSSID).getSheets()[0].getDataRange().getValues());
+    let lines = Object.keys(latest).map((pkey) => {
+      let tick = parseInt(latest[pkey][0].toString(), 10);
+      let file = byName[pdfFileName_(referSSID, recordSSID, pkey, secret)];
+      let status = '尚未產生（本人在登入頁取得時會產生）';
+      if(file !== undefined) {
+        status = file.getUrl();
+        if(file.getDescription() !== pdfDescription_(tick, templateId, templateUpdated)) {
+          status += '（不是最後一次送出或目前範本的版本，本人下次取得時會重新產生）';
+        }
+      }
+      return pkey + '\t' + Utilities.formatDate(new Date(tick), timeZone, 'yyyy/MM/dd HH:mm') + '\t' + status;
+    });
+    console.log('【' + formName + '】' + lines.length + ' 人\n' + lines.join('\n'));
+  }
 }
 
 function maskString(str) {
@@ -3018,4 +3615,89 @@ function formatDetector(format, type, column) {
     }
   }
   return false;
+}
+// ===== 管理者手動工具：一次補齊 ScriptProperties（移植到新部署用） =====
+// Apps Script 編輯器選 setupScriptProperties 按「執行」，不掛觸發器。只補「還沒設（沒有或空白）」的項目，
+// 已有值一律不動，重跑安全。三把密鑰各自首次使用時自動生成、loginScanCursor 由 scanLoginLog 維護，這支都不碰——
+// 尤其 draftEncSecret／pdfNameSecret 不能被蓋掉（見 README 機密表）。
+// 沒有合理預設值的項目（試算表/資料夾 ID、信箱、標題…）不寫空值佔位，只在執行紀錄列出提醒手動填。
+// 預設值一律引用讀取端的同一組常數，補上去之後行為和沒設時完全一樣（有測試鎖）。
+// 新增 ScriptProperty 時要登記進下面三份清單之一，否則 tests/setupScriptProperties.test.js 會失敗。
+function scriptPropertyDefaults_() {
+  return {
+    inviteTtlMinutes: INVITE_TTL_DEFAULT_MINUTES,
+    draftRebuildMinRows: 0,
+    fileLogRetentionDays: FILE_LOG_RETENTION_DEFAULT_DAYS,
+    loginFailMax: LOGIN_FAIL_MAX_DEFAULT,
+    loginCooldownMinutes: LOGIN_COOLDOWN_MINUTES_DEFAULT,
+    scanAlertThreshold: SCAN_ALERT_THRESHOLD_DEFAULT,
+    scanAlertWindowMinutes: SCAN_ALERT_WINDOW_MINUTES_DEFAULT,
+    scanAlertCooldownMinutes: SCAN_ALERT_COOLDOWN_MINUTES_DEFAULT,
+    loginScanFailThreshold: LOGIN_SCAN_FAIL_THRESHOLD_DEFAULT,
+    loginScanDistinctThreshold: LOGIN_SCAN_DISTINCT_THRESHOLD_DEFAULT,
+    pdfGenMax: PDF_GEN_MAX_DEFAULT,
+    pdfGenWindowMinutes: PDF_GEN_WINDOW_MINUTES_DEFAULT,
+    loadingGameDefault: 1
+  };
+}
+
+function scriptPropertyManual_() {
+  return {
+    listSheetID: '必填：問卷列表試算表 ID',
+    systemTitle: '必填：系統標題（瀏覽器分頁標題、信件主旨前綴）',
+    draftSheetID: '選填：暫存試算表 ID（線上暫存、簽名邀請、登入/上傳/寄信稽核；永不對外分享）',
+    universalStorageID: '有檔案上傳欄才要：上傳檔的預設 Drive 資料夾 ID',
+    pdfFolderID: '有問卷開輸出 PDF 才要：PDF 存放資料夾 ID',
+    postCodeAPI: '有地址欄才要：地址查詢 API 前綴 URL',
+    announcement: '選填：問卷列表頁公告（Markdown）',
+    securityAlertEmail: '建議設：登入掃描警報收件信箱（未設寄觸發器擁有者）',
+    draftBackupFolderID: '要跑 rebuildDraftSpreadsheet 才要：備份資料夾 ID'
+  };
+}
+
+function scriptPropertySystemManaged_() {
+  return ['jwtSecret', 'draftEncSecret', 'pdfNameSecret', 'loginScanCursor'];
+}
+
+// 純函數（可 vitest）：existing＝getProperties() 的物件 → 要補哪些、哪些保留、哪些還得手動填
+function scriptPropertySetupPlan_(existing) {
+  let isBlank = (key) => existing[key] === undefined || existing[key] === null || existing[key].toString().trim() === "";
+  let defaults = scriptPropertyDefaults_();
+  let manual = scriptPropertyManual_();
+  let fill = {};
+  let kept = [];
+  Object.keys(defaults).forEach((key) => {
+    if(isBlank(key)) {
+      fill[key] = String(defaults[key]);
+    } else {
+      kept.push(key);
+    }
+  });
+  let missing = Object.keys(manual).filter((key) => isBlank(key));
+  return { fill: fill, kept: kept, missing: missing };
+}
+
+// 同 listRecordPdfs：編輯器只能執行沒有底線的函數，代價是 google.script.run 也叫得到它，
+// 所以開頭先擋「執行者必須是部署帳號本人」，而且什麼都不回傳給呼叫端
+function setupScriptProperties() {
+  let active = Session.getActiveUser().getEmail();
+  if(active === "" || active !== Session.getEffectiveUser().getEmail()) {
+    console.warn('setupScriptProperties 只允許部署帳號本人在 Apps Script 編輯器執行');
+    return;
+  }
+  let plan = scriptPropertySetupPlan_(appProperties.getProperties());
+  let fillKeys = Object.keys(plan.fill);
+  if(fillKeys.length > 0) {
+    appProperties.setProperties(plan.fill, false);
+  }
+  let manual = scriptPropertyManual_();
+  let lines = [];
+  lines.push('已補上預設值（' + fillKeys.length + ' 項）：' + (fillKeys.length > 0 ? fillKeys.map((key) => key + '=' + plan.fill[key]).join('、') : '無'));
+  lines.push('已有值、沒動（' + plan.kept.length + ' 項）：' + (plan.kept.length > 0 ? plan.kept.join('、') : '無'));
+  lines.push('還沒設、要手動填（' + plan.missing.length + ' 項）：' + (plan.missing.length > 0 ? '' : '無'));
+  plan.missing.forEach((key) => {
+    lines.push('  ' + key + '　' + manual[key]);
+  });
+  lines.push('自動生成／系統維護、這支不碰：' + scriptPropertySystemManaged_().join('、'));
+  console.log(lines.join('\n'));
 }

@@ -45,7 +45,9 @@ function loadGas({ listRows = [makeListRow(), makeListRow()], cacheStore = {}, d
     },
     {
       openById: () => ({
-        getSheets: () => [{ getRange: () => ({ getValues: () => [new Array(15).fill(''), ...listRows] }) }],
+        getSheets: () => [
+          { getMaxColumns: () => 15, getRange: () => ({ getValues: () => [new Array(15).fill(''), ...listRows] }) },
+        ],
       }),
     },
     {

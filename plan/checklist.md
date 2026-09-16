@@ -42,3 +42,6 @@
   `scanAlertCooldownMinutes`／`loginScanFailThreshold`／`loginScanDistinctThreshold`。
   `draftEncSecret`（Phase 20/21 共用 HMAC 派生 secret）首次自動生成，**輪替/遺失＝所有暫存＋登入假名重算**。
 - 參數建議值、警報信判讀、大批通知/被鎖等維運場景 → 見 **plan/security.md**（維運手冊）。
+- **Phase 31 輸出 PDF**（不需觸發器）：`appsscript.json` 啟用進階 Drive 服務，**推上去後要重新授權**；
+  有問卷用 P 欄時設 `pdfFolderID`（資料夾開知道連結可檢視）。`pdfNameSecret` 首次自動生成、**不可輪替**。
+  對照 PDF 是誰的：編輯器執行 `listRecordPdfs()` 看執行紀錄。

@@ -94,8 +94,12 @@ function loadGas({ recordRows = [], listRow = makeListRow(), draftEnabled = true
           ],
         };
       }
-      // listSheetID：A:O
-      return { getSheets: () => [{ getRange: () => ({ getValues: () => [listRow] }) }] };
+      // listSheetID：欄數跟著測試列走（15＝舊表只讀 A:O）
+      return {
+        getSheets: () => [
+          { getMaxColumns: () => listRow.length, getRange: () => ({ getValues: () => [listRow] }) },
+        ],
+      };
     },
   };
   const fakeUtilities = {

@@ -20,6 +20,10 @@ const ui = (function () {
 const appProperties = PropertiesService.getScriptProperties();
 const loggerName = "執行紀錄";
 const LIST_SHEET_NAME = "問卷列表";
+// 問卷列表欄數：A~P 共 16 欄（Phase 31 起 P 欄「輸出PDF」＝Google 文件範本 ID，留空＝不輸出）。
+// 舊表可能只有 15 欄：讀取時缺的格補空字串（對 15 欄的表要 16 欄範圍會直接丟例外），
+// 存檔前才在尾端補欄（insertColumnsAfter 只加在最後面，不位移既有資料）
+const LIST_COLS_ = 16;
 const SCHEDULE_SHEET_NAME = "定時匯出";
 
 function onOpen() {
@@ -64,6 +68,20 @@ function logger(fileName, msg, ssObj) {
 
 // ===== 共用：選取列與 ID 解析 =====
 
+// 讀問卷列表一列，固定回 LIST_COLS_ 格（舊 15 欄表的 P 格補空字串）
+function readListRow_(sheet, rowIndex) {
+  let width = Math.min(LIST_COLS_, sheet.getMaxColumns());
+  let row = sheet.getRange(rowIndex, 1, 1, width).getValues()[0];
+  while (row.length < LIST_COLS_) { row.push(""); }
+  return row;
+}
+
+// 寫入前確保問卷列表至少有 LIST_COLS_ 欄（只在尾端加欄）
+function ensureListColumns_(sheet) {
+  let max = sheet.getMaxColumns();
+  if (max < LIST_COLS_) { sheet.insertColumnsAfter(max, LIST_COLS_ - max); }
+}
+
 // 回傳目前點選的問卷列（{rowIndex, row}），不合法時 alert 並回 null
 function selectedListRow_(listSS) {
   let sheet = listSS.getActiveSheet();
@@ -76,7 +94,7 @@ function selectedListRow_(listSS) {
     ui.alert("你點選的是標題列，請點選第 2 列起的問卷資料列");
     return null;
   }
-  let row = sheet.getRange(rowIndex, 1, 1, 15).getValues()[0];
+  let row = readListRow_(sheet, rowIndex);
   if (row[0].toString().trim() === "") {
     ui.alert("第 " + rowIndex + " 列沒有表單名稱，請點選有資料的列");
     return null;
@@ -154,18 +172,20 @@ function buildRecordSheet_(referSS, referID, formName) {
 }
 
 // 掛上問卷列表新列：顯示／開放進入預設「否」。回傳 {rowIndex, dueMs, viewMs}
-// 問卷列表為 A~O 共 15 欄（舊「固定ID」欄已於 2026-07-31 整欄刪除，原 O/P 前移成 N/O）。
+// 問卷列表為 A~P 共 16 欄（舊「固定ID」欄已於 2026-07-31 整欄刪除，原 O/P 前移成 N/O；
+// 2026-09-16 Phase 31 在尾端新增 P「輸出PDF」，新問卷預設留空＝不輸出）。
 // 問卷識別一律用 B 欄 refer（Drive ID，本身就唯一，深連結 ?sheet= 用它）。
 function appendListRow_(listSS, formName, referID, recordID, days) {
   let nowMs = (new Date()).getTime();
   let dueMs = nowMs + days * 24 * 60 * 60 * 1000;
   let viewMs = dueMs + 14 * 24 * 60 * 60 * 1000;
   let listSheet = listSS.getSheetByName(LIST_SHEET_NAME);
+  ensureListColumns_(listSheet);
   listSheet.appendRow([
     formName, referID, recordID, dueMs, viewMs,
     "是", "",
     "請依照各欄位說明填寫", "請輸入認證資料登入", "已收到你的填答，感謝", "登入失敗，請確認輸入的資料",
-    "否", Session.getActiveUser().getEmail(), "否", "否"
+    "否", Session.getActiveUser().getEmail(), "否", "否", ""
   ]);
   logger(formName, "新增問卷（列 " + listSheet.getLastRow() + "）", listSS);
   return { rowIndex: listSheet.getLastRow(), dueMs: dueMs, viewMs: viewMs };
@@ -1127,6 +1147,7 @@ function runFullCheck_(row) {
     report.errors = report.errors.concat(referReport.errors);
     report.warnings = report.warnings.concat(referReport.warnings);
     checkRecordAlignment_(row[2].toString().trim(), referSS, report);
+    checkPdfTemplate_(row, referSS, report);
   }
   return report;
 }
@@ -1148,7 +1169,7 @@ function checkSheetFormat() {
 // 對話框用的檢查回呼（google.script.run）：回純文字報告
 function runCheckForRowIndex(rowIndex) {
   let listSS = SpreadsheetApp.getActiveSpreadsheet();
-  let row = listSS.getSheetByName(LIST_SHEET_NAME).getRange(rowIndex, 1, 1, 15).getValues()[0];
+  let row = readListRow_(listSS.getSheetByName(LIST_SHEET_NAME), rowIndex);
   let report = runFullCheck_(row);
   logger(row[0].toString(), "格式檢查：錯誤 " + report.errors.length + " 條、警告 " + report.warnings.length + " 條", listSS);
   if (report.errors.length === 0 && report.warnings.length === 0) {
@@ -1176,6 +1197,76 @@ function checkListRow_(row, report) {
   }
   if (!isNaN(viewMs) && viewMs < (new Date()).getTime()) {
     report.warnings.push("E 檢視截止已過，這份問卷目前不會出現在前台列表");
+  }
+  let pdfTemplate = row[15] === undefined ? "" : row[15].toString().trim();
+  if (pdfTemplate !== "" && !/^[-\w]{25,}$/.test(pdfTemplate)) {
+    report.errors.push("P 輸出PDF 要填 Google 文件範本的 ID（網址裡 /d/ 後面那串），不是網址或其他文字");
+  }
+}
+
+// ── 輸出 PDF 範本（Phase 31）的上線前檢查 ─────────────────────────────
+// 佔位符規則與 src/Code.js 的 pdfPlaceholders_／pdfValueMap_ **同步**：{{欄位ID}}、{{送出時間}}、
+// {{問卷名稱}}、{{簽名:格名}}（全形冒號亦可）；C-M／C-S／C-F 沒有可印的值。
+// 對不到的佔位符在 web app 會原樣印在 PDF 上，所以這裡事先警告
+var PDF_SYSTEM_KEYS_ = ["送出時間", "問卷名稱"];
+
+function pdfPlaceholderKeys_(text) {
+  let keys = [];
+  let re = /\{\{([^{}\r\n]{1,80})\}\}/g;
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    let key = match[1].trim().replace(/：/g, ":");
+    if (keys.indexOf(key) === -1) { keys.push(key); }
+  }
+  return keys;
+}
+
+function checkPdfTemplate_(row, referSS, report) {
+  let templateId = row[15] === undefined ? "" : row[15].toString().trim();
+  if (templateId === "" || !/^[-\w]{25,}$/.test(templateId)) { return; }
+  let text;
+  try {
+    let doc = DocumentApp.openById(templateId);
+    text = [doc.getBody(), doc.getHeader(), doc.getFooter()]
+      .filter((section) => section !== null)
+      .map((section) => section.getText())
+      .join("\n");
+  } catch (e) {
+    report.errors.push("P 輸出PDF 的範本打不開（要是 Google 文件、ID 正確、web app 執行帳號有檢視權）：" + e.message);
+    return;
+  }
+  let keys = pdfPlaceholderKeys_(text);
+  if (keys.length === 0) {
+    report.warnings.push("P 輸出PDF 的範本裡沒有任何 {{…}} 佔位符，每個人產生的 PDF 會一模一樣");
+    return;
+  }
+  let referArr = referSS.getSheets()[0].getDataRange().getValues();
+  let columns = {};
+  if (referArr.length >= 4) {
+    for (let i = 0; i < referArr[0].length; i++) {
+      let id = referArr[0][i].toString().trim();
+      if (id !== "") {
+        columns[id] = { type: referArr[2][i].toString().trim(), format: referArr[3][i].toString().trim() };
+      }
+    }
+  }
+  let signNames = row[6].toString().trim() === "" ? [] : row[6].toString().split(";").map((name) => name.trim());
+  for (let i = 0; i < keys.length; i++) {
+    let key = keys[i];
+    let column = Object.prototype.hasOwnProperty.call(columns, key) ? columns[key] : null;
+    if (column !== null) {
+      if (column.type === "C" && column.format !== "T") {
+        report.warnings.push("PDF 範本的 {{" + key + "}} 是 C-" + column.format + " 欄，沒有可印的值（計算欄結果不落地），PDF 上會原樣印出這個佔位符");
+      }
+    } else if (PDF_SYSTEM_KEYS_.indexOf(key) !== -1) {
+      continue;
+    } else if (key.indexOf("簽名:") === 0) {
+      if (signNames.indexOf(key.slice(3).trim()) === -1) {
+        report.warnings.push("PDF 範本的 {{" + key + "}} 對不到 G 欄的簽名格（目前是「" + signNames.join(";") + "」），PDF 上會原樣印出");
+      }
+    } else {
+      report.warnings.push("PDF 範本的 {{" + key + "}} 對不到任何欄位 ID，PDF 上會原樣印出（打錯字？）");
+    }
   }
 }
 
@@ -1635,9 +1726,10 @@ function editSheetSettings() {
     visible: row[11].toString().trim(),
     email: row[12].toString(),
     writeAllowed: row[13].toString().trim(),
-    randomQ: row[14].toString().trim()
+    randomQ: row[14].toString().trim(),
+    outputPdf: row[15].toString().trim()
   };
-  let html = HtmlService.createHtmlOutput(settingsDialogHtml_(data)).setWidth(560).setHeight(780);
+  let html = HtmlService.createHtmlOutput(settingsDialogHtml_(data)).setWidth(560).setHeight(820);
   ui.showModalDialog(html, "修改問卷設定：" + data.name);
 }
 
@@ -1645,7 +1737,7 @@ function editSheetSettings() {
 function saveSheetSettings(data) {
   let listSS = SpreadsheetApp.getActiveSpreadsheet();
   let sheet = listSS.getSheetByName(LIST_SHEET_NAME);
-  let current = sheet.getRange(data.rowIndex, 1, 1, 15).getValues()[0];
+  let current = readListRow_(sheet, data.rowIndex);
   // 防呆：開視窗到存檔之間列被動過（排序、插刪列）就拒寫，避免寫到別份問卷
   if (current[1].toString().trim() !== data.refer.toString().trim()) {
     return { ok: false, message: "這一列的內容已經變動（對照表單ID對不上），可能有人排序或插刪列，請關閉視窗重新點選" };
@@ -1657,6 +1749,14 @@ function saveSheetSettings(data) {
   let viewMs = parseInt(data.viewMs);
   if (isNaN(dueMs) || isNaN(viewMs)) {
     return { ok: false, message: "截止時間沒有選（兩個時間都必填）" };
+  }
+  // 輸出PDF：貼網址也行，抽出 ID；留空＝不輸出
+  let outputPdf = (data.outputPdf || "").toString().trim();
+  if (outputPdf !== "") {
+    outputPdf = extractSheetId_(outputPdf);
+    if (outputPdf === "") {
+      return { ok: false, message: "輸出PDF 看不懂——請貼 Google 文件範本的網址或 ID，不輸出就留空" };
+    }
   }
   let booleans = [data.modify, data.visible, data.writeAllowed, data.randomQ];
   for (let i = 0; i < booleans.length; i++) {
@@ -1679,9 +1779,11 @@ function saveSheetSettings(data) {
     data.visible,
     data.email.toString().trim(),
     data.writeAllowed,
-    data.randomQ
+    data.randomQ,
+    outputPdf
   ];
-  sheet.getRange(data.rowIndex, 1, 1, 15).setValues([newRow]);
+  ensureListColumns_(sheet);
+  sheet.getRange(data.rowIndex, 1, 1, LIST_COLS_).setValues([newRow]);
   logger(data.name.toString().trim(), "修改問卷設定（列 " + data.rowIndex + "）", listSS);
   return { ok: true, message: "已儲存" };
 }
@@ -1771,6 +1873,7 @@ function settingsDialogHtml_(data) {
     '<label>填寫完畢備註語 <span class="hint">（支援 markdown）</span><textarea id="submitTip"></textarea></label>' +
     '<label>登入失敗備註語 <span class="hint">（支援 markdown）</span><textarea id="loginfailTip"></textarea></label>' +
     '<label>管理員Email<input type="text" id="email"></label>' +
+    '<label>輸出PDF <span class="hint">（Google 文件範本的網址或 ID；送出後用 {{欄位ID}} 套版產生 PDF，留空＝不輸出）</span><input type="text" id="outputPdf"></label>' +
     '<label>對照表單ID <span class="hint">（唯讀，換表請走新增問卷）</span><input type="text" id="refer" class="readonly" readonly></label>' +
     '<button id="saveBtn">儲存</button><div id="msg"></div>' +
     '<script>' +
@@ -1778,7 +1881,7 @@ function settingsDialogHtml_(data) {
     MD_EDITOR_JS_ +
     'function pad(n){return (n<10?"0":"")+n}' +
     'function msToLocal(ms){if(isNaN(ms)||ms===null){return ""}var d=new Date(ms);return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate())+"T"+pad(d.getHours())+":"+pad(d.getMinutes())}' +
-    'var fields=["name","signatures","loginTip","comment","submitTip","loginfailTip","email","refer"];' +
+    'var fields=["name","signatures","loginTip","comment","submitTip","loginfailTip","email","refer","outputPdf"];' +
     'fields.forEach(function(f){document.getElementById(f).value=DATA[f]});' +
     'document.getElementById("due").value=msToLocal(DATA.dueMs);' +
     'document.getElementById("view").value=msToLocal(DATA.viewMs);' +
@@ -1793,7 +1896,7 @@ function settingsDialogHtml_(data) {
     '  var dueMs=new Date(due).getTime();var viewMs=new Date(view).getTime();' +
     '  if(viewMs<dueMs){if(!confirm("檢視截止早於填表截止，問卷會在還能填的時候就從列表消失，確定要這樣存嗎？")){return}}' +
     '  var payload={rowIndex:DATA.rowIndex,refer:DATA.refer,dueMs:dueMs,viewMs:viewMs};' +
-    '  ["name","signatures","loginTip","comment","submitTip","loginfailTip","email"].forEach(function(f){payload[f]=document.getElementById(f).value});' +
+    '  ["name","signatures","loginTip","comment","submitTip","loginfailTip","email","outputPdf"].forEach(function(f){payload[f]=document.getElementById(f).value});' +
     '  ["modify","visible","writeAllowed","randomQ"].forEach(function(f){payload[f]=document.getElementById(f).value});' +
     '  var btn=document.getElementById("saveBtn");btn.disabled=true;btn.textContent="儲存中…";' +
     '  google.script.run.withSuccessHandler(function(result){' +

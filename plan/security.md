@@ -18,6 +18,9 @@
 | 檔案欄 fileID 歸屬驗證 | 23 | 前端塞任意 fileID 進自己的紀錄（含用回條信把他人檔案 URL 寄給自己） | `_file` 登記表＋`fileLogHasUpload_`；沿用舊檔走哨兵 `__SM_REUSE_LAST_FILE__`＋`resolveReuseFileId_`（前端無傳 fileID 的通道） |
 | 暫存端到端加密＋全面假名化 | 20 | 暫存內容（localStorage＋`_draft`）明文駐留被事後撈取 | `deriveDraftKey_`（HMAC 派生）＋`draftCipher.js`（smd1 密文） |
 | 登入防枚舉 | 21 | 匿名 endpoint 對低熵認證欄位窮舉撞庫 | `checkLoginThrottle_`/`recordLoginAttempt_`/`scanLoginLog()`；`_logins` 存**明文真實帳號**，保護靠暫存表永不分享 |
+| 唯讀查詢共用認證骨架 | 26/31 | 新增的認證入口（查詢填答、取得 PDF）變成防枚舉旁路 | `readonlyAuthGate_`：`mySubmitStatus_` 與 `myRecordPdf_` 字面上共用同一段冷卻＋`_logins`＋開放進入判斷 |
+| 輸出 PDF 產生次數限制 | 31 | 拿有效 token 反覆送出，燒光全系統共用的「建立文件」每日額度（個人帳號 250 份） | `claimPdfGeneration_`（CacheService，每人每問卷 `pdfGenMax` 次／`pdfGenWindowMinutes`）；超過時送出照常、只是這次不產生 |
+| 輸出 PDF 檔名 HMAC | 31 | 從檔名反推主鍵（問卷 ID 對所有訪客公開，單純 hash 可窮舉：6 碼學號 100 萬種、身分證約 5.2 億種） | `pdfFileName_`＝HMAC(`pdfNameSecret`)；**只藏主鍵、不藏內容**——PDF 走連結分享，見 §2-1 與 issue.md |
 | v-html 消毒 | — | Markdown 欄位 XSS | `utils/markdown.js`（marked 輸出必過 DOMPurify） |
 | doGet 參數注入白名單 | 4/14 | `?token=`/`?sheet=` 注入 | regex 白名單＋JSON.stringify 雙保險 |
 
@@ -29,6 +32,22 @@
 |----------|------|-----------|
 | `jwtSecret` | JWT 簽章密鑰，首次使用自動生成 | 輪替＝所有已發 token 立即失效（使用者重登即可，傷害小） |
 | `draftEncSecret` | Phase 20/21 共用 HMAC 派生密鑰，首次使用自動生成 | **輪替/遺失＝所有暫存（雲端＋使用者裝置＋匯出檔）解不開**，視同暫存全部歸零。沒有極端理由不要動。（`_logins` C 欄自 2026-07-12 起存明文真值、不受此影響；secret 現只派生 `_draft`/localStorage 假名與登入 cache key） |
+| `pdfNameSecret` | Phase 31 輸出 PDF 檔名的 HMAC 密鑰，首次使用自動生成（ScriptLock 防兩人同時首次產生各生一把） | **不可輪替**：換掉或遺失＝每個人下次產生 PDF 都找不到舊檔、另建新檔，**舊連結還打得開但停在舊版**（拿舊版去核章）。刻意**不共用** `jwtSecret`（出事要能立刻換、傷害小）與 `draftEncSecret`（暫存出事時要換） |
+
+> **輸出 PDF 的保護邊界（Phase 31，維護者 2026-09-16 決定）**：`pdfFolderID` 資料夾開「知道連結可檢視」、回傳檔案連結，
+> 與 F-F 上傳檔同模型。代價：**拿到資料夾網址＝看得到所有人的 PDF**；檔案連結永久有效、可匿名開啟、
+> 系統查不到誰看過（開連結不經過本系統，無法留軌跡）。討論過的替代方案「檔案不分享、登入後由系統下載」
+> 兩件都做得到（擋＋留軌跡），維護者因「唯一管理者、資料夾網址不外流」選擇連結分享。要改回系統下載，
+> 見 issue.md「輸出 PDF 走連結分享」。
+
+### 2-1b. 輸出 PDF 產生次數（Phase 31，有預設、改了即時生效）
+
+| Property | 預設 | 說明 |
+|----------|------|------|
+| `pdfGenMax` | 10 | 每人每份問卷在窗口內最多產生幾次 PDF（送出、或範本改版後的取得各算一次；「已是最新版直接回連結」不算） |
+| `pdfGenWindowMinutes` | 360 | 窗口長度；CacheService 存活上限 6 小時，填超過 360 也只算 360 |
+
+大量重新送出的正常情境（例如公告大家都要改一個欄位）前可暫時調大；cache 被驅逐＝計數歸零（防線暫鬆、非破口）。
 
 ### 2-2. 登入防枚舉（Phase 21，全部有預設、改了即時生效免部署）
 
@@ -180,7 +199,7 @@
 
 ## 7. 相關文件
 
-- 設計規格：plan/plan.md Phase 5（JWT）／4·11（邀請 OTP）／20（暫存加密）／21（防枚舉）
+- 設計規格：plan/plan.md Phase 5（JWT）／4·11（邀請 OTP）／20（暫存加密）／21（防枚舉）／31（輸出 PDF）
 - 架構：plan/struct.md「登入防枚舉」「遠端多方簽名邀請機制」節
 - 坑與刻意設計：plan/issue.md；收尾檢查：plan/checklist.md §4（觸發器與參數）
 - 資料格式（名冊 M/O 欄語意）：plan/dataformat.md

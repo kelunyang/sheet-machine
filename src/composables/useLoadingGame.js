@@ -7,17 +7,22 @@ import { reactive, computed } from 'vue';
 //   - 「loading 結束也不結束遊戲」開啟：進入加班模式（overtime），玩到自己按關閉
 //   - 「我不要再看到遊戲了」開啟：遊戲卡換成極簡文字卡，loading 結束直接關
 // 兩個開關都存 localStorage。對應的 UI 是 App.vue 掛載的 <LoadingGame v-if="loadingGameVisible" />。
+// 「不要再看到遊戲」的預設值可由部署者改成開（ScriptProperties loadingGameDefault=0 →
+// doGet 注入 window.__SM_LOADING_GAME_OFF__）；使用者自己切過開關（localStorage 有值）就以使用者為準。
 
 const LS_KEEP_PLAYING = 'smLoadingGameKeepPlaying';
 const LS_HIDDEN = 'smLoadingGameHidden';
 const SETTLE_MS = 2000;
 
-// localStorage 不可用（無痕模式/停用）就只活在記憶體
-function readFlag(key) {
+const DEPLOY_GAME_OFF = typeof window !== 'undefined' && window.__SM_LOADING_GAME_OFF__ === true;
+
+// 沒存過（null）或 localStorage 不可用（無痕模式/停用）→ 用 fallback，之後只活在記憶體
+function readFlag(key, fallback = false) {
   try {
-    return localStorage.getItem(key) === '1';
+    const stored = localStorage.getItem(key);
+    return stored === null ? fallback : stored === '1';
   } catch {
-    return false;
+    return fallback;
   }
 }
 
@@ -34,7 +39,7 @@ const state = reactive({
   settling: false, // loading 剛結束的 2 秒結算（遊戲凍結看分數）
   overtime: false, // loading 結束後繼續玩（keepPlaying 開啟時）
   keepPlaying: readFlag(LS_KEEP_PLAYING),
-  hidden: readFlag(LS_HIDDEN),
+  hidden: readFlag(LS_HIDDEN, DEPLOY_GAME_OFF),
 });
 let nextJobId = 1;
 let settleTimer = null;

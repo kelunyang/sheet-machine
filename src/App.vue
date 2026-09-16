@@ -329,12 +329,41 @@
         <div class="captionWord" v-if="authColumn.status === ''">{{ formatHelper(authColumn) }}</div>
       </el-space>
       <!-- 認證後的兩條路並排（都吃上方同一組認證欄位）：紅色＝登入後進去填寫、
-           藍色＝只查自己填了沒（不進填寫 drawer）。窄螢幕由 .login-action-row 的 flex-wrap 疊起 -->
+           藍色＝只查自己填了沒（不進填寫 drawer）。窄螢幕由 .login-action-row 的 flex-wrap 疊起。
+           有開「輸出PDF」的問卷（Phase 31），藍色那顆換成「取得我的 PDF」——能拿到 PDF 就等於知道填過了 -->
       <div class="login-action-row" v-show="!loginStatus">
         <el-button v-if="authtypeCheck()" class="ma1 pa1" size="large" type="danger" :disabled="checkAuth()" v-on:click="loginView()">{{ checkAuth() ? "格式錯誤或有空值，修正後才可以送出" : "登入後" + viewTip + "表單" }}</el-button>
-        <el-button class="ma1 pa1" size="large" type="primary" :disabled="checkAuth()" v-on:click="viewMyStatus()">{{ checkAuth() ? "填好上面的認證欄位才能查詢" : "查詢是否填寫" }}</el-button>
+        <el-button v-if="pdfEnabled" class="ma1 pa1" size="large" type="primary" :disabled="checkAuth()" v-on:click="fetchMyPdf()">
+          <el-icon class="el-icon--left"><i class="fa-solid fa-file-pdf"></i></el-icon>{{ checkAuth() ? "填好上面的認證欄位才能取得" : "取得我的 PDF" }}
+        </el-button>
+        <el-button v-else class="ma1 pa1" size="large" type="primary" :disabled="checkAuth()" v-on:click="viewMyStatus()">{{ checkAuth() ? "填好上面的認證欄位才能查詢" : "查詢是否填寫" }}</el-button>
       </div>
+      <el-alert v-if="myPdf !== null" title="你的 PDF 已備妥" type="success" show-icon :closable="false">
+        <template #default>
+          <span style="font-size: 1.5em">
+            內容是你 {{ dateConverter(myPdf.lastTick) }} 送出的版本：
+            <el-link :href="myPdf.url" target="_blank" type="primary">
+              <el-icon class="el-icon--left"><i class="fa-solid fa-file-pdf"></i></el-icon>開啟 PDF
+            </el-link>
+          </span>
+        </template>
+      </el-alert>
       <el-button v-if="saveSuccessed" class="ma1 pa2 xs12" size="large" type="success" v-on:click="downloadResult()">下載你剛剛填寫的結果</el-button>
+      <el-alert v-if="saveSuccessed && submitPdf.url !== ''" title="你的 PDF 已產生" type="success" show-icon :closable="false">
+        <template #default>
+          <span style="font-size: 1.5em">
+            <el-link :href="submitPdf.url" target="_blank" type="primary">
+              <el-icon class="el-icon--left"><i class="fa-solid fa-file-pdf"></i></el-icon>開啟 PDF
+            </el-link>
+            （之後也可以回到這份問卷的登入頁，按「取得我的 PDF」再次開啟）
+          </span>
+        </template>
+      </el-alert>
+      <el-alert v-if="saveSuccessed && submitPdf.message !== ''" title="這次沒有產生 PDF" type="warning" show-icon :closable="false">
+        <template #default>
+          <span style="font-size: 1.5em">{{ submitPdf.message }}</span>
+        </template>
+      </el-alert>
       <RateBar
         v-if="!loginStatus && hasPkeyColumn"
         :percentage="rateBarPercentage"
@@ -527,6 +556,7 @@ import {
 import { prepareColumnsForDisplay } from './utils/columnPrep';
 import { markUserInput } from './utils/fieldSources';
 import { hasAnyDiff } from './utils/submitDiff';
+import { pdfResultKind, pdfTooFrequentMessage, submitPdfState, PDF_MESSAGES } from './utils/recordPdf';
 import { buildTempQueue, hasFilledData } from './utils/tempQueue';
 import { loadQueue, saveQueue, removeQueue, purgeLegacyEntry } from './utils/tempStorage';
 import { gasRun, plainClone } from './composables/useGasRpc';
@@ -713,6 +743,27 @@ const currentSheet = computed(() => {
   return _.find(sheets.value, (sheet) => sheet.id === currentSID.value) || null;
 });
 
+// ===== 輸出 PDF（Phase 31）=====
+// 問卷列表 P 欄有設範本＝送出後產生 PDF；登入頁藍色按鈕換成「取得我的 PDF」
+const pdfEnabled = computed(() => currentSheet.value !== null && currentSheet.value.pdfEnabled === true);
+// 登入頁取得的結果（{url, lastTick}）；結束頁用 writeRecord 回傳的狀態（{url, message}）
+const myPdf = ref(null);
+const submitPdf = ref({ url: '', message: '' });
+
+function resetPdfState() {
+  myPdf.value = null;
+  submitPdf.value = { url: '', message: '' };
+}
+
+// 登入頁拿到的 PDF 連結是「上方那組認證欄位」的人的：欄位一改（換人輸入、登入後清空、送出後清空、
+// 按結束清空）就收掉。PDF 資料夾是連結分享，共用電腦上留著就等於把上一個人的 PDF 給下一個人
+watch(
+  () => authDB.value.map((column) => column.value),
+  () => {
+    myPdf.value = null;
+  }
+);
+
 const expired = computed(() => {
   let now = dayjs().valueOf();
   return ((currentDue.value - now) / 1000).toFixed(0);
@@ -868,6 +919,7 @@ async function loadSheet() {
     }
     sheets.value = list;
     saveSuccessed.value = undefined;
+    resetPdfState();
     requestCount.value.pkey = '';
     lastSubmit.value = [];
     authToken.value = '';
@@ -912,6 +964,8 @@ async function openSheet(sid) {
       let now = dayjs().valueOf();
       // 換問卷＝填答率重來（同時讓在途的舊請求因世代對不上而被丟棄）
       resetRateBar();
+      // 換問卷＝上一份問卷的 PDF 連結不能掛在這一份的登入頁上
+      resetPdfState();
       // 沒有 P 型欄就沒有主鍵，compareSheets 認不出誰是誰，填答率按鈕整顆不顯示
       hasPkeyColumn.value = _.some(headers, (header) => /P/.test(header.type));
       enableModify.value = sheet[0].enableModify;
@@ -1032,6 +1086,38 @@ function resetRateBar() {
 // 同一份 plainClone），只查自己的送出統計、不進填寫問卷的 drawer
 function viewMyStatus() {
   myStatusDrawerRef.value.open(plainClone(authDB.value));
+}
+
+// 「取得我的 PDF」：吃上方同一組認證欄位。後端 myRecordPdf 與登入共用認證骨架（冷卻＋_logins），
+// 被冷卻時沿用登入的倒數說法；已是最新版就直接回連結，沒有或過期才產生（這時會等比較久，掛 loading 遊戲）
+async function fetchMyPdf() {
+  const sheet = currentSheet.value;
+  if (sheet === null || checkAuth()) {
+    return;
+  }
+  myPdf.value = null;
+  const endLoading = beginLoading('準備你的 PDF 中');
+  try {
+    const res = await gasRun('myRecordPdf', sheet.refer, sheet.record, plainClone(authDB.value));
+    const kind = pdfResultKind(res);
+    if (kind === 'throttled') {
+      startLoginCooldown(res.cooldownSeconds);
+    } else if (kind === 'authFailed') {
+      scriptError.value.message = sheet.loginfailTip;
+    } else if (kind === 'ready') {
+      stopLoginCooldown();
+      scriptError.value.message = '';
+      myPdf.value = { url: res.url, lastTick: res.lastTick };
+    } else if (kind === 'tooFrequent') {
+      ElMessage.warning(pdfTooFrequentMessage(res.retryMinutes));
+    } else {
+      ElMessage.warning(PDF_MESSAGES[kind]);
+    }
+  } catch (err) {
+    scriptError.value = err;
+  } finally {
+    endLoading();
+  }
 }
 
 // ===== 驗證與流程控制 =====
@@ -1265,6 +1351,7 @@ function endSignature() {
 
 function endView() {
   authToken.value = '';
+  myPdf.value = null;
   for (let i = 0; i < authDB.value.length; i++) {
     authDB.value[i].value = '';
     authDB.value[i].status = '';
@@ -1338,6 +1425,8 @@ async function loginGmail(column) {
 }
 
 async function loginView() {
+  // 進入填寫流程：登入頁上的 PDF 連結不再留著（見 myPdf 的 watch）
+  myPdf.value = null;
   if (!checkAuth()) {
     let sheet = _.filter(sheets.value, (item) => {
       return item.id === currentSID.value;
@@ -1500,6 +1589,7 @@ async function sendMod() {
           return;
         }
         saveSuccessed.value = report.status;
+        submitPdf.value = submitPdfState(report);
         requestCount.value.pkey = '';
         scriptError.value.message = report.errorLog.length > 0 ? report.errorLog.join(',') : '';
         lastSubmit.value = _.filter(report.data, (data) => {
