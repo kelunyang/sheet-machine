@@ -379,6 +379,26 @@ function draftEnabled_() {
   return draftID !== null && draftID.toString().trim() !== "";
 }
 
+// 主鍵落地的 📝 資料標記（2026-09-17）：試算表會把 appendRow 寫進去的純數字字串自動轉成數字，
+// 學校代碼 011310 落地變 11310，之後拿名冊的 011310 去比永遠對不上（填答率 0、查不到上次紀錄、
+// 找不到邀請列）——把欄格式設成純文字也擋不住。比照答案欄的 📝，主鍵寫進任何試算表
+// （紀錄表 C 欄、_invites D 欄、_logins C 欄、_email F 欄）一律過 pkeyCell_，
+// 讀回比對一律過 pkeyFromCell_。只剝開頭一個標記，沒有標記的舊列照樣比得上。
+// 已經掉 0 的舊列救不回來（不知道原本有幾個 0），要人工改回
+const PKEY_MARKER = "📝";
+
+// 空主鍵（警報信沒有關聯主鍵、登入嘗試認不出帳號）照舊落空格，不寫一個孤零零的 📝
+function pkeyCell_(pkey) {
+  if(pkey === null || pkey === undefined || pkey.toString() === "") { return ""; }
+  return PKEY_MARKER + pkey.toString();
+}
+
+function pkeyFromCell_(cell) {
+  if(cell === null || cell === undefined) { return ""; }
+  let text = cell.toString();
+  return text.indexOf(PKEY_MARKER) === 0 ? text.slice(PKEY_MARKER.length) : text;
+}
+
 function draftKey_(referSSID, auth) {
   let headers = getHeaders(referSSID);
   let pKey = _.filter(headers, (header) => {
@@ -558,7 +578,7 @@ function inviteRowOf_(invite) {
     invite.token,
     invite.referSSID,
     invite.recordSSID,
-    invite.primaryValue,
+    pkeyCell_(invite.primaryValue),
     invite.signName,
     invite.email,
     invite.expireAt,
@@ -579,7 +599,7 @@ function parseInviteRow_(row) {
     token: row[0].toString(),
     referSSID: row[1].toString(),
     recordSSID: row[2].toString(),
-    primaryValue: row[3].toString(),
+    primaryValue: pkeyFromCell_(row[3]),
     signName: row[4].toString(),
     email: row[5].toString(),
     expireAt: parseInt(row[6].toString()),
@@ -762,7 +782,7 @@ function compactInviteRows_(rows) {
   let order = [];
   for(let i=0; i<rows.length; i++) {
     if(i === 0 && rows[0][0].toString() === INVITE_HEADER[0]) { continue; } // 跳過表頭列
-    let key = inviteCellKey_(rows[i][1].toString(), rows[i][3].toString(), rows[i][4].toString());
+    let key = inviteCellKey_(rows[i][1].toString(), pkeyFromCell_(rows[i][3]), rows[i][4].toString());
     if(!(key in byCell)) { order.push(key); }
     byCell[key] = rows[i];
   }
@@ -1464,7 +1484,7 @@ function appendLoginLog_(referSSID, loginId, success, nowMs) {
     sheet.appendRow(LOGIN_HEADER);
     sheet.setFrozenRows(1);
   }
-  sheet.appendRow([nowMs, referSSID, loginId, success ? '成功' : '失敗']);
+  sheet.appendRow([nowMs, referSSID, pkeyCell_(loginId), success ? '成功' : '失敗']);
 }
 
 // 寄信稽核（Phase 25）：所有系統寄出的信落地 draftSheetID 試算表的 `_email` 分頁，取代退役的
@@ -1489,7 +1509,7 @@ function appendEmailLog_(referSSID, type, subject, recipient, pkey, result, nowM
     sheet.appendRow(EMAIL_HEADER);
     sheet.setFrozenRows(1);
   }
-  sheet.appendRow([nowMs, referSSID, type, subject, recipient, pkey, result, quotaLeft]);
+  sheet.appendRow([nowMs, referSSID, type, subject, recipient, pkeyCell_(pkey), result, quotaLeft]);
 }
 
 // 「寄信＋登記」統一入口（Phase 25）：try/catch 包 MailApp.sendEmail，成功記 ok 列、失敗記錯誤列後
@@ -1571,7 +1591,7 @@ function analyzeLoginRows_(rows, suspectRun) {
   let runByAccount = {}; // 'refer|帳號值' → 目前連錯次數
   for(let i=0; i<rows.length; i++) {
     let refer = rows[i][1].toString();
-    let account = rows[i][2].toString();
+    let account = pkeyFromCell_(rows[i][2]);
     let res = rows[i][3].toString();
     if(res !== '成功' && res !== '失敗') { continue; } // 跳過表頭/雜訊列
     if(!(refer in byRefer)) { byRefer[refer] = { attempts: 0, fails: 0, distinctFails: {}, suspectedHits: [] }; }
@@ -1741,7 +1761,7 @@ function readRecord_(referSSID, recordSSID, auth) {
               let recordRange = recordSheet.getDataRange();
               let recordArr = recordRange.getValues();
               let userRecords = _.filter(recordArr, (arr) => {
-                return arr[2].toString() === uKeys[0].value;
+                return pkeyFromCell_(arr[2]) === uKeys[0].value;
               });
               let userRecord = userRecords.length > 0 ? userRecords[userRecords.length - 1] : undefined;
               if(userRecord !== undefined) {
@@ -2091,7 +2111,7 @@ function fileLogHasUpload_(rows, referSSID, uploaderPseudo, columnID, fileID) {
 // 純函數：紀錄表裡該主鍵的最後一列（比照 readRecord_ 的 userRecords 取法：C 欄＝主鍵值），無則 null
 function latestRecordRowFor_(recordArr, pkeyValue) {
   let rows = _.filter(recordArr, (arr) => {
-    return arr[2].toString() === pkeyValue.toString();
+    return pkeyFromCell_(arr[2]) === pkeyValue.toString();
   });
   return rows.length > 0 ? rows[rows.length - 1] : null;
 }
@@ -2485,7 +2505,7 @@ function writeRecord_(referSSID, recordSSID, token, record, accept, signatures, 
             }
           }
           if(proceedWrite) {
-            pureData.push(primaryData);
+            pureData.push(pkeyCell_(primaryData));
             pureData.push(_.join(signatureIDs, ";"));
             if(!hasGroup) { groupData = "" }
             pureData.push(groupData);
@@ -2802,7 +2822,7 @@ function mySubmitStatus_(referSSID, recordSSID, auth) {
 // 無紀錄回 length:0＋空陣列
 function summarizeUserRecords_(recordArr, pkeyValue) {
   let userRecords = _.filter(recordArr, (arr) => {
-    return arr[2].toString() === pkeyValue.toString();
+    return pkeyFromCell_(arr[2]) === pkeyValue.toString();
   });
   let history = userRecords.map((row) => {
     return {
@@ -2879,7 +2899,7 @@ function filterLoginRows_(rows, referSSID, account, limit) {
   for(let i=rows.length-1; i>=0 && out.length < limit; i--) {
     let row = rows[i];
     if(row[1].toString().trim() !== referSSID.toString().trim()) { continue; }
-    if(row[2].toString().trim() !== account.toString().trim()) { continue; }
+    if(pkeyFromCell_(row[2]).trim() !== account.toString().trim()) { continue; }
     let tick = parseInt(row[0].toString(), 10);
     if(isNaN(tick)) { continue; }
     out.push({ tick: tick, success: row[3].toString().trim() === "成功" });
@@ -3344,7 +3364,7 @@ function latestRecordRowsByPkey_(recordArr) {
   let latest = Object.create(null);
   for(let i=0; i<recordArr.length; i++) {
     if(isNaN(parseInt(recordArr[i][0].toString(), 10))) { continue; }
-    let pkey = recordArr[i][2].toString().trim();
+    let pkey = pkeyFromCell_(recordArr[i][2]).trim();
     if(pkey !== "") { latest[pkey] = recordArr[i]; }
   }
   return latest;
@@ -3456,12 +3476,12 @@ function compareNatural_(a, b) {
   return sa.localeCompare(sb, 'zh-Hant');
 }
 
-// 名冊主鍵去重（去空白、丟空值）——分子分母的共同前處理
+// 名冊主鍵去重（去空白、丟空值）——分子分母的共同前處理。
+// 紀錄表那一側的主鍵帶 📝 標記（pkeyCell_），一律剝掉再比；名冊不會有標記，剝了也不變
 function pkeysOf_(rows, pos) {
   let keys = [];
   for(let i=0; i<rows.length; i++) {
-    let cell = rows[i][pos];
-    let val = (cell === undefined || cell === null) ? "" : cell.toString().trim();
+    let val = pkeyFromCell_(rows[i][pos]).trim();
     if(val !== "") {
       keys.push(val);
     }
