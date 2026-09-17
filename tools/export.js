@@ -402,8 +402,9 @@ function runExport_(listSS, sheetData, options) {
     newSheet.getRange(1, 1, mappedHeaders.length, mappedHeaders[0].length).setValues(mappedHeaders);
   }
   let resultArr = [];
-  // 依主鍵一次分組（原本對每個主鍵各掃一次全表是 O(K×N)），injectRefer 的查表索引也一次建好
-  let grouped = _.groupBy(recordArr, (row) => { return row[2].toString(); });
+  // 依主鍵一次分組（原本對每個主鍵各掃一次全表是 O(K×N)），injectRefer 的查表索引也一次建好。
+  // 主鍵先剝 📝 再分組：同一人加標記前後送出的列要歸成同一組，名冊查表（referMap）也才對得上
+  let grouped = _.groupBy(recordArr, (row) => { return pkeyFromCell_(row[2]); });
   let pirmaryKeys = _.keys(grouped);
   logger(sheetData[0].toString(), "原始資料有" + recordArr.length + "行，計算唯一值之後可以輸出" + pirmaryKeys.length + "行", listSS);
   let dupMsgs = [];
@@ -507,6 +508,16 @@ function driveFileUrl_(fileID) {
 const DATA_FROM_ = 5;
 const SIG_COL_ = 3;
 
+// 紀錄表 C 欄主鍵的 📝 標記：web app 寫入時加（防試算表把 011310 吃成 11310），
+// 這裡讀回時剝掉——沒有標記的舊列照樣認得。字面值與 src/Code.js 的 PKEY_MARKER 必須一致（有測試鎖）；
+// tools/ 是另一個 GAS 專案，叫不到 Code.js 的函數，只能各放一份
+const PKEY_MARKER_ = "📝";
+function pkeyFromCell_(cell) {
+  if (cell === null || cell === undefined) { return ""; }
+  let text = cell.toString();
+  return text.indexOf(PKEY_MARKER_) === 0 ? text.slice(PKEY_MARKER_.length) : text;
+}
+
 // 輸出時要保留的來源欄索引（題目區）：對照表單有設定就只留有設定的欄
 // （type 不在 /G|O|C|A|P|F/ 的欄不輸出），沒設定（degenerate）就整段原樣輸出。
 // 表頭與資料列共用這份索引，才不會因為「資料丟欄、表頭沒丟」而錯位。
@@ -544,13 +555,18 @@ function injectRefer(key, ctx, row) { //根據簽名挪移位置，然後把檔�
       for(let i=0; i<ctx.headers.length; i++) {
         let h = ctx.headers[i];
         if(!/F/.test(h.type)) {
-          row[DATA_FROM_ + h.pos] = /L|N|M|P|G/.test(h.format) ? "📝" + referRow[h.pos].toString() : referRow[h.pos].toString();
+          // 主鍵欄（type P）不論 format 一律帶 📝：學校代碼這類 P-T 欄是 011310，不帶的話
+          // 這次輸出的 setValues 會把它吃成 11310（與 C 欄主鍵同一條規則）
+          let marked = /L|N|M|P|G/.test(h.format) || /P/.test(h.type);
+          row[DATA_FROM_ + h.pos] = marked ? PKEY_MARKER_ + referRow[h.pos].toString() : referRow[h.pos].toString();
         }
       }
     }
   }
   let cell = (i) => { return row[i] === undefined ? "" : row[i]; };
-  let returnRow = [cell(0), cell(1), cell(2), cell(4)];
+  // 主鍵一律帶 📝 輸出：輸出也是 setValues，不帶就會再被吃一次 0；
+  // 也免得加標記前後的列混在同一欄、有的有有的沒有
+  let returnRow = [cell(0), cell(1), key === "" ? "" : PKEY_MARKER_ + key, cell(4)];
   let signatures = cell(SIG_COL_).toString() === "" ? [] : cell(SIG_COL_).toString().split(";");
   // 固定補滿 sigCount 格：少簽的人補「無簽名」，不再讓後面的答案整排往左縮
   for(let k=0; k<ctx.sigCount; k++) {

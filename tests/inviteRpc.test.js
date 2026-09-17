@@ -435,7 +435,7 @@ describe('sendInvite（發=重發=換email 同一支 upsert）', () => {
     expect(emailRow[1]).toBe(REFER); // referSSID
     expect(emailRow[2]).toBe('invite'); // type
     expect(emailRow[4]).toBe('user@example.com'); // recipient
-    expect(emailRow[5]).toBe('測試生甲'); // pkey（明文填寫者主鍵）
+    expect(emailRow[5]).toBe('📝測試生甲'); // pkey（明文填寫者主鍵，帶 📝 防吃 0）
     expect(emailRow[6]).toBe('ok'); // result
   });
 

@@ -185,6 +185,10 @@ formatDetector('F', 'F', column)  // format=F, type=F
 - **快照忠實原則（零清空）**：append 的每一筆都是「原狀態忠實快照＋只翻這次事件改變的欄位」，
   **絕不把欄位寫成空值來表示失效**——失效是讀取端的判斷結果（timestamp 比對、attempts 上限、非最新列…），
   不是落地的資料狀態。
+- **主鍵落地帶 📝（2026-09-17）**：主鍵寫進任何試算表（紀錄表 C、`_invites` D、`_logins` C、`_email` F）
+  一律過 `pkeyCell_`，讀回比對一律過 `pkeyFromCell_`——`appendRow` 會把 `011310` 吃成 `11310`，
+  欄格式設純文字也擋不住。📝 只活在儲存格裡，剝完才能比對／算 HMAC／簽 JWT。新增主鍵讀寫點照做，
+  漏一處＝那個功能對 0 開頭的主鍵靜默失效。細節見 plan/issue.md。
 - `clearContent`（就地清固定列、不位移）與 `setTrashed`（Drive 檔案，非 Sheet 列）不在此限。
 - **唯一的刪除例外**：`tools/export.js` 的一次性 `dropFixedIdColumn()`（2026-07-31 刪除問卷列表舊
   「固定ID」欄，管理者手動離峰執行、ScriptLock、表頭對不上就停手、刪完回頭核對）——動的是**欄**不是列、

@@ -415,6 +415,8 @@ email、expireAt(ms, = min(發出後7天, dueDate))、status（pending/signed；
 欄位 L-N（OTP 暫時狀態）：otpHash（SHA-256(otp+邀請碼)，列上不存明碼）、
 otpExpireAt(ms)、otpAttempts；舊 11 欄列讀到空值一律視為「無有效 OTP」（不搬遷資料），
 重發/換 email 時一併清空，比對成功即作廢（單次使用）。
+primaryValue 落地帶 `📝` 前綴（2026-09-17，`inviteRowOf_` 加、`parseInviteRow_` 剝），
+防試算表把 `011310` 吃成 `11310`；程式裡流動的 `invite.primaryValue` 一律是原值（見 issue.md）。
 
 ### 狀態機
 
@@ -458,7 +460,8 @@ draftSheetID 試算表除 `_draft`／`_invites` 外，Phase 21 再加 `_logins` 
 純 append 稽核日誌，4 欄：A `timestamp(ms)`、B `referSSID`、C `account`（**明文真實帳號值**——
 2026-07-12 修訂：稽核價值＝知道是誰，假名化讓事件響應報廢；保護邊界＝draftSheetID 永不對外分享。
 cache key 才用 HMAC 假名 `deriveDraftKey_` purpose='log'，純為 key 衛生、不落表）、
-D `result`（成功/失敗，兩者都記）。
+D `result`（成功/失敗，兩者都記）。C 欄落地帶 `📝` 前綴（2026-09-17，`pkeyCell_`；
+`analyzeLoginRows_`／`filterLoginRows_` 讀回先剝，舊列沒有前綴照樣認得）。
 第 1 列人類可讀表頭 `LOGIN_HEADER`（凍結、對 reader 惰性）；建分頁權只在寫入路徑
 （`appendLoginLog_`，draftSheetID 未設則靜默不記）。鐵律照舊：純 append、禁 deleteRow、
 ms timestamp、快照零清空；長期成長交離線 `rebuildDraftSpreadsheet()`（對認不得的分頁原樣照抄，

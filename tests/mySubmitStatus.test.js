@@ -305,7 +305,7 @@ describe('mySubmitStatus_：認證與開放條件', () => {
     expect(gas.mySubmitStatus_(REFER, RECORD, authOf({ pw: 'WRONG' }))).toBe(false);
     const dataRows = loginRows.filter((r) => r[1] === REFER);
     expect(dataRows.length).toBe(1);
-    expect(dataRows[0][2]).toBe(PKEY);
+    expect(dataRows[0][2]).toBe('📝' + PKEY);
     expect(dataRows[0][3]).toBe('失敗');
   });
 

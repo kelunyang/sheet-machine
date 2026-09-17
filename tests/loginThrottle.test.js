@@ -264,9 +264,10 @@ describe('_logins 稽核日誌（純 append、存明文真實帳號、成功失�
     gas.recordLoginAttempt_(REFER, p, ACCT, true, clock.now);
     const rows = getLoginRows();
     expect(rows[0]).toEqual(gas.LOGIN_HEADER); // 表頭列
-    // C 欄＝明文真實帳號值（稽核價值＝知道是誰；保護靠暫存表永不分享），不是 HMAC 假名
-    expect(rows[1]).toEqual([clock.now, REFER, ACCT, '失敗']);
-    expect(rows[2]).toEqual([clock.now, REFER, ACCT, '成功']);
+    // C 欄＝明文真實帳號值（稽核價值＝知道是誰；保護靠暫存表永不分享），不是 HMAC 假名；
+    // 帶 📝 前綴擋試算表吃掉開頭的 0（pkeyCell_）
+    expect(rows[1]).toEqual([clock.now, REFER, '📝' + ACCT, '失敗']);
+    expect(rows[2]).toEqual([clock.now, REFER, '📝' + ACCT, '成功']);
     expect(rows[1][2]).not.toBe(p); // 存的是真值、不是傳進來的 cache-key 假名
   });
 
@@ -439,6 +440,6 @@ describe('readRecord_ 整合（被擋早退回一致化；失敗記一筆稽核�
     expect(last[1]).toBe(REFER);
     expect(last[3]).toBe('失敗');
     // 失敗列 C 欄＝攻擊者/使用者嘗試的明文值（枚舉攻擊者可能塞真學號清單，這是刻意取捨）
-    expect(last[2]).toBe('不存在的人');
+    expect(last[2]).toBe('📝不存在的人');
   });
 });
