@@ -35,6 +35,7 @@ function onOpen() {
     .addItem("修改問卷內容（先點選要改的列）", "openReferForEdit")
     .addItem("輸出問卷（先點選要輸出的列）", "exportSheet")
     .addItem("檢查問卷格式（先點選要檢查的列）", "checkSheetFormat")
+    .addItem("檢查PDF附掛文件（先點選要檢查的列）", "checkPdfAttachment")
     .addSeparator()
     .addItem("定時匯出排程（新增／修改）", "openScheduleDialog")
     .addItem("立即試跑定時匯出", "runScheduledExportNow")
@@ -1205,69 +1206,253 @@ function checkListRow_(row, report) {
 }
 
 // ── 輸出 PDF 範本（Phase 31）的上線前檢查 ─────────────────────────────
-// 佔位符規則與 src/Code.js 的 pdfPlaceholders_／pdfValueMap_ **同步**：{{欄位ID}}、{{送出時間}}、
-// {{問卷名稱}}、{{簽名:格名}}（全形冒號亦可）；C-M／C-S／C-F 沒有可印的值。
-// 對不到的佔位符在 web app 會原樣印在 PDF 上，所以這裡事先警告
+// 佔位符規則與 src/Code.js 的 pdfPlaceholders_／pdfValueMap_／fillPdfDocument_ **同步**（tests/recordPdf.test.js
+// 拿兩邊實際跑同一組佔位符比對）：{{欄位ID}}、{{送出時間}}、{{問卷名稱}}、{{簽名:格名}}（全形冒號亦可）；
+// C-M／C-S／C-F 沒有可印的值。對不到的、被格式切開的佔位符在 web app 會原樣印在 PDF 上，所以這裡事先抓出來。
+// 「檢查問卷格式」（整份檢查的一部分）與「檢查PDF附掛文件」（只看範本、逐個列出對照結果）共用 analyzePdfTemplate_
 var PDF_SYSTEM_KEYS_ = ["送出時間", "問卷名稱"];
+var PDF_SIGN_PREFIX_ = "簽名:";
 
-function pdfPlaceholderKeys_(text) {
-  let keys = [];
+// 純函數：抽出 {{…}}，同 Code.js 的 pdfPlaceholders_（以原字串去重、key 去空白、全形冒號視同半形、不跨行）
+function pdfPlaceholderList_(text) {
+  let seen = {};
+  let out = [];
   let re = /\{\{([^{}\r\n]{1,80})\}\}/g;
   let match;
   while ((match = re.exec(text)) !== null) {
-    let key = match[1].trim().replace(/：/g, ":");
-    if (keys.indexOf(key) === -1) { keys.push(key); }
+    if (seen[match[0]] === true) { continue; }
+    seen[match[0]] = true;
+    out.push({ raw: match[0], key: match[1].trim().replace(/：/g, ":") });
   }
+  return out;
+}
+
+function pdfPlaceholderKeys_(text) {
+  let keys = [];
+  pdfPlaceholderList_(text).forEach((ph) => {
+    if (keys.indexOf(ph.key) === -1) { keys.push(ph.key); }
+  });
   return keys;
 }
 
-function checkPdfTemplate_(row, referSS, report) {
+// 純函數：對照表單 → {欄位ID: {name, type, format}}，同 Code.js 的 getHeadersFrom_（A1 空白＝整張沒有欄位）
+function pdfReferColumns_(referArr) {
+  let columns = {};
+  if (referArr.length < 4 || referArr[0].length === 0 || referArr[0][0].toString() === "") { return columns; }
+  for (let i = 0; i < referArr[0].length; i++) {
+    let id = referArr[0][i].toString().trim();
+    if (id === "") { continue; }
+    columns[id] = {
+      name: referArr[1][i].toString().trim(),
+      type: referArr[2][i].toString().trim(),
+      format: referArr[3][i].toString().trim()
+    };
+  }
+  return columns;
+}
+
+// 同 Code.js 的 pdfValueMap_：F／P／A／O／G 與 C-T 才有值（regex test，比照 formatDetector）
+function pdfColumnLabel_(column) {
+  if (/F/.test(column.type)) { return "填寫欄"; }
+  if (/P/.test(column.type)) { return "主鍵"; }
+  if (/A|O|G/.test(column.type) || (/C/.test(column.type) && /T/.test(column.format))) { return "名冊欄"; }
+  return null;
+}
+
+// 純函數：逐個 key 判斷 web app 換不換得到。判斷順序照 pdfValueMap_：有值的欄位 → 系統鍵 → 簽名格
+// （所以欄位 ID 與系統鍵撞名時欄位優先）。回 [{ key, ok, label, problem }]
+function classifyPdfKeys_(keys, columns, signNames) {
+  let signKeys = signNames.map((name) => name.trim()).filter((name) => name !== "").map((name) => PDF_SIGN_PREFIX_ + name);
+  let ids = Object.keys(columns);
+  return keys.map((key) => {
+    let column = Object.prototype.hasOwnProperty.call(columns, key) ? columns[key] : null;
+    let label = column === null ? null : pdfColumnLabel_(column);
+    if (label !== null) {
+      return { key: key, ok: true, label: label + "：" + column.name };
+    }
+    if (PDF_SYSTEM_KEYS_.indexOf(key) !== -1) {
+      return { key: key, ok: true, label: "系統：" + key };
+    }
+    if (signKeys.indexOf(key) !== -1) {
+      return { key: key, ok: true, label: "簽名格：" + key.slice(PDF_SIGN_PREFIX_.length) };
+    }
+    if (column !== null) {
+      return { key: key, ok: false, problem: "是 " + column.type + "-" + column.format + " 欄（" + column.name + "），沒有可印的值" +
+        (/C/.test(column.type) ? "（計算欄、說明區塊、檔案檢視的結果不落地）" : "") };
+    }
+    if (key.indexOf(PDF_SIGN_PREFIX_) === 0) {
+      let loose = PDF_SIGN_PREFIX_ + key.slice(PDF_SIGN_PREFIX_.length).trim();
+      if (loose !== key && signKeys.indexOf(loose) !== -1) {
+        return { key: key, ok: false, problem: "冒號後面多了空白，要寫成 {{" + loose + "}}" };
+      }
+      return { key: key, ok: false, problem: "對不到 G 欄的簽名格（目前是「" + signNames.join(";") + "」）" };
+    }
+    let near = ids.filter((id) => id.toLowerCase() === key.replace(/\s/g, "").toLowerCase());
+    if (near.length > 0) {
+      return { key: key, ok: false, problem: "對不到任何欄位 ID（大小寫或空白不同？對照表單裡是 " + near.join("、") + "）" };
+    }
+    return { key: key, ok: false, problem: "對不到任何欄位 ID（打錯字？）" };
+  });
+}
+
+// 純函數：拿掉合法佔位符後，還剩下的全形大括號或落單的 {{ }}——看起來想放佔位符、但系統認不得
+function pdfSuspiciousText_(text) {
+  let rest = text.replace(/\{\{([^{}\r\n]{1,80})\}\}/g, "");
+  let notes = [];
+  if (/[｛｝]/.test(rest)) {
+    notes.push("文件裡有全形大括號「｛」「｝」：佔位符要用半形 {{ }}，全形的不會被換掉");
+  }
+  if (rest.indexOf("{{") !== -1 || rest.indexOf("}}") !== -1) {
+    notes.push("文件裡有落單的 {{ 或 }}（少打括號、中間換行、裡面是空的或超過 80 字），那一段不會被換掉");
+  }
+  return notes;
+}
+
+function escapeRegex_(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// 同 Code.js 的 fillPdfDocument_：replaceText 只比對單一文字段，佔位符被超連結／智慧型方塊等切開就換不到。
+// 這裡用同樣逐段比對的 findText 數出現次數，比文字裡少＝有幾處被切開
+function pdfSplitRaws_(sections, texts, placeholders) {
+  let split = [];
+  placeholders.forEach((ph) => {
+    let inText = 0;
+    let found = 0;
+    sections.forEach((section, i) => {
+      let count = texts[i].split(ph.raw).length - 1;
+      if (count === 0) { return; }
+      inText += count;
+      let pattern = escapeRegex_(ph.raw);
+      let range = section.findText(pattern);
+      for (let guard = 0; range !== null && guard < 1000; guard++) {
+        found++;
+        range = section.findText(pattern, range);
+      }
+    });
+    if (found < inText) { split.push(ph); }
+  });
+  return split;
+}
+
+// 開範本、抽佔位符、對照欄位。回 { templateId, openError, docName, results, split, suspicious }；
+// templateId 空字串＝P 欄沒設或不是 ID 格式（web app 也當沒設）
+function analyzePdfTemplate_(row, referSS) {
   let templateId = row[15] === undefined ? "" : row[15].toString().trim();
-  if (templateId === "" || !/^[-\w]{25,}$/.test(templateId)) { return; }
-  let text;
+  let analysis = { templateId: "", openError: null, docName: "", results: [], split: [], suspicious: [] };
+  if (templateId === "" || !/^[-\w]{25,}$/.test(templateId)) { return analysis; }
+  analysis.templateId = templateId;
+  let sections;
+  let texts;
   try {
     let doc = DocumentApp.openById(templateId);
-    text = [doc.getBody(), doc.getHeader(), doc.getFooter()]
-      .filter((section) => section !== null)
-      .map((section) => section.getText())
-      .join("\n");
+    analysis.docName = doc.getName();
+    sections = [doc.getBody(), doc.getHeader(), doc.getFooter()].filter((section) => section !== null && section !== undefined);
+    texts = sections.map((section) => section.getText());
   } catch (e) {
-    report.errors.push("P 輸出PDF 的範本打不開（要是 Google 文件、ID 正確、web app 執行帳號有檢視權）：" + e.message);
-    return;
+    analysis.openError = "P 輸出PDF 的範本打不開（要是 Google 文件、ID 正確、web app 執行帳號有檢視權）：" + e.message;
+    return analysis;
   }
+  let text = texts.join("\n");
+  let placeholders = pdfPlaceholderList_(text);
   let keys = pdfPlaceholderKeys_(text);
-  if (keys.length === 0) {
-    report.warnings.push("P 輸出PDF 的範本裡沒有任何 {{…}} 佔位符，每個人產生的 PDF 會一模一樣");
+  let signNames = row[6].toString().trim() === "" ? [] : row[6].toString().split(";");
+  analysis.results = classifyPdfKeys_(keys, pdfReferColumns_(referSS.getSheets()[0].getDataRange().getValues()), signNames);
+  analysis.suspicious = pdfSuspiciousText_(text);
+  // 對不到值的本來就換不到，只替「會換」的佔位符查有沒有被切開（findText 每次都是遠端呼叫）
+  let okKeys = analysis.results.filter((result) => result.ok).map((result) => result.key);
+  analysis.split = pdfSplitRaws_(sections, texts, placeholders.filter((ph) => okKeys.indexOf(ph.key) !== -1));
+  return analysis;
+}
+
+// 「檢查問卷格式」的 PDF 段：打不開＝錯誤，其餘＝警告
+function checkPdfTemplate_(row, referSS, report) {
+  let analysis = analyzePdfTemplate_(row, referSS);
+  if (analysis.templateId === "") { return; }
+  if (analysis.openError !== null) {
+    report.errors.push(analysis.openError);
     return;
   }
-  let referArr = referSS.getSheets()[0].getDataRange().getValues();
-  let columns = {};
-  if (referArr.length >= 4) {
-    for (let i = 0; i < referArr[0].length; i++) {
-      let id = referArr[0][i].toString().trim();
-      if (id !== "") {
-        columns[id] = { type: referArr[2][i].toString().trim(), format: referArr[3][i].toString().trim() };
-      }
-    }
+  if (analysis.results.length === 0) {
+    report.warnings.push("P 輸出PDF 的範本裡沒有任何 {{…}} 佔位符，每個人產生的 PDF 會一模一樣");
   }
-  let signNames = row[6].toString().trim() === "" ? [] : row[6].toString().split(";").map((name) => name.trim());
-  for (let i = 0; i < keys.length; i++) {
-    let key = keys[i];
-    let column = Object.prototype.hasOwnProperty.call(columns, key) ? columns[key] : null;
-    if (column !== null) {
-      if (column.type === "C" && column.format !== "T") {
-        report.warnings.push("PDF 範本的 {{" + key + "}} 是 C-" + column.format + " 欄，沒有可印的值（計算欄結果不落地），PDF 上會原樣印出這個佔位符");
-      }
-    } else if (PDF_SYSTEM_KEYS_.indexOf(key) !== -1) {
-      continue;
-    } else if (key.indexOf("簽名:") === 0) {
-      if (signNames.indexOf(key.slice(3).trim()) === -1) {
-        report.warnings.push("PDF 範本的 {{" + key + "}} 對不到 G 欄的簽名格（目前是「" + signNames.join(";") + "」），PDF 上會原樣印出");
-      }
-    } else {
-      report.warnings.push("PDF 範本的 {{" + key + "}} 對不到任何欄位 ID，PDF 上會原樣印出（打錯字？）");
-    }
+  analysis.results.filter((result) => !result.ok).forEach((result) => {
+    report.warnings.push("PDF 範本的 {{" + result.key + "}} " + result.problem + "，PDF 上會原樣印出");
+  });
+  analysis.split.forEach((ph) => {
+    report.warnings.push("PDF 範本的 " + ph.raw + " 有地方被超連結、智慧型方塊等格式切開，那裡換不到、會原樣印出——把它刪掉重新打一次");
+  });
+  analysis.suspicious.forEach((note) => {
+    report.warnings.push("PDF 範本：" + note);
+  });
+}
+
+// 純函數：「檢查PDF附掛文件」的報告文字——問題先列，再列每個會正確套印的佔位符對到哪一欄
+function formatPdfAnalysis_(analysis) {
+  let bad = analysis.results.filter((result) => !result.ok);
+  let good = analysis.results.filter((result) => result.ok);
+  let lines = ["範本：" + analysis.docName];
+  if (analysis.results.length === 0) {
+    lines.push("", "範本裡沒有任何 {{…}} 佔位符，每個人產生的 PDF 會一模一樣。");
+  } else if (bad.length === 0 && analysis.split.length === 0) {
+    lines.push("", "全部 " + good.length + " 個佔位符都對得到對照表單，會正確套印。");
+  } else {
+    lines.push("", "共 " + analysis.results.length + " 個佔位符，" + bad.length + " 個對不到" +
+      (analysis.split.length > 0 ? "、" + analysis.split.length + " 個有地方被格式切開" : "") + "。");
   }
+  if (bad.length > 0) {
+    lines.push("", "對不到（PDF 上會原樣印出）：");
+    bad.forEach((result) => { lines.push("  {{" + result.key + "}}　" + result.problem); });
+  }
+  if (analysis.split.length > 0) {
+    lines.push("", "被超連結、智慧型方塊等格式切開（那裡換不到，把它刪掉重新打一次）：");
+    analysis.split.forEach((ph) => { lines.push("  " + ph.raw); });
+  }
+  if (analysis.suspicious.length > 0) {
+    lines.push("", "其他要注意：");
+    analysis.suspicious.forEach((note) => { lines.push("  " + note); });
+  }
+  if (good.length > 0) {
+    lines.push("", "會正確套印：");
+    good.forEach((result) => { lines.push("  {{" + result.key + "}}　" + result.label); });
+  }
+  return lines.join("\n");
+}
+
+// ===== 功能：檢查 PDF 附掛文件（選單入口） =====
+// 只看點選列 P 欄的範本：每個 {{…}} 對到對照表單哪一欄、哪些對不到。整份問卷的檢查在「檢查問卷格式」
+function checkPdfAttachment() {
+  let listSS = SpreadsheetApp.getActiveSpreadsheet();
+  let selected = selectedListRow_(listSS);
+  if (selected === null) { return; }
+  let row = selected.row;
+  let formName = row[0].toString().trim();
+  let raw = row[15].toString().trim();
+  if (raw === "") {
+    ui.alert("「" + formName + "」的 P 欄「輸出PDF」是空的，這份問卷不會產生 PDF。\n\n要產生 PDF，請先用「修改問卷設定」填入 Google 文件範本的網址或 ID。");
+    return;
+  }
+  if (!/^[-\w]{25,}$/.test(raw)) {
+    let id = extractSheetId_(raw);
+    ui.alert("「" + formName + "」的 P 欄要填 Google 文件範本的 ID，不是網址或其他文字——目前填的內容系統會當成沒設。" +
+      (id !== "" ? "\n\n看起來 ID 是：" + id + "\n可以用「修改問卷設定」貼網址，會自動轉成 ID。" : ""));
+    return;
+  }
+  let referSS;
+  try {
+    referSS = SpreadsheetApp.openById(row[1].toString().trim());
+  } catch {
+    ui.alert("B 欄的對照表單ID打不開，無法對照佔位符");
+    return;
+  }
+  let analysis = analyzePdfTemplate_(row, referSS);
+  if (analysis.openError !== null) {
+    ui.alert(analysis.openError);
+    return;
+  }
+  let bad = analysis.results.filter((result) => !result.ok).length;
+  logger(formName, "PDF 附掛文件檢查：佔位符 " + analysis.results.length + " 個、對不到 " + bad + " 個、被格式切開 " + analysis.split.length + " 個", listSS);
+  ui.alert("「" + formName + "」PDF 附掛文件檢查", formatPdfAnalysis_(analysis), ui.ButtonSet.OK);
 }
 
 // type × format 的合法組合（依 Code.js／前端實作整理，見 plan/dataformat.md）

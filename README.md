@@ -109,7 +109,7 @@ npm run gpush            # 複製 Code.js + dist/index.html 到 appscript/ 並 c
 
 **(B) 問卷列表容器綁定專案** — 管理者建卷/改卷/匯出的工具，程式碼在 [`tools/export.js`](tools/export.js)：
 把該檔內容手動貼進**步驟 2 建的那份問卷列表母表**的「擴充功能 → Apps Script」，存檔後重整試算表，
-會多一個「問卷管理」選單（新增問卷、建立新問卷骨架、欄位輔助精靈、修改設定/內容、輸出、格式檢查）。
+會多一個「問卷管理」選單（新增問卷、建立新問卷骨架、欄位輔助精靈、修改設定/內容、輸出、格式檢查、PDF 附掛文件檢查）。
 **這個專案不隨 clasp 部署**（見 [`tools/README.md`](tools/README.md)）。
 
 ### 4. 設定 ScriptProperties（見下方第四節）

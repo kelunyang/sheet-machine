@@ -9,6 +9,8 @@ dist/*
 appscript/*.css
 appscript/*.map
 .clasp.json
+# 其他部署（別的帳號/單位）的 clasp 專案檔：clasp -P .clasp.<名稱>.json push
+.clasp.*.json
 appscript/.clasp.json
 
 # vite 建置時由 generateThemeScssPlugin 自動生成

@@ -347,7 +347,7 @@ function loadGas({
     `${source}\n;return {
       listValues_, getQList_, pdfTemplateOf_, pdfPlaceholders_, pdfMissingKeys_, pdfValueMap_,
       pdfDescription_, pdfTickOf_, pdfFileName_, getPdfNameSecret_, fillPdfDocument_, latestRecordRowsByPkey_,
-      pdfGenDecision_, myRecordPdf_, writeRecord_, issueToken_, getHeaders
+      pdfGenDecision_, myRecordPdf_, writeRecord_, issueToken_, getHeaders, getHeadersFrom_
     };`
   );
   const gas = factory(
@@ -906,19 +906,49 @@ describe('myRecordPdf_：登入頁取得我的 PDF', () => {
 describe('tools/export.js 的範本檢查（與 Code.js 同規則）', () => {
   const toolSource = readFileSync(new URL('../tools/export.js', import.meta.url), 'utf8');
 
-  function loadTool(docText) {
+  // 假範本：一個 section 一段文字。split＝模擬被超連結等格式切開的佔位符原字串，
+  // 每列出一次就少一個 findText 找得到的出現處（replaceText 同樣換不到）
+  function fakeSection(text, split = []) {
+    return {
+      getText: () => text,
+      findText: (pattern, from) => {
+        const raw = pattern.replace(/\\(.)/g, '$1');
+        const reachable = text.split(raw).length - 1 - split.filter((item) => item === raw).length;
+        const n = from === undefined ? 0 : from.n + 1;
+        return n < reachable ? { n } : null;
+      },
+    };
+  }
+
+  function loadTool({ body = '', header = null, split = [], alerts = [], selectedRow = null, referOk = true } = {}) {
+    const ui = {
+      ButtonSet: { OK: 'OK' },
+      alert: (...args) => alerts.push(args),
+    };
+    const listSheet = selectedRow && {
+      getName: () => '問卷列表',
+      getActiveRange: () => ({ getRow: () => 2 }),
+      getMaxColumns: () => 16,
+      getRange: () => ({ getValues: () => [selectedRow] }),
+    };
     const factory = new Function(
       'LodashGS',
       'SpreadsheetApp',
       'PropertiesService',
       'DocumentApp',
-      `${toolSource}\n;return { pdfPlaceholderKeys_, checkPdfTemplate_, checkListRow_ };`
+      `${toolSource}\n;return {
+        pdfPlaceholderKeys_, pdfPlaceholderList_, pdfReferColumns_, classifyPdfKeys_, pdfSuspiciousText_,
+        analyzePdfTemplate_, checkPdfTemplate_, formatPdfAnalysis_, checkPdfAttachment, checkListRow_
+      };`
     );
     return factory(
       { load: () => _ },
       {
-        getUi: () => {
-          throw new Error('no ui in tests');
+        getUi: () => ui,
+        getActiveSpreadsheet: () => ({ getActiveSheet: () => listSheet, getSheetByName: () => null }),
+        openById: (id) => {
+          if (!referOk || id !== REFER) throw new Error('打不開');
+          return referSS;
         },
       },
       { getScriptProperties: () => ({ getProperty: () => null }) },
@@ -926,8 +956,9 @@ describe('tools/export.js 的範本檢查（與 Code.js 同規則）', () => {
         openById: (id) => {
           if (id !== 'T'.repeat(30)) throw new Error('找不到文件');
           return {
-            getBody: () => ({ getText: () => docText }),
-            getHeader: () => null,
+            getName: () => '範本文件',
+            getBody: () => fakeSection(body, split),
+            getHeader: () => (header === null ? null : fakeSection(header, split)),
             getFooter: () => null,
           };
         },
@@ -944,13 +975,58 @@ describe('tools/export.js 的範本檢查（與 Code.js 同規則）', () => {
 
   it('佔位符抽取規則與 Code.js 的 pdfPlaceholders_ 一致', () => {
     const text = 'A{{uid}}B{{ name }}C{{uid}}D{{簽名：家長}}E{{}}F{{壞\n掉}}G{{送出時間}}';
-    const tool = loadTool('');
+    const tool = loadTool();
     const { gas } = loadGas();
+    expect(tool.pdfPlaceholderList_(text)).toEqual(gas.pdfPlaceholders_(text));
     expect(tool.pdfPlaceholderKeys_(text)).toEqual(_.uniq(gas.pdfPlaceholders_(text).map((ph) => ph.key)));
   });
 
-  it('對不到的欄位 ID、C-S 欄、不存在的簽名格各給一條警告；合法的鍵不警告', () => {
-    const tool = loadTool('{{uid}}{{name}}{{送出時間}}{{問卷名稱}}{{簽名:家長}}{{calc}}{{typo}}{{簽名:校長}}');
+  it('「對得到」與 Code.js 的 pdfValueMap_ 實際產生的鍵完全一致（含撞名、簽名格空白、大小寫）', () => {
+    const tool = loadTool();
+    const { gas } = loadGas();
+    const signNames = '家長; 導師 ;;';
+    const keys = [
+      ...referRows[0],
+      '送出時間',
+      '問卷名稱',
+      '簽名:家長',
+      '簽名:導師',
+      '簽名: 家長',
+      '簽名:校長',
+      '簽名:',
+      'UID',
+      'typo',
+    ];
+    const map = gas.pdfValueMap_(valueCtx(gas, { listRow: makeListRow({ signNames }) }));
+    const columns = tool.pdfReferColumns_(referRows);
+    const results = tool.classifyPdfKeys_(keys, columns, signNames.split(';'));
+    for (const result of results) {
+      expect([result.key, result.ok]).toEqual([result.key, Object.prototype.hasOwnProperty.call(map, result.key)]);
+    }
+    // 欄位清單也跟後端 getHeadersFrom_ 一樣：A1 空白＝整張沒有欄位
+    expect(Object.keys(columns)).toEqual(gas.getHeaders(REFER).map((h) => h.id));
+    const blankA1 = referRows.map((r, i) => (i === 0 ? ['', ...r.slice(1)] : r));
+    expect(Object.keys(tool.pdfReferColumns_(blankA1))).toEqual(gas.getHeadersFrom_(blankA1, REFER).map((h) => h.id));
+  });
+
+  it('對不到的原因講清楚：C-S 欄、打錯字、大小寫不同、簽名格冒號後多空白、不存在的簽名格', () => {
+    const tool = loadTool();
+    const results = tool.classifyPdfKeys_(
+      ['uid', 'calc', 'typo', 'UID', '簽名: 家長', '簽名:校長'],
+      tool.pdfReferColumns_(referRows),
+      ['家長']
+    );
+    const problem = (key) => results.find((r) => r.key === key).problem;
+    expect(results[0]).toEqual({ key: 'uid', ok: true, label: '主鍵：學號' });
+    expect(problem('calc')).toMatch(/是 C-S 欄（金額），沒有可印的值/);
+    expect(problem('typo')).toMatch(/打錯字/);
+    expect(problem('UID')).toMatch(/對照表單裡是 uid/);
+    expect(problem('簽名: 家長')).toMatch(/冒號後面多了空白，要寫成 \{\{簽名:家長\}\}/);
+    expect(problem('簽名:校長')).toMatch(/對不到 G 欄的簽名格/);
+  });
+
+  it('檢查問卷格式：對不到的欄位 ID、C-S 欄、不存在的簽名格各給一條警告；合法的鍵不警告', () => {
+    const tool = loadTool({ body: '{{uid}}{{name}}{{送出時間}}{{問卷名稱}}{{簽名:家長}}{{calc}}{{typo}}{{簽名:校長}}' });
     const report = { errors: [], warnings: [] };
     tool.checkPdfTemplate_(listRow('T'.repeat(30)), referSS, report);
     expect(report.errors).toEqual([]);
@@ -960,8 +1036,29 @@ describe('tools/export.js 的範本檢查（與 Code.js 同規則）', () => {
     expect(report.warnings.join('\n')).toMatch(/\{\{簽名:校長\}\} 對不到 G 欄的簽名格/);
   });
 
+  it('被格式切開的佔位符（含只切開其中一處）抓得出來；對不到的鍵不重複報', () => {
+    const tool = loadTool({
+      body: '{{memo}} 與 {{memo}}、{{name}}、{{typo}}',
+      header: '{{uid}}',
+      split: ['{{memo}}', '{{uid}}', '{{typo}}'],
+    });
+    const analysis = tool.analyzePdfTemplate_(listRow('T'.repeat(30)), referSS);
+    expect(analysis.split.map((ph) => ph.raw)).toEqual(['{{memo}}', '{{uid}}']);
+    const report = { errors: [], warnings: [] };
+    tool.checkPdfTemplate_(listRow('T'.repeat(30)), referSS, report);
+    expect(report.warnings.filter((w) => /被超連結、智慧型方塊等格式切開/.test(w))).toHaveLength(2);
+  });
+
+  it('全形大括號、落單的 {{ }} 會提醒；正常佔位符不誤報', () => {
+    const tool = loadTool();
+    expect(tool.pdfSuspiciousText_('姓名：{{name}}，班級 {{cls}}')).toEqual([]);
+    expect(tool.pdfSuspiciousText_('姓名：｛｛name｝｝')).toHaveLength(1);
+    expect(tool.pdfSuspiciousText_('姓名：{{name}')).toHaveLength(1);
+    expect(tool.pdfSuspiciousText_('空的 {{}} 與換行 {{na\nme}}')).toHaveLength(1);
+  });
+
   it('範本打不開＝錯誤；P 欄填了網址而不是 ID＝錯誤；留空不檢查', () => {
-    const tool = loadTool('');
+    const tool = loadTool();
     const openFail = { errors: [], warnings: [] };
     tool.checkPdfTemplate_(listRow('X'.repeat(30)), referSS, openFail);
     expect(openFail.errors[0]).toMatch(/範本打不開/);
@@ -974,5 +1071,43 @@ describe('tools/export.js 的範本檢查（與 Code.js 同規則）', () => {
     tool.checkListRow_(listRow(''), empty);
     tool.checkPdfTemplate_(listRow(''), referSS, empty);
     expect(empty.errors).toEqual([]);
+    expect(empty.warnings).toEqual([]);
+  });
+
+  describe('選單「檢查PDF附掛文件」', () => {
+    it('全部對得到：列出每個佔位符對到哪一欄', () => {
+      const alerts = [];
+      const tool = loadTool({ body: '{{uid}} {{memo}} {{送出時間}}', selectedRow: listRow('T'.repeat(30)), alerts });
+      tool.checkPdfAttachment();
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0][0]).toBe('「測試問卷」PDF 附掛文件檢查');
+      expect(alerts[0][1]).toMatch(/全部 3 個佔位符都對得到對照表單/);
+      expect(alerts[0][1]).toMatch(/\{\{memo\}\}\u3000填寫欄：備註/);
+      expect(alerts[0][1]).toMatch(/\{\{送出時間\}\}\u3000系統：送出時間/);
+    });
+
+    it('有問題：問題列在會正確套印之前', () => {
+      const alerts = [];
+      const tool = loadTool({ body: '{{uid}} {{typo}}', selectedRow: listRow('T'.repeat(30)), alerts });
+      tool.checkPdfAttachment();
+      const text = alerts[0][1];
+      expect(text).toMatch(/共 2 個佔位符，1 個對不到/);
+      expect(text.indexOf('{{typo}}')).toBeLessThan(text.indexOf('{{uid}}'));
+    });
+
+    it('P 欄空白、填網址、範本或對照表單打不開：各自說明，不丟例外', () => {
+      const cases = [
+        [{ selectedRow: listRow('') }, /P 欄「輸出PDF」是空的/],
+        [{ selectedRow: listRow('https://docs.google.com/document/d/' + 'T'.repeat(30) + '/edit') }, /看起來 ID 是：T{30}/],
+        [{ selectedRow: listRow('X'.repeat(30)) }, /範本打不開/],
+        [{ selectedRow: listRow('T'.repeat(30)), referOk: false }, /對照表單ID打不開/],
+      ];
+      for (const [options, pattern] of cases) {
+        const alerts = [];
+        loadTool({ ...options, alerts }).checkPdfAttachment();
+        expect(alerts).toHaveLength(1);
+        expect(alerts[0][0]).toMatch(pattern);
+      }
+    });
   });
 });

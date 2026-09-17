@@ -290,7 +290,25 @@
         </span>
       </template>
     </el-alert>
+    <!-- 送出後 PDF 沒產生的原因緊跟「儲存成功」，同屬這次送出的狀態；產生成功時不另出提示，
+         連結就是下方的綠色「下載PDF」 -->
+    <el-alert v-if="saveSuccessed && submitPdf.message !== ''" title="這次沒有產生 PDF" type="warning" show-icon :closable="false">
+      <template #default>
+        <span style="font-size: 1.5em">{{ submitPdf.message }}</span>
+      </template>
+    </el-alert>
     <ErrorAlert :message="scriptError.message" />
+    <!-- 登入頁「取得我的 PDF」的結果放在上方提示區，與其他狀態訊息同一處（不夾在按鈕與結束頁內容之間） -->
+    <el-alert v-if="myPdf !== null" title="你的 PDF 已備妥" type="success" show-icon :closable="false">
+      <template #default>
+        <span style="font-size: 1.5em">
+          內容是你 {{ dateConverter(myPdf.lastTick) }} 送出的版本：
+          <el-link :href="myPdf.url" target="_blank" type="primary">
+            開啟 PDF
+          </el-link>
+        </span>
+      </template>
+    </el-alert>
     <el-alert title="問卷提示" type="warning" show-icon v-show="scriptError.message === '' && saveSuccessed === undefined">
       <template #default>
         <span style="font-size: 1.5em" v-html='HTMLConverter(loginTip)'></span>
@@ -330,40 +348,20 @@
       </el-space>
       <!-- 認證後的兩條路並排（都吃上方同一組認證欄位）：紅色＝登入後進去填寫、
            藍色＝只查自己填了沒（不進填寫 drawer）。窄螢幕由 .login-action-row 的 flex-wrap 疊起。
-           有開「輸出PDF」的問卷（Phase 31），藍色那顆換成「取得我的 PDF」——能拿到 PDF 就等於知道填過了 -->
-      <div class="login-action-row" v-show="!loginStatus">
+           有開「輸出PDF」的問卷（Phase 31），藍色那顆換成「取得我的 PDF」——能拿到 PDF 就等於知道填過了。
+           送出成功後 authDB 會清成空陣列（結束頁沒有認證欄位）：整排收起來，否則藍色按鈕會帶空認證打後端、
+           必定「登入失敗」。結束頁的綠色「下載PDF」直接用 writeRecord 回傳的連結（submitPdf），不用再按 -->
+      <div class="login-action-row" v-show="!loginStatus && authDB.length > 0">
         <el-button v-if="authtypeCheck()" class="ma1 pa1" size="large" type="danger" :disabled="checkAuth()" v-on:click="loginView()">{{ checkAuth() ? "格式錯誤或有空值，修正後才可以送出" : "登入後" + viewTip + "表單" }}</el-button>
         <el-button v-if="pdfEnabled" class="ma1 pa1" size="large" type="primary" :disabled="checkAuth()" v-on:click="fetchMyPdf()">
-          <el-icon class="el-icon--left"><i class="fa-solid fa-file-pdf"></i></el-icon>{{ checkAuth() ? "填好上面的認證欄位才能取得" : "取得我的 PDF" }}
+          {{ checkAuth() ? "填好上面的認證欄位才能取得" : "取得我的 PDF" }}
         </el-button>
         <el-button v-else class="ma1 pa1" size="large" type="primary" :disabled="checkAuth()" v-on:click="viewMyStatus()">{{ checkAuth() ? "填好上面的認證欄位才能查詢" : "查詢是否填寫" }}</el-button>
       </div>
-      <el-alert v-if="myPdf !== null" title="你的 PDF 已備妥" type="success" show-icon :closable="false">
-        <template #default>
-          <span style="font-size: 1.5em">
-            內容是你 {{ dateConverter(myPdf.lastTick) }} 送出的版本：
-            <el-link :href="myPdf.url" target="_blank" type="primary">
-              <el-icon class="el-icon--left"><i class="fa-solid fa-file-pdf"></i></el-icon>開啟 PDF
-            </el-link>
-          </span>
-        </template>
-      </el-alert>
-      <el-button v-if="saveSuccessed" class="ma1 pa2 xs12" size="large" type="success" v-on:click="downloadResult()">下載你剛剛填寫的結果</el-button>
-      <el-alert v-if="saveSuccessed && submitPdf.url !== ''" title="你的 PDF 已產生" type="success" show-icon :closable="false">
-        <template #default>
-          <span style="font-size: 1.5em">
-            <el-link :href="submitPdf.url" target="_blank" type="primary">
-              <el-icon class="el-icon--left"><i class="fa-solid fa-file-pdf"></i></el-icon>開啟 PDF
-            </el-link>
-            （之後也可以回到這份問卷的登入頁，按「取得我的 PDF」再次開啟）
-          </span>
-        </template>
-      </el-alert>
-      <el-alert v-if="saveSuccessed && submitPdf.message !== ''" title="這次沒有產生 PDF" type="warning" show-icon :closable="false">
-        <template #default>
-          <span style="font-size: 1.5em">{{ submitPdf.message }}</span>
-        </template>
-      </el-alert>
+      <!-- 有產生 PDF：綠色按鈕就是 PDF 連結（tag="a" 走真的連結開新分頁，不經 window.open）；
+           沒開 PDF 或這次沒產生成功，維持下載填寫結果 -->
+      <el-button v-if="saveSuccessed && submitPdf.url !== ''" tag="a" :href="submitPdf.url" target="_blank" rel="noopener" class="ma1 pa2 xs12" size="large" type="success">下載PDF</el-button>
+      <el-button v-else-if="saveSuccessed" class="ma1 pa2 xs12" size="large" type="success" v-on:click="downloadResult()">下載你剛剛填寫的結果</el-button>
       <RateBar
         v-if="!loginStatus && hasPkeyColumn"
         :percentage="rateBarPercentage"
@@ -1132,8 +1130,9 @@ function checkData() {
   return checkStatus(ignoreCDB, true);
 }
 
+// 沒有任何認證欄位（送出成功後 authDB 清空）＝無從認證，一律當「還沒填好」
 function checkAuth() {
-  return checkStatus(authDB.value, false);
+  return authDB.value.length === 0 || checkStatus(authDB.value, false);
 }
 
 function checkStatus(DB, allowEmpty) {
