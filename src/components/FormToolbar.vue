@@ -41,6 +41,13 @@
                   匯出暫存答案（加密檔）
                 </el-dropdown-item>
                 <el-dropdown-item command="import">匯入暫存答案</el-dropdown-item>
+                <!-- 說明條：disabled＝點了不發 command、不關選單。文字包一層 span 才吃得到
+                     scoped 樣式（選單 teleport 到 body，li 由 element-plus 以 fragment 渲染、不帶本元件 scope id） -->
+                <el-dropdown-item divided disabled>
+                  <span class="form-toolbar__hint"
+                    ><span>本地端會自動暫存，</span><span>上面功能為跨裝置使用</span></span
+                  >
+                </el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>
@@ -154,6 +161,25 @@ function onCommand(command) {
   align-items: center;
   gap: 8px;
   min-width: 0;
+}
+
+/* 「暫存 ▾」選單底部說明條：
+   width:0＋min-width:100%＝不參與選單寬度計算（選單寬仍由上面的選項決定），實際撐滿後自動斷行；
+   兩個子句各自 inline-block＝優先在逗號後換行，子句本身比選單還寬才在字中間斷；
+   disabled 預設的 placeholder 灰對比不足，改用 regular 色（白底約 6:1，過 AA） */
+.form-toolbar__hint {
+  display: block;
+  width: 0;
+  min-width: 100%;
+  white-space: normal;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--el-text-color-regular);
+  cursor: default;
+}
+
+.form-toolbar__hint > span {
+  display: inline-block;
 }
 
 /* 手機直式：按鈕撐滿寬度平均分配，避免擠成一團 */
