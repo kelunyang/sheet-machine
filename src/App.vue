@@ -61,7 +61,7 @@
       <template #footer>
         <div class="formFooter">
           <div class="formFooter__hint" v-if="!viewOnly && !enableModify">
-            問卷目前唯讀，想修改請點上方「目前唯讀，點我修改」按鈕解鎖
+            問卷目前唯讀，想修改請點上方的鎖頭 <i class="fa-solid fa-lock"></i> 按鈕解鎖
           </div>
           <div class="formFooter__hint" v-else-if="!viewOnly && checkData()">
             請確認必填欄位都已填，並且不可以有格式錯誤（紅字）才可以送出喔！

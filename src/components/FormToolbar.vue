@@ -9,9 +9,21 @@
     />
     <CollapsibleControls :active="!viewOnly || hasLastSubmit">
       <div class="form-toolbar__controls">
-        <!-- 「暫存 ▾」與狀態 tag 群同一列左右對開（Phase 27）：按鈕靠左、tag 靠右，
+        <!-- 鎖頭＋「暫存 ▾」與狀態 tag 群同一列左右對開（Phase 27）：按鈕靠左、tag 靠右，
              手機也維持同一列（不套用下方 @media 的整寬規則） -->
         <div class="form-toolbar__row">
+          <!-- 鎖定/修改雙態：只放鎖頭圖示、不上色（原本「修改中」是 success 綠色長按鈕，
+               被誤認成最重要的按鈕）；狀態靠 lock／lock-open 字形區分，文字進 tooltip 與 aria-label -->
+          <el-tooltip v-if="!viewOnly" :content="modifyLabel" placement="bottom">
+            <el-button
+              size="large"
+              circle
+              :aria-label="modifyLabel"
+              @click="emit('update:enableModify', !enableModify)"
+            >
+              <el-icon><i class="fa-solid" :class="enableModify ? 'fa-lock-open' : 'fa-lock'"></i></el-icon>
+            </el-button>
+          </el-tooltip>
           <el-dropdown v-if="!viewOnly" trigger="click" @command="onCommand">
             <el-button size="large" type="info">
               暫存<el-icon class="el-icon--right"><i class="fa-solid fa-chevron-down"></i></el-icon>
@@ -33,6 +45,7 @@
             </template>
           </el-dropdown>
           <FormStatusTags
+            class="form-toolbar__tags"
             :submit-count="submitCount"
             :last-submit-at="lastSubmitAt"
             :temp-found="tempFound"
@@ -42,15 +55,6 @@
         </div>
         <el-button v-if="hasLastSubmit" size="large" type="success" @click="emit('download-result')">
           下載上次結果
-        </el-button>
-        <el-button
-          v-if="!viewOnly"
-          size="large"
-          :type="enableModify ? 'success' : 'primary'"
-          @click="emit('update:enableModify', !enableModify)"
-        >
-          <el-icon class="el-icon--left"><i v-if="enableModify" class="fa-solid fa-pen-to-square"></i><i v-else class="fa-solid fa-lock"></i></el-icon>
-          {{ enableModify ? '修改中，點我鎖回唯讀' : '目前唯讀，點我修改' }}
         </el-button>
       </div>
       <!-- 手機收合後仍露出狀態 tag（#peek）：填答次數與備份狀態不該被 handle 藏起來。
@@ -69,17 +73,18 @@
 </template>
 
 <script setup>
+import { computed } from 'vue';
 import JwtCountdownBar from './JwtCountdownBar.vue';
 import CollapsibleControls from './CollapsibleControls.vue';
 import FormStatusTags from './FormStatusTags.vue';
 
 // 填問卷 drawer 的 sticky 控制列（Phase 9）：JWT 倒數條＋「暫存 ▾」dropdown＋
-// 下載上次結果＋編輯/唯讀雙態按鈕。drawer 為 with-header=false
+// 下載上次結果＋鎖頭圖示（編輯/唯讀雙態）。drawer 為 with-header=false
 // （標題是 body 內會捲走的 .drawer-flow-title），捲動時整條升到視窗最頂 y=0
 // （.drawer-sticky-top）。viewOnly 時只剩 JWT 條與（若有）下載鈕。
 // Phase 22：按鈕群包進 CollapsibleControls——手機往下捲時自動收成 handle
 // （JWT 條留著），點 handle 展開；桌機/平板不受影響。
-defineProps({
+const props = defineProps({
   showJwt: { type: Boolean, default: false },
   remainingTime: { type: Number, default: 0 },
   sessionPercentage: { type: Number, default: 0 },
@@ -97,6 +102,10 @@ defineProps({
   localDraftAt: { type: Number, default: 0 },
   onlineDraftAt: { type: Number, default: 0 },
 });
+
+const modifyLabel = computed(() =>
+  props.enableModify ? '修改中，點我鎖回唯讀' : '目前唯讀，點我解鎖修改'
+);
 
 const emit = defineEmits([
   'update:enableModify',
@@ -137,8 +146,8 @@ function onCommand(command) {
   margin-left: 0;
 }
 
-/* 「暫存 ▾」＋狀態 tag 群：桌機不獨佔一列——寬度貼齊內容，讓後面的
-   「下載上次結果」「鎖定/修改」接在同一列（暫存→tags→下載→鎖定）。
+/* 鎖頭＋「暫存 ▾」＋狀態 tag 群：桌機不獨佔一列——寬度貼齊內容，讓後面的
+   「下載上次結果」接在同一列（鎖頭→暫存→tags→下載）。
    手機才變成整寬左右對開（見下方 @media） */
 .form-toolbar__row {
   display: flex;
@@ -157,11 +166,14 @@ function onCommand(command) {
     width: 100%;
   }
 
-  /* 手機：暫存鈕與 tag 群整寬左右對開（暫存靠左、tag 靠右），
-     「下載上次結果」「鎖定/修改」維持各佔整列 */
+  /* 手機：鎖頭＋暫存鈕與 tag 群整寬左右對開（按鈕靠左、tag 靠右——左邊有兩顆，
+     不用 space-between 以免暫存鈕被推到正中間），「下載上次結果」維持佔整列 */
   .form-toolbar__row {
     width: 100%;
-    justify-content: space-between;
+  }
+
+  .form-toolbar__tags {
+    margin-left: auto;
   }
 
   .form-toolbar__row :deep(.el-button) {

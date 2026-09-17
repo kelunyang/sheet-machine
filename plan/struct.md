@@ -721,13 +721,15 @@ sticky 條（JwtCountdownBar/FormToolbar）捲動時才能越過標題升到 y=0
   `.drawer-sticky-top` sticky 釘住，捲動時升到視窗最頂 y=0、警告態點擊續約。
 - **FormToolbar**：填問卷 drawer 的 sticky 控制列：JWT 條＋「暫存 ▾」dropdown
   （線上暫存/匯出/匯入，匯入自動解鎖修改模式）＋下載上次結果＋編輯/唯讀雙態按鈕。
+  雙態按鈕（2026-09-17）是**不上色的圓形鎖頭圖示**（`fa-lock` 唯讀／`fa-lock-open` 修改中），
+  文字只進 tooltip 與 aria-label——原本是寫滿字的長按鈕、修改中為 success 綠，被使用者誤認成最重要的按鈕。
   主 drawer 動作按鈕收斂於此與 footer（送出 primary＋清除 danger／檢視完畢 info），
   內容流零按鈕。主流程 el-steps 步驟條已退役（Phase 13）——「我在哪」由
   `.drawer-flow-title` 承載、「後面還有簽名」的預告在 footer 主按鈕文案「完成填寫，前往簽名」。
   按鈕群（JWT 條除外）包在 CollapsibleControls 內，手機可收合（見下）。
-  Phase 27：**桌機**「暫存 ▾ → 狀態 tag 群 → 下載上次結果 → 鎖定/修改」全部同一列
+  Phase 27：**桌機**「鎖頭 → 暫存 ▾ → 狀態 tag 群 → 下載上次結果」全部同一列
   （`.form-toolbar__row` 寬度貼齊內容、不獨佔一列）；**手機**該列變成整寬左右對開
-  （暫存靠左、tag 靠右），下載與鎖定各佔一列。tag 群同時渲染進 CollapsibleControls 的 `#peek`，
+  （鎖頭＋暫存靠左、tag 靠右），下載佔一列。tag 群同時渲染進 CollapsibleControls 的 `#peek`，
   收合後仍露在 handle 上方。
 - **FormStatusTags**（Phase 27）：填寫狀態 tag 群，取代原本填寫 drawer 頂端那條 1.5em 的
   「填寫狀態」el-alert。三顆：`✓ 已填過 N 次`（success，`submitCount>0` 才出＝真的上傳過）／
