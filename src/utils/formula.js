@@ -307,6 +307,17 @@ export function computeCalcColumn(column, columnDB) {
 // 塞第三方 parser 不划算。這是 best-effort 的靜態檢查——抓得到打錯的欄位 ID、
 // 括號沒關、`=` 誤當比較這類實際會犯的錯，不保證文法完全正確；
 // 真正的把關在執行期 evaluator 的預設拒絕 ＋ 前端錯誤態（作者預覽時就看得到）
+// jsep 當成常值（Literal）的關鍵字，不是欄位 ID
+const CALC_KEYWORD_LITERALS = ['true', 'false'];
+
+// 把字串常值與數字常值換成空白。數字前一個字元不能是識別字字元，
+// 這樣 `S01` 裡的 01 不會被吃掉；`S01.5` 的 `.5` 也會留下來被當成屬性存取擋掉
+export function stripCalcLiterals(body) {
+  return body
+    .replace(/"[^"]*"|'[^']*'/g, ' ')
+    .replace(/(^|[^A-Za-z0-9_\u00A0-\uFFFF])(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/g, '$1 ');
+}
+
 export function validateCalcExpression(exprSource, allIds) {
   const errors = [];
   const lines = splitStatements(exprSource);
@@ -348,14 +359,18 @@ export function validateCalcExpression(exprSource, allIds) {
     if (/=>/.test(body)) {
       errors.push('第 ' + (i + 1) + ' 行出現 `=>`：運算式不支援函數定義');
     }
-    // 去掉字串常值後再看識別字，避免把選項文字當成欄位 ID
-    const stripped = body.replace(/"[^"]*"|'[^']*'/g, ' ');
+    // 去掉字串常值與數字常值後再看 `.` 與識別字：選項文字不能當成欄位 ID，
+    // 小數點（`0.9`）與指數（`1e3`）也不能被當成屬性存取或名稱
+    const stripped = stripCalcLiterals(body);
     if (/[.[]/.test(stripped)) {
       errors.push('第 ' + (i + 1) + ' 行出現 `.` 或 `[`：運算式不支援屬性存取或陣列');
     }
     const tokens = stripped.match(/[A-Za-z_\u00A0-\uFFFF][A-Za-z0-9_\u00A0-\uFFFF]*/g) || [];
     for (const token of tokens) {
       if (Object.prototype.hasOwnProperty.call(CALC_FUNCTIONS, token)) {
+        continue;
+      }
+      if (CALC_KEYWORD_LITERALS.indexOf(token) !== -1) {
         continue;
       }
       if (names.indexOf(token) !== -1) {

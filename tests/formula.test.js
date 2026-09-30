@@ -1,4 +1,5 @@
 // 計算欄（C-S）運算式引擎（Phase 30）
+import { readFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
 import {
   computeCalcColumn,
@@ -340,5 +341,54 @@ describe('上線前檢查器規則（與 tools/export.js 同規則）', () => {
 
   it('運算式空白回錯誤', () => {
     expect(validateCalcExpression('   ', ids)[0]).toMatch(/空的/);
+  });
+
+  it('小數點與指數不會被當成屬性存取或欄位 ID', () => {
+    expect(validateCalcExpression('S02 * 0.9', ids)).toEqual([]);
+    expect(validateCalcExpression('round(S02 * 1.05, 1) + .5', ids)).toEqual([]);
+    expect(validateCalcExpression('S02 * 1e3 + 2.5E-1', ids)).toEqual([]);
+    expect(validateCalcExpression('折扣 = 0.85; S02 * 折扣', ids)).toEqual([]);
+  });
+
+  it('欄位 ID 裡的數字不會被當成數字常值剝掉', () => {
+    expect(validateCalcExpression('S99 + 1', ids)[0]).toMatch(/「S99」/);
+    expect(validateCalcExpression('S02.5', ids).join()).toMatch(/屬性存取/);
+  });
+
+  it('true／false 是常值不是欄位 ID', () => {
+    expect(validateCalcExpression('S02 > 0 ? true : false', ids)).toEqual([]);
+  });
+});
+
+describe('tools/export.js 的計算欄檢查與 validateCalcExpression 同規則', () => {
+  const toolSource = readFileSync(new URL('../tools/export.js', import.meta.url), 'utf8');
+  const tool = new Function(
+    'LodashGS',
+    'SpreadsheetApp',
+    'PropertiesService',
+    'DocumentApp',
+    `${toolSource}\n;return { checkCalcExpression_ };`
+  )({ load: () => ({}) }, {}, { getScriptProperties: () => ({ getProperty: () => null }) }, {});
+  const ids = ['F01', 'S02', 'S03'];
+  // export.js 的錯誤訊息有欄位標籤與「計算欄」前綴，只比有沒有錯、錯幾條
+  const toolErrors = (expr) => {
+    const report = { errors: [], warnings: [] };
+    tool.checkCalcExpression_('{}::' + expr + '::0', ids, '', report);
+    return report.errors;
+  };
+
+  it.each([
+    'S02 * 0.9',
+    'round(S02 * 1.05, 1) + .5',
+    'S02 * 1e3 + 2.5E-1',
+    '折扣 = 0.85; S02 * 折扣',
+    'S02 > 0 ? true : false',
+    'S99 + 1',
+    'S02.5',
+    'window.localStorage',
+    '(S02 + 1',
+    'F01 = "甲" ? 1 : 0',
+  ])('%s', (expr) => {
+    expect(toolErrors(expr).length).toBe(validateCalcExpression(expr, ids).length);
   });
 });

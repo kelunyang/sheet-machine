@@ -1590,6 +1590,17 @@ function checkColumn_(column, allIds, report) {
 // **規則要與 src/utils/formula.js 的 validateCalcExpression 同步**（該側有測試）
 var CALC_FUNCTION_NAMES = ["countif", "filled", "sum", "min", "max", "abs", "floor", "ceil", "round", "match"];
 
+// jsep 當成常值（Literal）的關鍵字，不是欄位 ID
+var CALC_KEYWORD_LITERALS = ["true", "false"];
+
+// 把字串常值與數字常值換成空白。數字前一個字元不能是識別字字元，
+// 這樣 `S01` 裡的 01 不會被吃掉；`S01.5` 的 `.5` 也會留下來被當成屬性存取擋掉
+function stripCalcLiterals_(body) {
+  return body
+    .replace(/"[^"]*"|'[^']*'/g, " ")
+    .replace(/(^|[^A-Za-z0-9_\u00A0-\uFFFF])(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/g, "$1 ");
+}
+
 // 切行：引號內的分號不切（選項值可能是 "是;否"）
 function splitCalcStatements_(source) {
   let lines = [];
@@ -1671,7 +1682,8 @@ function checkCalcExpression_(content, allIds, label, report) {
     if (/=>/.test(body)) {
       report.errors.push(label + "計算欄第 " + (i + 1) + " 行出現 `=>`：運算式不支援函數定義");
     }
-    let stripped = body.replace(/"[^"]*"|'[^']*'/g, " ");
+    // 去掉字串常值與數字常值：小數點（`0.9`）與指數（`1e3`）不能被當成屬性存取或名稱
+    let stripped = stripCalcLiterals_(body);
     if (/[.[]/.test(stripped)) {
       report.errors.push(label + "計算欄第 " + (i + 1) + " 行出現 `.` 或 `[`：運算式不支援屬性存取或陣列");
     }
@@ -1679,6 +1691,7 @@ function checkCalcExpression_(content, allIds, label, report) {
     for (let t = 0; t < tokens.length; t++) {
       let token = tokens[t];
       if (CALC_FUNCTION_NAMES.indexOf(token) !== -1) { continue; }
+      if (CALC_KEYWORD_LITERALS.indexOf(token) !== -1) { continue; }
       if (names.indexOf(token) !== -1) { continue; }
       if (allIds === null) { continue; }
       if (allIds.indexOf(token) === -1) {

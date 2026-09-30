@@ -2379,6 +2379,8 @@ function writeRecord_(referSSID, recordSSID, token, record, accept, signatures, 
                       }
                     }
                   } else if(formatDetector('S', 'F', column)) {
+                    // 只管 F-S（下拉選單）。C-S 計算欄刻意沒有分支：一路 fall through、落地空字串——
+                    // 前端算的數字不可信，要落地得在後端用同一支 parser 重算（見 plan/issue.md）
                     let selections = column.content.split(";");
                     if(_.includes(selections, data.value)) {
                       column.value = data.value;
